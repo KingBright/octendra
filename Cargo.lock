@@ -3017,6 +3017,7 @@ dependencies = [
  "portable-pty",
  "regex",
  "remote-hosts-admin",
+ "remote-hosts-desktop-protocol",
  "remote-hosts-token-output",
  "reqwest",
  "rmcp",
@@ -3103,6 +3104,14 @@ dependencies = [
  "tokio",
  "uuid",
  "zstd",
+]
+
+[[package]]
+name = "remote-hosts-desktop-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "uuid",
 ]
 
 [[package]]

@@ -14,6 +14,8 @@ pub fn scope(name: &str) -> Option<&'static str> {
         "code_apply_edits" | "change_resume" | "workspace_gc" | "files_sync" | "file_upload"
         | "transfer_cancel" | "transfer_resume" | "outcome_resolve" => Some("code:write"),
         "terminal_exec" | "terminal_input" | "terminal_cancel" => Some("terminal:exec"),
+        "desktop_worker" => Some("desktop:input"),
+        "desktop_frame" => Some("desktop:observe"),
         _ => None,
     }
 }
@@ -31,10 +33,59 @@ pub fn validate(name: &str, arguments: &Value) -> Result<()> {
         .find(|t| t.name == name)
         .context("unknown tool")?;
     validate_node(&tool.input_schema, arguments, "$")?;
+    if name == "desktop_worker" {
+        let a: crate::agent::DesktopJob = serde_json::from_value(arguments.clone())
+            .map_err(|_| anyhow::anyhow!("invalid_arguments: desktop request envelope"))?;
+        ensure!(
+            a.capability_version > 0 && !a.task_id.is_nil(),
+            "invalid_arguments: desktop task/capability"
+        );
+        if let Some(id) = a.request.identity() {
+            ensure!(
+                id.task_id == a.task_id
+                    && a.device_id == Some(id.device_id)
+                    && !id.owner.is_empty()
+                    && id.owner.len() <= 128
+                    && id.desktop_id.len() <= 256,
+                "invalid_arguments: desktop identity"
+            );
+        }
+    }
+    if name == "desktop_frame" {
+        let a: crate::agent::DesktopFrameJob = serde_json::from_value(arguments.clone())
+            .map_err(|_| anyhow::anyhow!("invalid_arguments: desktop artifact envelope"))?;
+        ensure!(
+            !a.task_id.is_nil()
+                && !a.device_id.is_nil()
+                && !a.observed_operation_id.is_nil()
+                && a.capability_version > 0,
+            "invalid_arguments: desktop artifact identity"
+        );
+    }
     crate::maintenance_tasks::validate(name, arguments)
 }
 
 fn validate_node(schema: &Map<String, Value>, value: &Value, path: &str) -> Result<()> {
+    if schema.get("x-desktop-request") == Some(&json!(true)) {
+        let request: remote_hosts_desktop_protocol::Request = serde_json::from_value(value.clone())
+            .map_err(|_| anyhow::anyhow!("invalid_arguments: {path} desktop request"))?;
+        match request {
+            remote_hosts_desktop_protocol::Request::Open { lease_ms, .. } => ensure!(
+                lease_ms > 0 && lease_ms <= remote_hosts_desktop_protocol::MAX_LEASE_MS,
+                "invalid_arguments: lease"
+            ),
+            remote_hosts_desktop_protocol::Request::Act {
+                sequence, actions, ..
+            } => ensure!(
+                sequence > 0
+                    && !actions.is_empty()
+                    && actions.len() <= remote_hosts_desktop_protocol::MAX_ACTIONS,
+                "invalid_arguments: action bounds"
+            ),
+            _ => {}
+        }
+        return Ok(());
+    }
     if let Some(choices) = schema.get("enum").and_then(Value::as_array) {
         ensure!(
             choices.contains(value),
@@ -143,6 +194,32 @@ fn build_catalog() -> Vec<Tool> {
             tools.push(tool);
         }
     };
+    add(
+        "desktop_worker",
+        "Run one typed desktop operation using an explicitly authorized persistent owner/device/desktop capability. Each Open binds the current task and a short lease. Terminal/code permission does not grant desktop authority. Defaults unavailable.",
+        json!({"device_id":string(),"task_id":string(),"capability_version":integer(1,9223372036854775807u64),
+            "idempotency_key":string(),"request":{"type":"object","x-desktop-request":true,"description":"Strict tagged desktop protocol. Task/owner/device/desktop/epoch are checked again at admission.","oneOf":[{"type":"object","properties":{"operation":{"const":"open"},"identity":{"type":"object","properties":{"owner":{"type":"string"},"task_id":{"type":"string","format":"uuid"},"device_id":{"type":"string","format":"uuid"},"desktop_id":{"type":"string"}},"required":["owner","task_id","device_id","desktop_id"],"additionalProperties":false},"lease_ms":{"type":"integer","minimum":1,"maximum":30000}},"required":["operation","identity","lease_ms"],"additionalProperties":false},{"type":"object","properties":{"operation":{"enum":["observe","close"]},"binding":{"type":"object"}},"required":["operation","binding"],"additionalProperties":false},{"type":"object","properties":{"operation":{"const":"act"},"frame":{"type":"object"},"sequence":{"type":"integer","minimum":1},"actions":{"type":"array","minItems":1,"maxItems":16,"items":{"type":"object"}}},"required":["operation","frame","sequence","actions"],"additionalProperties":false},{"type":"object","properties":{"operation":{"const":"capabilities"}},"required":["operation"],"additionalProperties":false}]}}),
+        vec![
+            "device_id",
+            "task_id",
+            "capability_version",
+            "idempotency_key",
+            "request",
+        ],
+    );
+    add(
+        "desktop_frame",
+        "Export the complete owned pixels of an authorized Observe operation through the existing 4 MiB chunk/artifact channel. Requires matching owner/task/device/capability, active epoch and TTL. Accepts an operation UUID; no filesystem path.",
+        json!({"device_id":string(),"task_id":string(),"capability_version":integer(1,9223372036854775807u64),
+            "observed_operation_id":string(),"idempotency_key":string()}),
+        vec![
+            "device_id",
+            "task_id",
+            "capability_version",
+            "observed_operation_id",
+            "idempotency_key",
+        ],
+    );
     add(
         "task_context",
         "Restore one authorized cross-device task: linked operations, workspaces, execution states, evidence boundaries and the next existing handle. Read-only; never resumes or replays work. Follow next_page when has_more=true. No evidence of a task is not proof of a host rejection.",

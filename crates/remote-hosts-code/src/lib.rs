@@ -9,6 +9,7 @@ mod status_view;
 pub use capabilities::release_manifest;
 pub mod adapter;
 mod change_review;
+pub mod computer_use;
 pub mod contract;
 mod delivery;
 mod diagnostics;
@@ -57,6 +58,9 @@ use std::{
 };
 
 pub const SCOPES: &str = "code:read code:write terminal:exec";
+/// Supported desktop scopes require explicit OAuth consent and device registration.
+pub const SUPPORTED_SCOPES: &str =
+    "code:read code:write terminal:exec desktop:observe desktop:input";
 pub fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

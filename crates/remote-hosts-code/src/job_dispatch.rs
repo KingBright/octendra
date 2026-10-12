@@ -22,6 +22,8 @@ WHERE id NOT IN (SELECT value FROM json_each(?))
 AND (jobs.state='dispatched' OR
     (CASE WHEN json_extract(request,'$.tool') IN ('code_apply_edits','change_resume','workspace_gc','files_sync','file_upload','transfer_cancel','transfer_resume','outcome_resolve') THEN 'code:write'
     WHEN json_extract(request,'$.tool') IN ('terminal_exec','terminal_input','terminal_cancel') THEN 'terminal:exec'
+    WHEN json_extract(request,'$.tool')='desktop_worker' THEN 'desktop:input'
+    WHEN json_extract(request,'$.tool')='desktop_frame' THEN 'desktop:observe'
     ELSE 'code:read' END) IN (SELECT value FROM json_each(?)))
 AND (jobs.state='dispatched' OR NOT EXISTS (
     SELECT 1 FROM kv b WHERE b.kind='operation_task_authorization' AND b.key=jobs.id
@@ -43,7 +45,7 @@ AND (jobs.state='dispatched' OR NOT EXISTS (
 AND (json_extract(request,'$.tool') IN ('code_read','code_list','code_search','code_symbols','code_diff','workspace_context','terminal_read','terminal_cancel')
     OR EXISTS(SELECT 1 FROM kv c WHERE c.kind='transfer_control' AND c.key=jobs.id AND json_extract(c.value,'$.cancel_requested')=1)
     OR NOT EXISTS(SELECT 1 FROM kv WHERE kind='device_drain' AND key=jobs.device AND expires>unixepoch()))
-AND (CASE WHEN json_extract(request,'$.tool') IN ('file_upload','file_download') THEN 'transfer'
+AND (CASE WHEN json_extract(request,'$.tool') IN ('file_upload','file_download','desktop_frame') THEN 'transfer'
     WHEN json_extract(request,'$.tool') IN ('terminal_read','terminal_cancel','workspace_gc') THEN 'control'
     WHEN json_extract(request,'$.tool') IN ('terminal_exec','terminal_input') THEN 'terminal'
     WHEN json_extract(request,'$.tool') IN ('workspace_open','code_apply_edits','change_resume','files_sync') THEN 'write'
@@ -194,6 +196,32 @@ pub(crate) fn storage_error(stage: &'static str, error: &anyhow::Error) -> Respo
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn desktop_dispatch_requires_separate_scope_and_preserves_lane() {
+        let (_d, s) = fixture().await;
+        let worker = add(&s, "desktop_worker").await;
+        add(&s, "desktop_frame").await;
+        assert!(
+            claim(&s, &selection(), crate::now())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let mut allowed = selection();
+        allowed.scopes = r#"["desktop:input"]"#;
+        assert_eq!(
+            claim(&s, &allowed, crate::now()).await.unwrap().unwrap().0,
+            worker
+        );
+        let mut frame = selection();
+        frame.scopes = r#"["desktop:observe"]"#;
+        frame.lanes = r#"["read"]"#;
+        assert!(claim(&s, &frame, crate::now()).await.unwrap().is_none());
+        frame.lanes = r#"["transfer"]"#;
+        assert!(claim(&s, &frame, crate::now()).await.unwrap().is_some());
+    }
+
     fn selection() -> Selection<'static> {
         Selection {
             device: "device",

@@ -1,6 +1,96 @@
 use super::*;
 
 #[tokio::test]
+async fn desktop_observe_ack_full_frame_read_then_close_cleanup() {
+    let (_tmp, mut delivery) = fixture().await;
+    std::fs::create_dir_all(&delivery.config.roots[0]).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    Arc::make_mut(&mut delivery.config).gateway_url =
+        format!("http://{}", listener.local_addr().unwrap());
+    Arc::make_mut(&mut delivery.config).allow_exec = false;
+    Arc::make_mut(&mut delivery.config).allow_write = false;
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route(
+                "/device/result",
+                post(|| async { Json(json!({"accepted":true})) }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let mut agent_config = (*delivery.config).clone();
+    agent_config.gateway_url = "https://offline.invalid".into();
+    let mut agent = crate::agent::Agent::new(agent_config).await.unwrap();
+    let mut identity = crate::computer_use::transport::tests::identity();
+    identity.device_id = uuid::Uuid::parse_str(&agent.config.device_id).unwrap();
+    agent.desktop_workers = crate::computer_use::transport::tests::fixture(
+        &agent.config.state_dir,
+        &agent.config.state_dir.join("desktop.lock"),
+        &identity,
+        "normal",
+    )
+    .with_store(agent.store.clone());
+    let job = |request| crate::gateway::Job {
+        id: uuid::Uuid::new_v4().to_string(),
+        owner: identity.owner.clone(),
+        device_id: identity.device_id.to_string(),
+        tool: "desktop_worker".into(),
+        arguments: json!({"task_id":identity.task_id,"device_id":identity.device_id,"idempotency_key":uuid::Uuid::new_v4(),"capability_version":7,"request":request}),
+    };
+    let opened = agent
+        .execute(&job(remote_hosts_desktop_protocol::Request::Open {
+            identity: identity.clone(),
+            lease_ms: 30000,
+        }))
+        .await
+        .unwrap();
+    let binding: remote_hosts_desktop_protocol::Binding =
+        serde_json::from_value(opened["binding"].clone()).unwrap();
+    let observe = job(remote_hosts_desktop_protocol::Request::Observe {
+        binding: binding.clone(),
+    });
+    agent
+        .execute_with_delivery(&observe, Some(&delivery))
+        .await
+        .unwrap();
+    let claimed = delivery.claim().await.unwrap().unwrap();
+    delivery
+        .deliver(&reqwest::Client::new(), claimed)
+        .await
+        .unwrap();
+    let saved: Value = agent
+        .store
+        .get("local_operation", &observe.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(saved.get("result").is_none());
+    assert_eq!(saved["gateway_accepted"], true);
+    assert_eq!(agent.read_desktop_frame(&observe).await.unwrap(), b"abcdef");
+    let mut foreign = observe.clone();
+    foreign.owner = "another-owner".into();
+    assert!(agent.read_desktop_frame(&foreign).await.is_err());
+    agent
+        .execute(&job(remote_hosts_desktop_protocol::Request::Close {
+            binding,
+        }))
+        .await
+        .unwrap();
+    assert!(agent.read_desktop_frame(&observe).await.is_err());
+    assert!(
+        !agent
+            .config
+            .state_dir
+            .join("desktop-frames")
+            .join(&observe.id)
+            .exists()
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn idle_outbox_and_unchanged_health_do_not_need_a_writer() {
     let (_tmp, d) = fixture().await;
     Delivery::status(&d.store, &d.config).await.unwrap();

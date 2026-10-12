@@ -82,7 +82,10 @@ impl Auth {
         let spark = client.is_spark_account_linking();
         let mut granted = Vec::new();
         for scope in requested.unwrap_or(super::SCOPES).split_whitespace() {
-            if super::SCOPES.split_whitespace().any(|known| known == scope) {
+            if crate::SUPPORTED_SCOPES
+                .split_whitespace()
+                .any(|known| known == scope)
+            {
                 granted.push(scope);
             } else if !(spark
                 && matches!(

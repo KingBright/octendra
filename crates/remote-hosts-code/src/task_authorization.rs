@@ -409,7 +409,7 @@ async fn update(
             || scopes.is_empty()
             || scopes
                 .iter()
-                .any(|s| !crate::SCOPES.split_whitespace().any(|v| v == s))
+                .any(|s| !crate::SUPPORTED_SCOPES.split_whitespace().any(|v| v == s))
             || devices.iter().any(|id| {
                 !g.config
                     .devices

@@ -87,7 +87,11 @@ fn receiver_error_status(error: &anyhow::Error) -> StatusCode {
 }
 async fn authorized(g: &Gateway, h: &HeaderMap, id: &str) -> Result<Job> {
     let job = transfer_control::device_job(g, h, id).await?;
-    ensure!(job.tool == "file_download", "export required");
+    ensure!(
+        matches!(job.tool.as_str(), "file_download" | "desktop_frame"),
+        "export required"
+    );
+    let job = transfers::desktop_export_job(g, job).await?;
     ensure!(
         !transfer_control::control(g, id).await?.cancel_requested,
         "transfer_cancelled"
@@ -177,6 +181,11 @@ async fn initialize(
             used.saturating_sub(uncommitted).saturating_add(size as u64) <= transfers::DISK_CAP,
             "gateway_storage_limit"
         );
+        if job.tool == "desktop_frame" {
+            let (count,used):(i64,i64)=sqlx::query_as("SELECT COUNT(*),COALESCE(SUM(json_extract(k.value,'$.size')),0) FROM kv k JOIN jobs j ON j.id=k.key WHERE k.kind='transfer_receiver' AND json_extract(j.request,'$.tool')='desktop_frame' AND json_extract(k.value,'$.expires')>?")
+                .bind(now()).fetch_one(&g.store.pool).await?;
+            ensure!(count < 2 && used >= 0 && used as usize + size <= 32*1024*1024, "desktop artifact storage_limit");
+        }
         transfers::ensure_storage_capacity(&g.config.state_dir, size as u64)?;
         let path = part(&g, &id);
         let mut opts = std::fs::OpenOptions::new();
@@ -210,7 +219,7 @@ async fn initialize(
             size,
             sha256: sha.into(),
             offset: 0,
-            expires: now() + RETENTION,
+            expires: job.arguments["artifact_expires_at"].as_i64().unwrap_or(now() + RETENTION),
             completed: false,
         };
         g.store.put("transfer_receiver", &id, &s, i64::MAX).await?;
@@ -377,7 +386,9 @@ async fn complete(State(g): State<Gateway>, Path(id): Path<String>, h: HeaderMap
             name,
             size: s.size,
             sha256: s.sha256.clone(),
-            expires: now() + 3600,
+            expires: job.arguments["artifact_expires_at"]
+                .as_i64()
+                .unwrap_or(now() + 3600),
         };
         g.store.put("file_blob", &id, &blob, i64::MAX).await?;
         s.completed = true;
@@ -402,7 +413,9 @@ async fn abort(State(g): State<Gateway>, Path(id): Path<String>, h: HeaderMap) -
         Ok(j) => j,
         Err(_) => return StatusCode::FORBIDDEN.into_response(),
     };
-    if job.tool != "file_download" || !control_cancelled(&g, &id).await {
+    if !matches!(job.tool.as_str(), "file_download" | "desktop_frame")
+        || !control_cancelled(&g, &id).await
+    {
         return StatusCode::FORBIDDEN.into_response();
     }
     let Ok(_permit) = g.transfer_limits.try_acquire(&job.device_id, &id) else {

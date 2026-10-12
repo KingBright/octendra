@@ -226,7 +226,7 @@ impl Gateway {
             ensure!(
                 d.scopes
                     .iter()
-                    .all(|s| crate::SCOPES.split_whitespace().any(|x| x == s)),
+                    .all(|s| crate::SUPPORTED_SCOPES.split_whitespace().any(|x| x == s)),
                 "invalid device scope"
             );
         }
@@ -566,7 +566,7 @@ impl Gateway {
         if name == "task_context" {
             return crate::activity::task(self, p, &args).await;
         }
-        let device = if name == "workspace_open" {
+        let device = if matches!(name, "workspace_open" | "desktop_worker" | "desktop_frame") {
             files::text(&args, "device_id")?
         } else {
             files::text(&args, "workspace_id")?
@@ -589,7 +589,9 @@ impl Gateway {
         let task_binding =
             crate::task_authorization::requested(self, p, name, &args, device).await?;
         if let Some(object) = args.as_object_mut() {
-            object.remove("task_id");
+            if !matches!(name, "desktop_worker" | "desktop_frame") {
+                object.remove("task_id");
+            }
             object.remove("authorization_version");
         }
         let signals = self.signals.get(device).context("unknown device")?;
@@ -633,6 +635,15 @@ impl Gateway {
             tool: name.into(),
             arguments: args.clone(),
         };
+        if name == "desktop_worker" {
+            let a: crate::agent::DesktopJob = serde_json::from_value(job.arguments.clone())?;
+            if !matches!(a.request, crate::computer_use::Request::Capabilities {}) {
+                a.identity(&job)?;
+            }
+        }
+        if name == "desktop_frame" {
+            crate::transfers::desktop_artifact(self, &job).await?;
+        }
         let existing: Option<(String, String)> =
             sqlx::query_as("SELECT id,fingerprint FROM jobs WHERE idem=?")
                 .bind(&idem)
@@ -1687,6 +1698,11 @@ async fn receipt(
         Ok(crate::job_receipts::Outcome::Conflict) => return StatusCode::CONFLICT.into_response(),
         Err(error) => return crate::job_receipts::storage_response(&receipt.operation_id, &error),
     };
+    if let Err(error) =
+        crate::transfers::retire_desktop_epoch(&g, &receipt.operation_id, &receipt.result).await
+    {
+        return crate::job_receipts::storage_response(&receipt.operation_id, &error);
+    }
     if let Some(signals) = g.signals.get(&device) {
         signals.results.notify_waiters();
     }
