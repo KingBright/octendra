@@ -74,6 +74,7 @@ uuid = { version = "1.23.4", features = ["serde", "v4", "v5", "v7"] }
 zeroize = { version = "1.9.0", features = ["derive"] }
 zstd = "0.13.3"
 
-# Keep cryptographic hashing representative within fixed desktop test leases.
-[profile.test.package.sha2]
+# Full-frame desktop tests keep the real 30-second lease and all hash checks.
+# Use release-speed SHA-256 so debug hashing does not consume that lease.
+[profile.test.package."sha2@0.10.9"]
 opt-level = 3

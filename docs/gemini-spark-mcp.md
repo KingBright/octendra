@@ -1,0 +1,172 @@
+# Gemini Spark / standard OAuth MCP clients
+
+## Scope and release status
+
+This change extends the existing `remote-hosts-code` Gateway. It does not introduce a second
+Gateway, an operator API exposure, a new database, a browser automation bridge, or an Agent wire
+protocol. The same tools and authorization scopes serve ChatGPT and other MCP clients.
+
+**An in-process test pass is not a live Gemini connection acceptance.** Production rollout must
+also configure the real user's exact callback and verify the real Gemini authorization + MCP
+sequence. Do not describe this feature as deployed merely because code or an artifact exists.
+
+The server supports:
+
+- Streamable HTTP at the existing `/mcp` resource and the existing OAuth discovery endpoints.
+- DCR and local pre-registration, sharing one registration implementation and client store.
+- `none`, `client_secret_basic`, and `client_secret_post`. The registered method is enforced for
+  code exchange, refresh, and confidential-client revocation. Missing DCR auth method defaults to
+  `client_secret_basic` per RFC 7591; existing ChatGPT/public clients keep their `none` registration.
+- S256 PKCE and an exact resource audience remain mandatory, including for confidential clients.
+  From 0.10.21, Spark's `client_secret_post` registration may omit the `resource` parameter
+  during authorization, code exchange, and refresh only when every registered callback is in
+  the bounded Google Account Linking family below. The server binds it to its one configured
+  `/mcp` resource. Explicit empty or different resources are rejected; public clients, ordinary
+  callbacks, and mixed callback registrations still require the parameter. Client-provided
+  names never select this compatibility behavior. Stored grants, tokens, PKCE, client secrets,
+  owner consent, and audience enforcement are unchanged.
+  The same bounded Spark registration may include Google's exact consent markers
+  `ACCESS_VIEW_MANAGE_MCP_CONTENT`, `SHARE_THROUGH_MCP_CONVERSATION_INFO`, and
+  `TRIGGER_TOOLS_AND_FUNCTION`. These markers are removed before creating the grant;
+  they never grant Gateway privileges. At least one Gateway scope must remain, and
+  unknown scopes are rejected. Tokens return only the actual granted Gateway scopes.
+- New client secrets are returned once and stored only as hashes. The CLI writes a new mode-0600
+  file atomically and refuses to overwrite an existing file. No secret is printed to stdout.
+- Failed client authentication, wrong resource, wrong callback, or wrong PKCE cannot consume a
+  legitimate authorization code. Refresh markers bind to the client and are committed atomically.
+
+## Configuration
+
+`redirect_uris` contains complete, exact OAuth callback URLs. `allowed_origins` contains exact
+browser origins. These lists have different purposes and neither grants access by itself.
+
+Older configuration files without `allowed_origins` enable both supported hosted MCP clients:
+`https://chatgpt.com` and `https://gemini.google.com`. The Gateway's own origin is always included.
+Both HTTP security layers use the same list.
+
+OAuth callbacks remain exact for ordinary clients. From 0.10.20, Gemini Spark DCR accepts its
+observed six-callback registration: HTTPS on the exact `oauth-redirect.googleusercontent.com`,
+`oauth-redirect-sandbox.googleusercontent.com`, or `oauth-redirect-test.googleusercontent.com`
+host, with `/r/user_bound_custom-mcp-` or `/a/user_bound_custom-mcp-` followed by one bounded
+URL-safe suffix. The registration limit is six, and every entry must pass validation. The concrete callback is
+then stored on that registered client and every authorize/token exchange still has to match it
+exactly. This deliberately does **not** allow `*.googleusercontent.com`, arbitrary Google paths,
+query-bearing callbacks, fragments, or browser origins as OAuth callbacks. The authorization CSP
+adds the active callback's exact Google Account Linking origin; test/sandbox browser request
+origins are not added to the CORS allowlist.
+
+From 0.10.22, an authorization using the bounded Google callback family also permits
+the exact `https://gemini.google.com` origin in `form-action`. Chrome checks this directive
+across the full form redirect chain: `/oauth/approve` returns 303 to Google's callback,
+which returns 302 to Gemini `/apps`. Omitting the final origin leaves the password page
+visible even though the Gateway has issued an authorization code. This continuation is
+not an OAuth callback registration or a CORS grant. Ordinary and native callbacks do not
+receive it, and wildcard origins remain forbidden.
+
+Manual/pre-registered credentials still use a complete exact callback from the real Gemini flow.
+Callback URLs, account identifiers, credentials, and live deployment receipts belong in the
+private ops profile, not in this public repository.
+
+Validate the updated configuration before restarting:
+
+```sh
+remote-hosts-code check --config /private/setup/gateway.json
+```
+
+## Connect
+
+Prefer dynamic registration: use the Gateway's public `/mcp` URL in Gemini's custom app dialog,
+then complete the owner login and consent. Registration alone never grants access.
+
+For the advanced-settings route, pre-register using the exact callback already configured:
+
+```sh
+remote-hosts-code register-oauth-client \
+  --gateway-config /private/setup/gateway.json \
+  --name 'Gemini Spark' \
+  --redirect-uri "$EXACT_GEMINI_CALLBACK" \
+  --auth-method client_secret_basic \
+  --output /private/setup/gemini-oauth-client.json
+```
+
+Use the resulting client ID and client secret in Gemini's advanced settings. They are not a
+Gemini API key, a Gateway owner password, or an Agent credential. The registration CLI modifies
+only the selected Gateway state and the new credential file; it does not modify configuration,
+restart services, or expose a public administrator registration endpoint.
+
+The authorization page displays the client-provided name as unverified, the concrete client ID,
+the exact redirect, scopes, and the terminal authority warning. Tool write annotations remain
+honest. Host-side confirmation behavior is owned by Gemini, not bypassed by the Gateway.
+
+## Acceptance
+
+Run `cargo test -p remote-hosts-code --test oauth_clients` and the existing integration/regression
+suite. The new tests exercise the actual in-process HTTP router, not mocked auth-success paths.
+Then verify on an isolated staging state before the production cutover:
+
+1. Real Spark discovery, dynamic registration (including its `user_bound_custom-mcp-*` callback),
+   owner authorization, token exchange, `initialize`, `tools/list`, and `devices_list`.
+2. On the explicitly selected device, open a test workspace and compare a known file range with
+   the real file. With confirmation, edit only a disposable test file, execute a harmless command,
+   and follow its existing operation/terminal rather than replaying it.
+3. Refresh and revocation; no client can exchange another client's code, refresh its tokens, or
+   revoke its grants. Confirm the existing ChatGPT connection still works.
+4. Record artifact identity separately from the source tree, installed binary, running process,
+   and live client acceptance. Agents do not need a fleet upgrade for this change alone.
+
+Conversation attachment import is not declared Gemini-compatible by this change. Its host file
+reference/authorization contract must be verified separately; do not expand the URL allowlist to
+arbitrary external sources.
+
+### Live acceptance, 2026-09-22
+
+Gateway 0.10.22 (`d863a96`) was built from frozen snapshot
+`962de77e1adebe279bb00dbef30efeef93edfeec52c338bc523230d1097df42e` on Mac Studio.
+The final verification passed 762 tests (473 Rust, 289 Python), with zero failures;
+two benchmarks were ignored and three Python cases were skipped. Formatting, strict Clippy,
+workspace checks and all three release builds passed. The immutable bundle SHA-256 is
+`7eed0dcebc309a374c37f17e606f066765b710dd133ac6e0b1ba5f106a8a5fe5`.
+Only the Gateway was upgraded. Its installed and running identity was verified; all four
+0.10.19 Agents remained online and wire-compatible.
+
+The real Chrome flow reused the signed-in Google session, completed Google consent and one
+Gateway password submission, and automatically returned to Gemini `/apps`. Gemini synchronized
+24 tools and saved the enabled custom app as `Remote Hosts`. A new Spark task actually invoked
+`devices_list` and returned all four authorized devices online, covering two macOS devices,
+Linux and Windows. The test prompt did not supply the expected device names.
+
+In the same Spark task, `workspace_open` selected the Mac Studio project and `code_read`
+returned `README.md` lines 1–12. The returned file SHA-256 matched a separate managed read
+on that device. Spark requested `response_mode: full` for workspace information while
+retaining the same idempotency key; its expected workspace confirmations were completed.
+Host behavior for compact structured results still deserves a dedicated regression matrix.
+The file check performed no edits or terminal execution through Spark.
+
+Spark's first task view remained on initialization/processing after the underlying task completed.
+Refreshing and reopening that same task displayed its saved result; no replacement task or
+Gateway command replay was needed. This is a client-view observation, not a proven root cause
+in Spark. Private receipts and screenshots are retained under `spark-mcp-20260922`; account
+identifiers, OAuth query strings and credentials are excluded from this document.
+
+This acceptance does not establish Gemini attachment interoperability, a complete refresh/revoke
+browser matrix, or the expanded four-device failure-injection matrix.
+
+## Rollback boundary
+
+Gateway configuration and OAuth state must be part of the rollback plan. Old binaries deny unknown
+configuration keys and do not implement confidential-client authentication. New confidential-client
+identities and grants therefore use `rh2_` opaque values and separate `oauth2_*` kinds in the same KV
+store. A pre-feature binary cannot discover those grants and accidentally skip client authentication.
+Public-client state retains its original kinds and refresh-replay string format; additional ownership
+binding is a separate row committed in the same transaction. This requires no second database.
+
+A rollback still needs a verified configuration without unsupported keys and an actual compatibility
+test of the chosen old binary. Preserve unrelated live device/workspace work; do not restore an entire
+old database blindly. An in-process namespace regression is not proof of a successful production rollback.
+
+## References
+
+- Google custom apps: https://support.google.com/gemini/answer/17209137
+- MCP authorization: https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization
+- OAuth registration/auth methods: https://www.rfc-editor.org/rfc/rfc7591
+- HTTP Basic client authentication: https://www.rfc-editor.org/rfc/rfc6749#section-2.3.1

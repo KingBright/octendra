@@ -1,0 +1,19 @@
+{
+  "enabled": false,
+  "app_id": "io.github.KingBright.RemoteHosts.DesktopWorker",
+  "desktop_uid": 1000,
+  "desktop_session": "REQUIRES_CURRENT_SESSION",
+  "identity": {
+    "owner": "REQUIRES_AUTHENTICATED_OWNER",
+    "task_id": "00000000-0000-0000-0000-000000000000",
+    "device_id": "02f29fa0-48c1-4e31-a345-90aa88467323",
+    "desktop_id": "REQUIRES_CURRENT_DESKTOP"
+  },
+  "worker_sha256": "REQUIRES_BUILT_BINARY_HASH",
+  "agent_sha256": "REQUIRES_LAUNCHING_AGENT_HASH",
+  "expires_at_ms": 0,
+  "logical_size": [0, 0],
+  "logical_position": [0, 0],
+  "max_frame_bytes": 8388608,
+  "allow_input": false
+}

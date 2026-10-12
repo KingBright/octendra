@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "project": "remote_hosts",
-  "updated_at": "2026-09-11",
+  "updated_at": "2026-10-09",
   "source_of_truth": "docs/product/backlog.json",
   "status_policy": {
     "open": "未实现或尚未定位",
@@ -12,15 +12,24 @@
     "closed": "已满足该项验收且附证据；代码存在不能关闭"
   },
   "release_policy": {
-    "package_manifest_sha256": "8e40977a4fc83d6999c89bcccf70bae160b5aca58cf89f5f82b4302ba4b9f5e2",
+    "package_manifest_sha256": "fecca9fa24a03fac4f096c7a25a0910fc2dbf6cc91bf9acb8bb6fe279abdda56",
     "deployment_state_source": "private deployment/runtime system; not this public backlog",
     "close_only_with_acceptance_evidence": true,
     "all_known_issues_must_be_fixed_before_every_release": false,
     "rule": "公共 backlog 记录产品问题和 repository/release facts；真实 release targets、installed/running/accepted 状态和现场 receipts 属于 private deployment/runtime system。",
-    "last_packaged_release": "0.9.0",
-    "last_packaged_validation": "0.9.0 fixed-source pipeline passed 372 tests (239 Rust + 133 Python, 0 failed), format, strict Clippy, workspace check, macOS ARM64 release build and Linux x86_64-musl release build.",
-    "current_main_state": "post-0.9.0 unreleased source changes",
-    "current_source_validation": "379 passed / 0 failed (239 Rust + 140 Python), plus fmt, strict Clippy and workspace check; no new immutable package was produced by this separation refactor."
+    "last_packaged_release": "0.10.22",
+    "last_packaged_validation": "Frozen snapshot 962de77e1adebe279bb00dbef30efeef93edfeec52c338bc523230d1097df42e: 762 passed, 0 failed (473 Rust, 289 Python), 2 Rust ignored, 3 Python skipped; fmt, strict Clippy, workspace check and all three platform release builds passed.",
+    "current_main_state": "0.10.27 Gateway source at b55e061; terminal observation recovery changes are release-Python only. Installed/running state is tracked separately.",
+    "current_source_validation": "Frozen 0.10.27 Linux Gateway component verification passed 42 tests plus fmt, strict Clippy and component check. Controller terminal-continuation verification is recorded in docs/iterations/2026-10-09-terminal-continuation/verification.json; this does not replace the earlier full-platform package verification.",
+    "last_component_packaged_release": {
+      "version": "0.10.27",
+      "component": "remote-hosts-code Gateway",
+      "platform": "Linux x86_64 musl only",
+      "source_commit": "b55e061a1d88a9975125cbacc6761c1b321600c3",
+      "snapshot_id": "0b1556c3ff430a9aca27946a832cda271a52e186eb1da0bd400566b53c4b9b6b",
+      "passed_tests": 42,
+      "bundle_sha256": "7929e68ace1265f89ab92e70cdf0f6eeecec0dc8324cea949f343566f26f0e60"
+    }
   },
   "milestones": [
     {
@@ -74,6 +83,14 @@
     {
       "version": "0.7.1",
       "goal": "修复跨版本接收端暂态持久化错误被误报永久409；补齐发布/验收器动态观察字段边界。"
+    },
+    {
+      "version": "0.10.19",
+      "goal": "原生桌面 OAuth 接入及发布客户端传输诊断；本轮评估见 DESKTOP-REVIEW-2026-09-22.md，现场状态留在 private ops。"
+    },
+    {
+      "version": "0.10.22",
+      "goal": "打通真实 Gemini Spark 授权和工具调用，保持原生桌面、ChatGPT 与四台 Agent 的兼容边界；现场回执留在 private ops。"
     }
   ],
   "items": [
@@ -261,12 +278,12 @@
     {
       "id": "RH-009",
       "priority": "P1",
-      "status": "partial",
-      "target_version": "0.4.1",
+      "status": "candidate_verified",
+      "target_version": "0.10.20",
       "title": "传输重试状态机与错误结果永久done",
       "discovery": "code_review",
       "problem": "可恢复传输错误当前也作为done结果；同一幂等键只返回旧失败，不能刷新授权继续。",
-      "current_resolution": "0.4.1短控制事务提前取得写意向；8路同幂等恢复只形成一个代际，避免读转写SQLITE_BUSY。未来代际回执不再被当作过期成功确认，缺少代际结果不能覆盖新尝试。全回归通过，NAS/MacBook已安装，Studio未安装。",
+      "current_resolution": "Python 发布协调器原操作接续断层已修复，默认 Client.tool 仍抛 OperationIncomplete；显式传输恢复保留原 operation、SHA 和绑定 transfer_revision 的幂等键，300秒及默认最多两次resume，异常/确认丢失/确定失败/outcome_unknown停止而不重发上传下载。新增 acceptance-only 原传输入口借用已有授权，绕过登录、分发和部署。固定隔离验收36项协调器测试与10项真实Rust协议测试通过，含HTTP403源失效、明确同源刷新、新进程续传、夹具Gateway进程终止后检查点恢复及借用授权CLI异常脱敏；独立交付分支完整Python门禁328项中327通过、1项一次性launchd探针未启用而跳过。候选已验证，正式已安装fleet的故障/重启验收仍未运行，不等同线上关闭；无正式服务或凭据变更。",
       "acceptance": [
         "临时故障恢复同一任务；确定失败不可盲重放；发布后丢回执只补回执。"
       ],
@@ -277,12 +294,20 @@
         "docs/releases/0.4.0/workflow-acceptance-q1.json",
         "docs/releases/0.4.1/verification.json",
         "docs/releases/0.4.1/deployment.json",
-        "docs/releases/0.4.1/incidents.json"
+        "docs/releases/0.4.1/incidents.json",
+        "docs/product/DESKTOP-REVIEW-2026-09-22.md",
+        "scripts/release_client.py",
+        "scripts/fleet-upgrade.py",
+        "scripts/tests/test_fleet_transfer_recovery.py",
+        "scripts/check-transfer-recovery.py",
+        "scripts/tests/test_fleet_transfer_acceptance.py",
+        "crates/remote-hosts-code/src/durable_transfer_tests.rs",
+        "docs/transfer-recovery-acceptance.md"
       ],
       "depends_on": [],
       "owner": "Remote Hosts 维护者（用户 / ChatGPT / Codex）",
       "introduced_or_observed": "0.2.0 or 0.3.0 candidate",
-      "last_reviewed": "2026-09-11",
+      "last_reviewed": "2026-10-05",
       "closure_evidence": []
     },
     {
@@ -455,7 +480,7 @@
       "title": "短命令与观察操作的多层轮询",
       "discovery": "observed_in_conversation",
       "problem": "exec可能pending，read又pending，额外往返；code_read也多次需要operation_get。",
-      "current_resolution": "已上线最多20项批量operation_get、5秒有界等待和状态指纹，旧单ID保持兼容。线上只读验证顺序、原结果、重复ID拒绝与不变游标通过；仍非完整事件回放或统一终端观察，精确预算等后续见RH-045。",
+      "current_resolution": "已上线最多20项批量operation_get、5秒有界等待和状态指纹，旧单ID保持兼容。线上只读验证顺序、原结果、重复ID拒绝与不变游标通过；仍非完整事件回放或统一终端观察，精确预算等后续见RH-045。 2026-10-09 发布 Python 客户端修复预算省略丢失 terminal 元数据后的接续断层：新增 observe_terminal 只观察原 operation，身份缺失仅做一次有界查询，已知身份从原日志精确字节游标恢复，最终页必须有完整持久回执。15项固定回归与38项原生通道/路由回归通过；断连不自动重启或切换传输。仅控制器候选，未重新部署生产；完整事件回放、故障矩阵和其余观察范围仍未关闭。 最终完整Python门禁444项：442通过、1项既有公共仓库实例边界检查失败、1项可选launchd探针跳过；四个失败涉及文件与本轮基线HEAD一致，完整门禁不能标为通过。",
       "acceptance": [
         "短命令尽量一次返回退出码与首屏；长任务不重派发；同终端增量输出不漏不重复。"
       ],
@@ -466,34 +491,39 @@
         "docs/releases/0.3.1/deployment.json",
         "docs/releases/0.3.2/RELEASE.md",
         "docs/releases/0.3.2/deployment.json",
-        "docs/releases/0.3.2/verification-final.json"
+        "docs/releases/0.3.2/verification-final.json",
+        "scripts/release_client.py",
+        "scripts/tests/test_terminal_observation_recovery.py",
+        "docs/native-release-client.md",
+        "docs/iterations/2026-10-09-terminal-continuation/verification.json"
       ],
       "depends_on": [],
       "owner": "Remote Hosts 维护者（用户 / ChatGPT / Codex）",
       "introduced_or_observed": "0.2.0 or 0.3.0 candidate",
-      "last_reviewed": "2026-09-10",
+      "last_reviewed": "2026-10-09",
       "closure_evidence": []
     },
     {
       "id": "RH-017",
       "priority": "P1",
-      "status": "open",
-      "target_version": "0.3.1",
+      "status": "partial",
+      "target_version": "0.10.20",
       "title": "分层错误码与耗时追踪",
       "discovery": "observed_and_review",
       "problem": "tool_failed消息不足以区分宿主拦截、排队、网络、Agent执行、回执失败。",
-      "current_resolution": "统一error_code/stage/retryable/outcome/recovery/trace_id及queue/lock/execute/return计时；未知阶段标unknown。",
+      "current_resolution": "0.10.19 已有工具执行分层诊断和发布客户端 HTTP/TLS 元数据；Agent poll 仍只报告 HTTP 400，无法直接定位 receipt_delivery 时间校验。需返回固定、脱敏的校验字段原因，并区分入口、认证、协议、时钟、存储和传输控制故障。",
       "acceptance": [
         "所有常见失败都有下一动作；日志关联同一操作且不泄漏命令敏感值；不能把平台拦截记成测试失败。"
       ],
       "evidence": [
         "crates/remote-hosts-code/src/agent.rs",
-        "crates/remote-hosts-code/src/gateway.rs"
+        "crates/remote-hosts-code/src/gateway.rs",
+        "docs/product/DESKTOP-REVIEW-2026-09-22.md"
       ],
       "depends_on": [],
       "owner": "Remote Hosts 维护者（用户 / ChatGPT / Codex）",
       "introduced_or_observed": "0.2.0 or 0.3.0 candidate",
-      "last_reviewed": "2026-09-10",
+      "last_reviewed": "2026-09-22",
       "closure_evidence": []
     },
     {
@@ -794,12 +824,12 @@
     {
       "id": "RH-028",
       "priority": "P1",
-      "status": "closed",
-      "target_version": "0.3.5",
+      "status": "partial",
+      "target_version": "0.10.x",
       "title": "验收脚本固定0.2.0及跨版本复用回执",
       "discovery": "code_review",
       "problem": "脚本写死版本并可复用旧报告中的已验收设备。",
-      "current_resolution": "版本、run_id、选中设备集合和临时OAuth撤销均由回执校验；0.3.5真实验收摘要准确报告1个MacBook，单/双设备及错误范围回归已纳入258项验证。",
+      "current_resolution": "0.10.19 现场修复回执协议 1/2 兼容、原操作持久证据比较、Windows Python 命令编码、校验器 SHA/不可变包身份绑定，并复用原生 MCP 发布客户端。39 项验收脚本和 32 项客户端回归通过；原生 Codex 四设备通过。扩展标准验收在 MacBook 高负载期间命令超时，完整四机报告仍未完成，保留 partial。",
       "acceptance": [
         "0.3.0接收新版版本参数；旧版报告不得复用为新版通过；仅探测选中设备。"
       ],
@@ -812,17 +842,14 @@
         "docs/releases/0.3.2/verification-final.json",
         "docs/releases/0.3.5/deployment.json",
         "docs/releases/0.3.5/verification.json",
-        "docs/releases/0.3.5/acceptance-macbook.json"
+        "docs/releases/0.3.5/acceptance-macbook.json",
+        "docs/product/DESKTOP-REVIEW-2026-09-22.md"
       ],
       "depends_on": [],
       "owner": "Remote Hosts 维护者（用户 / ChatGPT / Codex）",
       "introduced_or_observed": "0.2.0 or 0.3.0 candidate",
-      "last_reviewed": "2026-09-10",
-      "closure_evidence": [
-        "docs/releases/0.3.5/deployment.json",
-        "docs/releases/0.3.5/verification.json",
-        "docs/releases/0.3.5/acceptance-macbook.json"
-      ]
+      "last_reviewed": "2026-09-22",
+      "closure_evidence": []
     },
     {
       "id": "RH-029",
@@ -901,23 +928,24 @@
     {
       "id": "RH-031",
       "priority": "P1",
-      "status": "open",
-      "target_version": "0.3.1",
-      "title": "CI故障注入、跨平台和原生网页验收门禁",
+      "status": "partial",
+      "target_version": "0.10.x",
+      "title": "本机故障注入、跨平台和原生宿主验收",
       "discovery": "code_review",
       "problem": "本机合成HTTP不覆盖NAS/公网/原生附件/所有OS；历史测试数不能代替场景。",
-      "current_resolution": "建立测试矩阵：正常、慢流、断网、重启、磁盘/权限/额度/交互取消；每门禁附证据。",
+      "current_resolution": "Mac Studio 固定源码验证与三平台构建已建立，禁止新增 GitHub Actions 发布门禁。继续补本机故障注入、跨平台运行、真实宿主附件和恢复矩阵；交叉编译不代替目标机执行。 0.10.19 四设备通过原生 Codex 实际读改、执行、文件往返。扩展验收暴露 MacBook 高负载期间 SQLite 查询延迟与终端状态滞后，完整故障矩阵继续开放。",
       "acceptance": [
         "Mac/NAS分别通过；Windows不标支持到通过；真实网页文件往返独立核对。"
       ],
       "evidence": [
         "docs/iteration-0.3.0-2026-09-10.md",
-        "scripts/check-code-gateway.py"
+        "scripts/check-code-gateway.py",
+        "docs/product/DESKTOP-REVIEW-2026-09-22.md"
       ],
       "depends_on": [],
       "owner": "Remote Hosts 维护者（用户 / ChatGPT / Codex）",
       "introduced_or_observed": "0.2.0 or 0.3.0 candidate",
-      "last_reviewed": "2026-09-10",
+      "last_reviewed": "2026-09-22",
       "closure_evidence": []
     },
     {
@@ -996,11 +1024,11 @@
       "id": "RH-035",
       "priority": "P1",
       "status": "partial",
-      "target_version": "0.3.2",
+      "target_version": "0.10.x",
       "title": "工具与协议能力发现、schema变更兼容",
       "discovery": "code_review",
       "problem": "ChatGPT工具目录可能仍缓存旧描述；包版本不能表达所有功能/限制。",
-      "current_resolution": "Gateway当前报告21项工具、工具SHA和可选入参，两台0.7.1 Agent独立上报runtime features与transfer_limits。当前宿主仍暴露file_*的64MiB旧参数上限，因此server catalog / Agent capability / host-visible schema三者已能明确区分，但宿主刷新仍不能由服务器强制。",
+      "current_resolution": "原生 Codex 已实测列出 24 工具；0.10.22 Gemini Spark 已完成真实授权、同步 24 工具并实际调用 devices_list，返回四台设备在线。版本、wire protocol、tool schema、Skill revision 仍分层报告。宿主对 compact/structuredContent 与 full 的消费差异、刷新和附件契约仍需独立回归，不能由服务端目录推断。原生桌面 OAuth 回调接入由 RH-054 记录。",
       "acceptance": [
         "新Gateway旧Agent与新Agent旧Gateway行为明确；无静默忽略lane导致错调度。"
       ],
@@ -1013,12 +1041,14 @@
         "docs/releases/0.3.2/deployment.json",
         "docs/releases/0.3.2/verification-final.json",
         "docs/releases/0.7.1/native-acceptance.json",
-        "docs/releases/0.7.1/RELEASE.md"
+        "docs/releases/0.7.1/RELEASE.md",
+        "docs/product/DESKTOP-REVIEW-2026-09-22.md",
+        "docs/gemini-spark-mcp.md"
       ],
       "depends_on": [],
       "owner": "Remote Hosts 维护者（用户 / ChatGPT / Codex）",
       "introduced_or_observed": "0.2.0 or 0.3.0 candidate",
-      "last_reviewed": "2026-09-11",
+      "last_reviewed": "2026-09-22",
       "closure_evidence": []
     },
     {
@@ -1504,6 +1534,143 @@
       "owner": "Remote Hosts 维护者（用户 / ChatGPT / Codex）",
       "introduced_or_observed": "0.7.1 Studio upgrade",
       "last_reviewed": "2026-09-11",
+      "closure_evidence": []
+    },
+    {
+      "depends_on": [],
+      "owner": "Remote Hosts 维护者（用户 / ChatGPT / Codex）",
+      "last_reviewed": "2026-09-22",
+      "closure_evidence": [],
+      "evidence": [
+        "docs/product/DESKTOP-REVIEW-2026-09-22.md"
+      ],
+      "id": "RH-053",
+      "priority": "P0",
+      "status": "open",
+      "target_version": "0.10.x",
+      "title": "设备时钟偏差使诊断回执阻断全部轮询",
+      "discovery": "0.10.19_desktop_integration",
+      "introduced_or_observed": "0.10.18 Agent / 0.10.18 and 0.10.19 Gateway",
+      "problem": "receipt_delivery.reported_at 比 Gateway 快约 93 秒时，Status.valid 的 now()+90 校验让全部 poll 返回 400。设备仍可进行 HTTPS/SSH 访问，用户却看到代码 Agent 离线。",
+      "current_resolution": "现场恢复系统时间服务后设备不重启即可恢复；此运维修复不等于协议缺陷关闭。下一版将不可信诊断时间与工作准入分离，保留计数、结构和授权校验，并显式报告偏差。",
+      "acceptance": [
+        "模拟时钟前后偏移 2 分钟、1 小时仍可完成 poll 和真实代码任务；异常诊断时间明确标注且不变成设备在线/授权依据。",
+        "负数、溢出和错误计数仍被有界处理；认证、PKCE、令牌到期等安全时间检查保持独立。"
+      ]
+    },
+    {
+      "depends_on": [],
+      "owner": "Remote Hosts 维护者（用户 / ChatGPT / Codex）",
+      "last_reviewed": "2026-09-22",
+      "closure_evidence": [
+        "docs/product/DESKTOP-REVIEW-2026-09-22.md",
+        "crates/remote-hosts-code/tests/oauth_clients.rs"
+      ],
+      "evidence": [
+        "docs/product/DESKTOP-REVIEW-2026-09-22.md"
+      ],
+      "id": "RH-054",
+      "priority": "P1",
+      "status": "closed",
+      "target_version": "0.10.19",
+      "title": "原生桌面 OAuth loopback 回调未开放",
+      "discovery": "desktop_client_integration",
+      "introduced_or_observed": "pre-0.10.19 native desktop setup",
+      "problem": "仅有 ChatGPT/Gemini 远程连接配置不能使独立 Codex 桌面客户端获得 Code 工具；Gateway 先前拒绝原生 loopback HTTP 回调。",
+      "current_resolution": "0.10.19 保留精确 URI、S256 PKCE、resource、owner consent 与刷新/撤销校验，支持严格 IP loopback 回调。独立 Codex 完成 OAuth 登录并列出 24 工具；4 台授权设备通过原生客户端范围读取、按 SHA 精确修改、执行、上传下载和清理验收。私有现场回执见 desktop-code-20260922。",
+      "acceptance": [
+        "原生 Codex 完成登录、列出 24 工具，并在全部授权设备上读、按 SHA 精确编辑、执行和传输。",
+        "非 loopback HTTP、主机名别名、userinfo、query/fragment、未注册回调仍被拒绝；刷新及撤销测试通过。"
+      ]
+    },
+    {
+      "depends_on": [],
+      "owner": "Remote Hosts 维护者（用户 / ChatGPT / Codex）",
+      "last_reviewed": "2026-09-22",
+      "closure_evidence": [],
+      "evidence": [
+        "docs/product/DESKTOP-REVIEW-2026-09-22.md"
+      ],
+      "id": "RH-055",
+      "priority": "P1",
+      "status": "open",
+      "target_version": "next-ssh-runtime",
+      "title": "旧 SSH PowerShell 多行命令可能空输出退出而未执行",
+      "discovery": "windows_managed_recovery",
+      "introduced_or_observed": "legacy SSH shell.powershell transport",
+      "problem": "一次多行恢复命令报告 exit 0 且无输出，但预期回执文件未创建、目标 PID 与维护状态均未改变；退出码不能作为执行证明。",
+      "current_resolution": "本轮改用已校验上传的 ps1 和单行 -File 调用，现场回执可核对。尚未修复旧 SSH 命令编码/调用路径，不能把 workaround 标为关闭。",
+      "acceptance": [
+        "同一组多行/引号/Unicode/非零退出脚本在直接调用与上传 -File 路径产生一致输出和副作用回执。",
+        "传输层必须保留真实 PowerShell 退出状态与完成帧；空输出不能被自动认定为业务成功。"
+      ]
+    },
+    {
+      "id": "RH-056",
+      "priority": "P1",
+      "status": "open",
+      "target_version": "0.10.x",
+      "title": "高负载下终端完成状态滞后与控制请求延迟",
+      "discovery": "0.10.19_expanded_acceptance",
+      "introduced_or_observed": "0.10.19 MacBook Agent",
+      "problem": "MacBook load average 超过 160 时，Agent SQLite 查询出现约 38 秒延迟。2 MiB 探针创建命令超时，本地终端已有 timed_out/exit 1，Gateway 观察仍暂时显示 running，扩展验收未完成。",
+      "current_resolution": "保留原操作、现场负载和失败证据，未重放命令或中断其他任务。已验证清理本轮文件；需将资源拥塞、Agent 处理延迟和 Gateway 终端快照新鲜度分别定位，不把延迟直接判为命令成功。",
+      "acceptance": [
+        "在可控 CPU/IO/SQLite 竞争下量化控制调用 P95、终端完成回执延迟及回执新鲜度。",
+        "本地完成或超时应在有界时间内可观察；状态滞后须明确标注，不得自动重放命令。"
+      ],
+      "evidence": [
+        "docs/product/DESKTOP-REVIEW-2026-09-22.md"
+      ],
+      "depends_on": [],
+      "owner": "Remote Hosts 维护者（用户 / ChatGPT / Codex）",
+      "last_reviewed": "2026-09-22",
+      "closure_evidence": []
+    },
+    {
+      "id": "RH-057",
+      "priority": "P1",
+      "status": "open",
+      "target_version": "0.10.x",
+      "title": "OAuth 过期、重复提交和限流缺少清楚的页面反馈",
+      "discovery": "gemini_spark_live_linking",
+      "introduced_or_observed": "0.10.20-0.10.22 Gateway and real Chrome flow",
+      "problem": "多次授权尝试期间出现 429，旧会话还可能在 Google 回调处过期。页面未清楚区分等待、失败与已发放授权码，易诱发继续点击。",
+      "current_resolution": "0.10.22 已修复可确认的完整跳转链 CSP 问题，单次授权自动返回并完成 Spark 调用。重复提交防护、Retry-After/错误页面和过期后的新会话入口尚未验收。",
+      "acceptance": [
+        "真实浏览器覆盖 approve 303、Google callback 302、最终 Gemini 返回，且普通/native 客户端 CSP 保持原边界。",
+        "重复点击只产生一次授权提交；429 明确等待时间；过期会话明确引导重新发起，不重用已消费的回调。"
+      ],
+      "evidence": [
+        "docs/gemini-spark-mcp.md",
+        "docs/product/DESKTOP-REVIEW-2026-09-22.md"
+      ],
+      "depends_on": [],
+      "owner": "Remote Hosts 维护者（用户 / ChatGPT / Codex）",
+      "last_reviewed": "2026-09-22",
+      "closure_evidence": []
+    },
+    {
+      "id": "RH-058",
+      "priority": "P1",
+      "status": "partial",
+      "target_version": "0.10.x",
+      "title": "发布调用入口可能误用可变工作树中的旧协调器",
+      "discovery": "0.10.22_frozen_release",
+      "introduced_or_observed": "Mac Studio release invocation",
+      "problem": "固定源码已有进程 FD 上限修复，但调用了可变工作树中的旧 release-code.py，验证和 macOS 构建通过后 Linux linker 报 ProcessFdQuotaExceeded。长 PTY heredoc 的不完整输入也增加了启动状态不确定性。",
+      "current_resolution": "保留原失败回执，通过状态/进程观察证明后续不完整输入未启动，校验上传小 runner 并仅以单行启动冻结协调器；进程软上限从 256 提到 4096 后三端构建与打包通过。没有修改系统上限、绕过测试或更换冻结源码。",
+      "acceptance": [
+        "正常发布入口强制绑定冻结协调器身份，并在回执记录该身份、资源上限和可复用 build slot。",
+        "不确定启动只观察原报告/进程；已知失败保留原回执；回归覆盖旧入口和不完整输入，不能重复执行未确认结束的构建。"
+      ],
+      "evidence": [
+        "docs/gemini-spark-mcp.md",
+        "docs/product/DESKTOP-REVIEW-2026-09-22.md"
+      ],
+      "depends_on": [],
+      "owner": "Remote Hosts 维护者（用户 / ChatGPT / Codex）",
+      "last_reviewed": "2026-09-22",
       "closure_evidence": []
     }
   ]
