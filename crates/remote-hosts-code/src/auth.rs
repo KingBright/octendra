@@ -159,6 +159,29 @@ async fn auth_metadata(State(a): State<Auth>) -> Json<Value> {
         json!({"issuer":u,"authorization_endpoint":format!("{u}/oauth/authorize"),"token_endpoint":format!("{u}/oauth/token"),"registration_endpoint":format!("{u}/oauth/register"),"revocation_endpoint":format!("{u}/oauth/revoke"),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"],"scopes_supported":SCOPES.split_whitespace().collect::<Vec<_>>(),"authorization_response_iss_parameter_supported":true}),
     )
 }
+fn dynamic_redirect_allowed(config: &GatewayConfig, candidate: &str) -> bool {
+    if config.redirect_uris.iter().any(|uri| uri == candidate) {
+        return true;
+    }
+    let Ok(uri) = reqwest::Url::parse(candidate) else {
+        return false;
+    };
+    uri.scheme() == "https"
+        && uri.host_str() == Some("oauth-redirect.googleusercontent.com")
+        && uri.port().is_none()
+        && uri.username().is_empty()
+        && uri.password().is_none()
+        && uri.query().is_none()
+        && uri.fragment().is_none()
+        && uri.path().strip_prefix("/r/").is_some_and(|suffix| {
+            !suffix.is_empty()
+                && suffix.len() <= 512
+                && !suffix.contains('/')
+                && suffix
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.~".contains(&b))
+        })
+}
 async fn register(
     State(a): State<Auth>,
     Json(v): Json<Value>,
@@ -174,7 +197,7 @@ async fn register(
             .map_err(|_| invalid())?;
     if uris.is_empty()
         || uris.len() > 5
-        || !uris.iter().all(|u| a.config.redirect_uris.contains(u))
+        || !uris.iter().all(|u| dynamic_redirect_allowed(&a.config, u))
         || v.get("token_endpoint_auth_method")
             .and_then(Value::as_str)
             .is_some_and(|s| s != "none")
@@ -492,4 +515,53 @@ fn html_escape(v: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    use super::*;
+
+    fn configured() -> GatewayConfig {
+        GatewayConfig {
+            public_url: "https://mcp.example.test".into(),
+            bind: "127.0.0.1:0".into(),
+            state_dir: std::path::PathBuf::from("/tmp/unused"),
+            owner: "owner".into(),
+            password_hash: "unused".into(),
+            devices: vec![],
+            redirect_uris: vec!["https://chatgpt.com/connector_platform_oauth_redirect".into()],
+        }
+    }
+
+    #[test]
+    fn configured_redirect_remains_exact() {
+        let c = configured();
+        assert!(dynamic_redirect_allowed(
+            &c,
+            "https://chatgpt.com/connector_platform_oauth_redirect"
+        ));
+        assert!(!dynamic_redirect_allowed(
+            &c,
+            "https://chatgpt.com/connector_platform_oauth_redirect/extra"
+        ));
+    }
+
+    #[test]
+    fn gemini_spark_dynamic_redirect_is_narrowly_allowed() {
+        let c = configured();
+        assert!(dynamic_redirect_allowed(
+            &c,
+            "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-116109532806053202916-mcp_swiggy_com"
+        ));
+        for invalid in [
+            "http://oauth-redirect.googleusercontent.com/r/client",
+            "https://oauth-redirect.googleusercontent.com.evil.test/r/client",
+            "https://oauth-redirect.googleusercontent.com/r/",
+            "https://oauth-redirect.googleusercontent.com/r/client/extra",
+            "https://oauth-redirect.googleusercontent.com/r/client?next=evil",
+            "https://oauth-redirect.googleusercontent.com/r/client#fragment",
+        ] {
+            assert!(!dynamic_redirect_allowed(&c, invalid), "{invalid}");
+        }
+    }
 }

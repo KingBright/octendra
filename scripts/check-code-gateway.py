@@ -117,7 +117,13 @@ def main():
     assert metadata["resource"] == args.origin + "/mcp"
     assert call("/mcp", {})[0] == 401
     redirect = "https://chatgpt.com/connector_platform_oauth_redirect"
-    client = parsed("/oauth/register", {"redirect_uris": [redirect], "token_endpoint_auth_method": "none"})
+    version_tuple = tuple(map(int, args.expected_version.split('.')))
+    redirects = [redirect]
+    if version_tuple >= (0, 10, 5):
+        spark_suffix = "remote-hosts-acceptance-" + args.run_id.replace("_", "-")
+        redirects.append("https://oauth-redirect.googleusercontent.com/r/" + spark_suffix)
+    client = parsed("/oauth/register", {"redirect_uris": redirects, "token_endpoint_auth_method": "none"})
+    assert client["redirect_uris"] == redirects
     verifier = secrets.token_urlsafe(48)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
     query = urllib.parse.urlencode({"client_id": client["client_id"], "redirect_uri": redirect, "response_type": "code", "code_challenge": challenge, "code_challenge_method": "S256", "state": "acceptance-" + args.run_id, "resource": metadata["resource"]})
@@ -161,7 +167,7 @@ def main():
     assert upload_descriptor["_meta"]["openai/fileParams"] == ["file"]
     health = parsed("/healthz")
     assert health["version"] == args.expected_version
-    parsed_version = tuple(map(int, args.expected_version.split('.')))
+    parsed_version = version_tuple
     if parsed_version >= (0, 10, 2):
         assert health.get("wire_protocol", 0) >= 2
         assert health.get("min_agent_wire_protocol", 0) <= 1
