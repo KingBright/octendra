@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    "crates/remote-hosts-admin",
+    "crates/remote-hosts-release",
     "crates/remote-hosts-api",
     "crates/remote-hosts-cli",
     "crates/remote-hosts-connector",
@@ -12,6 +14,7 @@ members = [
     "crates/remote-hosts-token-output",
     "crates/remote-hosts-vault",
     "crates/remote-hosts-code",
+    "crates/remote-hosts-desktop-protocol",
 ]
 resolver = "3"
 
@@ -70,3 +73,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "jso
 uuid = { version = "1.23.4", features = ["serde", "v4", "v5", "v7"] }
 zeroize = { version = "1.9.0", features = ["derive"] }
 zstd = "0.13.3"
+
+# Keep cryptographic hashing representative within fixed desktop test leases.
+[profile.test.package.sha2]
+opt-level = 3

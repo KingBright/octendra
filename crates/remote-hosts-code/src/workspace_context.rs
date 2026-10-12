@@ -44,7 +44,12 @@ impl TerminalCursor {
     }
 }
 
-pub(crate) async fn read(store: &Store, ws: &Workspace, args: &Value) -> Result<Value> {
+pub(crate) async fn read(
+    store: &Store,
+    config: &crate::AgentConfig,
+    ws: &Workspace,
+    args: &Value,
+) -> Result<Value> {
     let limit = files::number(args, "limit", 20, 1, 50)?;
     let active_only = args
         .get("active_only")
@@ -133,18 +138,33 @@ pub(crate) async fn read(store: &Store, ws: &Workspace, args: &Value) -> Result<
     }
     let change_set_count = change_sets.len();
     let build = store.get::<Value>("runtime", "build").await?;
-    let delivery = store.get::<Value>("runtime", "receipt_delivery").await?;
+    // Use the same authoritative, device-and-origin scoped queue as poll.
+    // The obsolete runtime copy is no longer updated and cannot prove freshness.
+    let delivery = crate::delivery::Delivery::status(store, config)
+        .await
+        .ok()
+        .filter(crate::delivery::Status::valid)
+        .map(serde_json::to_value)
+        .transpose()?;
     let delivery_stale = delivery
         .as_ref()
         .map(|v| !(0..=45).contains(&(now() - v["reported_at"].as_i64().unwrap_or(0))));
+    let automatic_cleanup = store
+        .get::<Value>("runtime", "automatic_history_cleanup")
+        .await
+        .ok()
+        .flatten();
     let mut result = json!({"workspace_id":ws.id,"device_id":ws.device_id,"root":ws.root,
         "runtime":build,"receipt_delivery":delivery,"receipt_delivery_stale":delivery_stale,
+        "receipt_delivery_unavailable":delivery.is_none(),
         "receipt_delivery_scope":"device-wide counts only; no other workspace records",
         "transfers":transfers,"terminals":terminals,"change_sets":change_sets,"active_only":active_only,
         "summary":{"terminals":terminal_count,"active_terminals":active_terminals,
             "transfers":transfer_count,"retained_transfers":retained,"paused_transfers":paused,
             "change_sets":change_set_count},
-        "workspace_gc":{"supported":true,"mode":"explicit_preview_then_apply","automatic":false},
+        "workspace_gc":{"supported":true,"mode":"explicit_preview_then_apply","automatic":true,
+            "automatic_policy":crate::history_retention::Policy::default(),"automatic_status":automatic_cleanup,
+            "automatic_status_scope":"device-wide aggregate; no other workspace details"},
         "transfers_truncated":transfers_truncated,
         "next_transfer_id":if transfers_truncated {transfers.last().map(|v|v["operation_id"].clone())}else{None},
         "terminal_limit":limit,"terminals_truncated":terminals_truncated,"next_terminal_cursor":next_terminal,
@@ -173,6 +193,22 @@ pub(crate) async fn read(store: &Store, ws: &Workspace, args: &Value) -> Result<
     result["changed"] = json!(true);
     result["cursor"] = json!(fingerprint);
     result["observed_at"] = json!(now());
+    result["next_action"] = json!(if active_terminals > 0 {
+        "observe_existing_terminal"
+    } else if paused > 0 {
+        "resume_or_cancel_existing_transfer"
+    } else if retained > 0 {
+        "observe_existing_transfer"
+    } else if change_set_count > 0 {
+        "review_recent_change_set_before_new_mutation"
+    } else {
+        "no_active_work"
+    });
+    result["freshness"] = json!({
+        "workspace_observed_at":result["observed_at"],
+        "receipt_delivery_stale":delivery_stale,
+        "heartbeat_is_not_business_progress":true
+    });
     ensure!(
         serde_json::to_vec(&result)?.len() <= 128 * 1024,
         "workspace_context_budget: reduce limit"

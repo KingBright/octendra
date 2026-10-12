@@ -56,6 +56,67 @@ fn edit(a: &Agent, ws: &str, name: &str) -> Job {
     )
 }
 
+#[tokio::test]
+async fn actual_poll_classifies_http_body_and_recovers_without_executing_work() {
+    use axum::{Router, http::StatusCode, response::IntoResponse, routing::post};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (_dir, mut agent, _, _, _) = fixture().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    Arc::make_mut(&mut agent.config).gateway_url =
+        format!("http://{}", listener.local_addr().unwrap());
+    let step = Arc::new(AtomicUsize::new(0));
+    let current = step.clone();
+    let app = Router::new().route(
+        "/device/poll",
+        post(move || {
+            let current = current.clone();
+            async move {
+                match current.load(Ordering::SeqCst) {
+                    0 => (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "private upstream body token=never-publish",
+                    )
+                        .into_response(),
+                    1 => (StatusCode::OK, "bad-json token=never-publish").into_response(),
+                    2 => (StatusCode::OK, "x".repeat(512 * 1024 + 1)).into_response(),
+                    _ => axum::Json(json!({"job":null})).into_response(),
+                }
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let hello:DeviceHello=serde_json::from_value(json!({"version":"test","session":random(),"roots":[],"allow_write":true,"allow_exec":true})).unwrap();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .unwrap();
+    for (index, expected) in [
+        (0, "gateway_unavailable"),
+        (1, "invalid_json"),
+        (2, "response_too_large"),
+    ] {
+        step.store(index, Ordering::SeqCst);
+        let error = agent
+            .poll_job(&client, &hello, Lane::Read)
+            .await
+            .err()
+            .expect("injected poll failure");
+        let classified = crate::poll_health::Failure::classify(&error);
+        assert_eq!(classified.category, expected);
+        assert!(!format!("{error:?}").contains("never-publish"));
+    }
+    step.store(3, Ordering::SeqCst);
+    assert!(
+        agent
+            .poll_job(&client, &hello, Lane::Read)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    server.abort();
+    let _ = server.await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn waiting_writes_do_not_take_sibling_execution_slots() {
     let (_d, a, wa, alias, wb) = fixture().await;
@@ -104,6 +165,8 @@ async fn actual_poll_skips_backlog_for_same_root_aliases_and_then_drains_it() {
     let address = listener.local_addr().unwrap();
     Arc::make_mut(&mut a.config).gateway_url = format!("http://{address}");
     let g = Gateway::new(GatewayConfig {
+        forge_browser: None,
+        allowed_origins: crate::default_mcp_client_origins(),
         public_url: format!("https://{address}"),
         bind: "127.0.0.1:0".into(),
         state_dir: d.path().join("gateway"),
@@ -160,19 +223,46 @@ async fn actual_poll_skips_backlog_for_same_root_aliases_and_then_drains_it() {
     });
     let aa = a.clone();
     let worker = tokio::spawn(async move { aa.run().await });
-    let result = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let (value,): (Option<String>,) = sqlx::query_as("SELECT result FROM jobs WHERE id=?")
-                .bind(&independent.id)
-                .fetch_one(&g.store.pool)
-                .await
-                .unwrap();
-            if let Some(value) = value {
-                break serde_json::from_str::<Value>(&value).unwrap();
+    let result: Result<Value> = async {
+        // Startup is not scheduling latency. Wait for an authenticated write-lane
+        // round trip, without requiring B to finish or releasing the held A root.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let ready = a.store.get::<Value>("runtime", "readiness").await.unwrap();
+                if ready.is_some_and(|r| r["lanes"]["write"].as_i64().is_some_and(|n| n > 0)) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
+        })
+        .await
+        .context("fixture write lane did not become ready")?;
+        let value = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let (value,): (Option<String>,) =
+                    sqlx::query_as("SELECT result FROM jobs WHERE id=?")
+                        .bind(&independent.id)
+                        .fetch_one(&g.store.pool)
+                        .await
+                        .unwrap();
+                if let Some(value) = value {
+                    break serde_json::from_str::<Value>(&value).unwrap();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("blocked A aliases hid runnable B after startup")?;
+        let (completed,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM jobs WHERE result IS NOT NULL")
+                .fetch_one(&g.store.pool)
+                .await?;
+        ensure!(
+            completed == 1,
+            "blocked A work completed before its root was released"
+        );
+        Ok(value)
+    }
     .await;
     // Release even on failure: no background task leaks from an assertion.
     drop(held);
@@ -182,28 +272,52 @@ async fn actual_poll_skips_backlog_for_same_root_aliases_and_then_drains_it() {
     }
     let result = result.expect("queued writes for aliases of blocked A hid runnable project B");
     assert!(result.get("error").is_none(), "{result}");
-    tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            let (remaining,): (i64,) =
-                sqlx::query_as("SELECT COUNT(*) FROM jobs WHERE result IS NULL")
-                    .fetch_one(&g.store.pool)
-                    .await
-                    .unwrap();
-            if remaining == 0 {
-                break;
+    let drained: Result<()> = async {
+        // Prove A becomes schedulable within the original watchdog. Finishing
+        // all 24 durable edits is a separate completeness check, not a latency
+        // benchmark for the host's fsync throughput.
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let (resumed,): (i64,) =
+                    sqlx::query_as("SELECT COUNT(*) FROM jobs WHERE id<>? AND result IS NOT NULL")
+                        .bind(&independent.id)
+                        .fetch_one(&g.store.pool)
+                        .await
+                        .unwrap();
+                if resumed > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("released resource did not become schedulable again");
+        })
+        .await
+        .context("released resource did not become schedulable again")?;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let (remaining,): (i64,) =
+                    sqlx::query_as("SELECT COUNT(*) FROM jobs WHERE result IS NULL")
+                        .fetch_one(&g.store.pool)
+                        .await
+                        .unwrap();
+                if remaining == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .context("resumed backlog did not finish every durable edit")?;
+        Ok(())
+    }
+    .await;
+    worker.abort();
+    let _ = worker.await;
+    server.abort();
+    drained.expect("released-root scheduling or completeness failed");
     for n in 0..24 {
         assert_eq!(
             std::fs::read(a.config.roots[0].join(format!("a/pending-{n}"))).unwrap(),
             b"ok"
         );
     }
-    worker.abort();
-    let _ = worker.await;
-    server.abort();
 }

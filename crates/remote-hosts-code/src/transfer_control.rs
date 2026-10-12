@@ -33,7 +33,10 @@ pub(crate) async fn device_job(g: &Gateway, headers: &HeaderMap, id: &str) -> Re
         .context("transfer unavailable")?;
     let job: Job = serde_json::from_str(&request)?;
     ensure!(
-        matches!(job.tool.as_str(), "file_upload" | "file_download") && job.owner == g.config.owner,
+        matches!(
+            job.tool.as_str(),
+            "file_upload" | "file_download" | "desktop_frame"
+        ) && job.owner == g.config.owner,
         "transfer unavailable"
     );
     let scope = tools::scope(&job.tool).context("unsupported transfer")?;
@@ -263,12 +266,4 @@ pub(crate) async fn apply(g: &Gateway, p: &Principal, name: &str, args: &Value) 
     Ok(output)
 }
 
-/// Late results from a pre-resume attempt are acknowledged as obsolete, not
-/// allowed to overwrite the current attempt. Old clients without revisions keep
-/// their existing receipt behavior until explicitly controlled by a new client.
-pub(crate) async fn obsolete(g: &Gateway, id: &str, value: &Value) -> Result<bool> {
-    if let Some(revision) = value.get("transfer_revision").and_then(Value::as_u64) {
-        return Ok(revision < control(g, id).await?.revision);
-    }
-    Ok(false)
-}
+// Receipt generation checks now share the result transaction in job_receipts.

@@ -18,6 +18,8 @@ async fn gateway() -> (tempfile::TempDir, Gateway, String) {
     let dir = tempfile::tempdir().unwrap();
     let credential = random();
     let gateway = Gateway::new(GatewayConfig {
+        forge_browser: None,
+        allowed_origins: remote_hosts_code::default_mcp_client_origins(),
         public_url: "https://review.example".into(),
         bind: "127.0.0.1:0".into(),
         state_dir: dir.path().into(),
@@ -275,7 +277,11 @@ async fn simultaneous_device_sessions_have_only_one_winner() {
 #[test]
 fn catalog_schema_rejects_nested_unknown_fields_types_and_bounds() {
     use remote_hosts_code::tools::{catalog, validate};
-    assert_eq!(catalog().len(), 23); // Includes durable change-set recovery and explicit workspace GC.
+    assert_eq!(
+        remote_hosts_code::release_manifest()["tool_count"],
+        catalog().len()
+    );
+    assert!(catalog().iter().any(|t| t.name == "task_context"));
     let valid = json!({"workspace_id":"w","idempotency_key":"edit","files":[{
         "path":"a.txt","expected_version":"absent","action":"create","content":"hello"
     }]});
@@ -300,6 +306,24 @@ fn catalog_schema_rejects_nested_unknown_fields_types_and_bounds() {
     validate("change_resume", &json!({"workspace_id":"w","idempotency_key":"r","change_set_id":"00000000-0000-0000-0000-000000000001"})).unwrap();
     validate("workspace_gc", &json!({"workspace_id":"w","idempotency_key":"g","action":"preview","older_than_seconds":3600,"max_items":100})).unwrap();
     assert!(validate("workspace_gc", &json!({"workspace_id":"w","idempotency_key":"g","action":"apply","older_than_seconds":60,"max_items":100,"preview_id":"x"})).is_err());
+}
+
+#[test]
+fn catalog_explains_the_create_version_contract() {
+    let catalog = remote_hosts_code::tools::catalog();
+    let tool = catalog
+        .iter()
+        .find(|t| t.name == "code_apply_edits")
+        .unwrap();
+    let description = tool.description.as_deref().unwrap();
+    assert!(description.contains("expected_version=\"absent\""));
+    assert!(description.contains("full content only"));
+    let version =
+        &tool.input_schema["properties"]["files"]["items"]["properties"]["expected_version"];
+    let help = version["description"].as_str().unwrap();
+    assert!(help.contains("absent for create"));
+    assert!(help.contains("SHA-256 for edit/delete"));
+    assert!(help.contains("empty string is not a missing-file marker"));
 }
 
 #[test]

@@ -27,6 +27,14 @@ pub struct Status {
     pub output_truncated: bool,
     pub created_at: i64,
     #[serde(default)]
+    pub updated_at: i64,
+    /// Spawn-time process identity. Historical PIDs never authorize signalling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_id: Option<u32>,
+    /// Initial working directory; a command may change directory after spawning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
+    #[serde(default)]
     pub pty: bool,
     /// 0 is the old raw log, 1 is an append-only sanitized UTF-8 log.
     #[serde(default)]
@@ -43,6 +51,8 @@ pub struct Status {
 type TerminalInput = Arc<Mutex<Box<dyn Write + Send>>>;
 struct Live {
     input: Option<TerminalInput>,
+    #[cfg(unix)]
+    io_control: Option<crate::terminal_io::Control>,
     #[cfg(not(unix))]
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
     pid: Option<u32>,
@@ -55,21 +65,42 @@ pub struct Terminals {
     live: Arc<Mutex<HashMap<String, Live>>>,
     secret: String,
     slots: Arc<tokio::sync::Semaphore>,
+    // Latest change only, not another task queue or source of execution truth.
+    changes: tokio::sync::watch::Sender<u64>,
 }
 impl Terminals {
     pub async fn new(store: Store, dir: PathBuf, secret: String) -> Result<Self> {
         std::fs::create_dir_all(&dir)?;
         // Recover every interrupted terminal atomically, regardless of history
         // size or key order. Do not load a truncated history page and miss live work.
-        sqlx::query("UPDATE kv SET value=json_set(value,'$.state','runtime_lost') WHERE kind='terminal' AND json_extract(value,'$.state') IN ('running','starting')")
-            .execute(&store.pool).await?;
+        sqlx::query("UPDATE kv SET value=json_set(value,'$.state','runtime_lost','$.updated_at',?) WHERE kind='terminal' AND json_extract(value,'$.state') IN ('running','starting')")
+            .bind(now()).execute(&store.pool).await?;
         Ok(Self {
             store,
             dir,
             live: Arc::new(Mutex::new(HashMap::new())),
             secret,
             slots: Arc::new(tokio::sync::Semaphore::new(8)),
+            changes: tokio::sync::watch::channel(0).0,
         })
+    }
+    /// Process-owned, bounded live set; never scan durable terminal history to
+    /// decide whether output needs refreshing. This is not execution authority.
+    pub(crate) fn has_live(&self) -> Result<bool> {
+        Ok(!self
+            .live
+            .lock()
+            .map_err(|_| anyhow::anyhow!("terminal lock poisoned"))?
+            .is_empty())
+    }
+    pub(crate) fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+    fn publish_change(&self) {
+        // A change while the heartbeat is in flight remains unseen by its
+        // receiver. Coalescing never discards the need to read durable state.
+        self.changes
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
     }
     /// Reconcile durable terminal rows that can no longer be owned by this runtime.
     /// A grace window prevents racing a freshly inserted `starting` row before its
@@ -101,6 +132,7 @@ impl Terminals {
             }
             let mut status: Status = serde_json::from_str(&text)?;
             status.state = "runtime_lost".into();
+            status.updated_at = now();
             status.output_complete = true;
             status.output_error = Some("terminal_runtime_ownership_lost".into());
             let saved = sqlx::query(
@@ -123,6 +155,9 @@ impl Terminals {
             .await?;
             reconciled += 1;
         }
+        if reconciled > 0 {
+            self.publish_change();
+        }
         Ok(reconciled)
     }
     pub async fn start(
@@ -133,10 +168,39 @@ impl Terminals {
         id: &str,
     ) -> Result<Value> {
         let command = files::text(v, "command")?;
-        ensure!(command.len() <= 65536, "command too large");
+        crate::payload_budget::command(command)?;
+        self.start_process(config, ws, v, id, command, None).await
+    }
+    pub(crate) async fn start_maintenance(
+        &self,
+        config: &AgentConfig,
+        ws: &Workspace,
+        v: &Value,
+        id: &str,
+        launch: crate::maintenance_tasks::FixedLaunch,
+    ) -> Result<Value> {
+        self.start_process(config, ws, v, id, "maintenance_task", Some(launch))
+            .await
+    }
+    async fn start_process(
+        &self,
+        config: &AgentConfig,
+        ws: &Workspace,
+        v: &Value,
+        id: &str,
+        command: &str,
+        fixed: Option<crate::maintenance_tasks::FixedLaunch>,
+    ) -> Result<Value> {
         let timeout = files::number(v, "timeout_seconds", 600, 1, 7200)?;
-        let wait_ms = files::number(v, "wait_ms", 0, 0, 2000)?;
+        // Default to a short bounded wait so fast commands usually finish in the
+        // initiating tool call even when an older host schema cannot send wait_ms.
+        // Long commands still return the same durable terminal handle.
+        let wait_ms = files::number(v, "wait_ms", 1000, 0, 2000)?;
         let interactive = v.get("pty").and_then(Value::as_bool).unwrap_or(false);
+        ensure!(
+            fixed.is_none() || !interactive,
+            "maintenance_requires_real_pipes"
+        );
         let rows = files::number(v, "rows", 40, 5, 200)? as u16;
         let cols = files::number(v, "cols", 120, 20, 500)? as u16;
         uuid::Uuid::parse_str(id).context("invalid terminal id")?;
@@ -145,13 +209,17 @@ impl Terminals {
             .clone()
             .try_acquire_owned()
             .context("device terminal capacity reached")?;
+        let created_at = now();
         let status = Status {
             id: id.into(),
             workspace_id: ws.id.clone(),
             state: "starting".into(),
             exit_code: None,
             output_truncated: false,
-            created_at: now(),
+            created_at,
+            updated_at: created_at,
+            process_id: None,
+            working_directory: Some(ws.root.to_string_lossy().into_owned()),
             pty: interactive,
             log_format: 1,
             output_complete: false,
@@ -165,7 +233,13 @@ impl Terminals {
                 &self.dir.join(format!("{id}.log")),
                 self.secret.clone(),
             )?));
-            let process = spawn(config, ws, command, interactive, rows, cols)?;
+            let process = if let Some(launch) = fixed {
+                let mut cmd = std::process::Command::new(launch.executable);
+                cmd.args(launch.args);
+                spawn_pipes(ws, cmd)?
+            } else {
+                spawn(config, ws, command, interactive, rows, cols)?
+            };
             Ok((capture, process))
         })();
         let mut status = status;
@@ -176,18 +250,24 @@ impl Terminals {
                 mut reader,
                 input,
                 master,
+                #[cfg(unix)]
+                io_control,
             },
         ) = match setup {
             Ok(setup) => setup,
             Err(error) => {
                 status.state = "failed".into();
+                status.updated_at = now();
                 status.output_complete = true;
                 self.store.put("terminal", id, &status, i64::MAX).await?;
+                self.publish_change();
                 return Err(error);
             }
         };
         let pid = child.process_id();
+        status.process_id = pid;
         status.state = "running".into();
+        status.updated_at = now();
         if let Err(error) = self.store.put("terminal", id, &status, i64::MAX).await {
             let _ = kill_group(pid);
             let _ = child.kill();
@@ -207,6 +287,8 @@ impl Terminals {
                 id.into(),
                 Live {
                     input: input.clone(),
+                    #[cfg(unix)]
+                    io_control: io_control.clone(),
                     #[cfg(not(unix))]
                     killer: child.clone_killer(),
                     pid,
@@ -258,6 +340,10 @@ impl Terminals {
         });
         let this = self.clone();
         let key = id.to_owned();
+        // This invocation waits on its own finalization, not on 50 SQL reads/sec.
+        // The durable row remains authoritative; notifications only wake the reader.
+        let completion = Arc::new(tokio::sync::Notify::new());
+        let finalized = completion.clone();
         tokio::spawn(async move {
             let _slot = slot;
             let mut waiter = tokio::task::spawn_blocking(move || {
@@ -285,12 +371,20 @@ impl Terminals {
                 && let Some(terminal) = live.get_mut(&key)
             {
                 terminal.pid = None;
+                #[cfg(unix)]
+                if let Some(control) = &terminal.io_control {
+                    control.close_input();
+                }
                 terminal.input.take();
             }
             let drained = matches!(
                 tokio::time::timeout(Duration::from_secs(3), &mut reader_task).await,
                 Ok(Ok(()))
             );
+            #[cfg(unix)]
+            if !drained && let Some(control) = &io_control {
+                control.stop_reader();
+            }
             if let Ok(mut output) = capture.lock() {
                 if !drained {
                     output.fail("output_drain_timeout");
@@ -305,6 +399,7 @@ impl Terminals {
             if status.state == "running" {
                 status.state = if result.is_some() { "exited" } else { "failed" }.into();
             }
+            status.updated_at = now();
             status.exit_code = result.map(|s| i64::from(s.exit_code()));
             // Cancellation and finalization race through one conditional SQL update,
             // not a read/modify/write that could overwrite an accepted cancellation.
@@ -315,15 +410,22 @@ impl Terminals {
             };
             if !saved {
                 tracing::error!(terminal_id=%key,"terminal status persistence failed");
+            } else {
+                // Do not wait for the next periodic heartbeat to expose an exit.
+                // Failed persistence never emits a successful-completion hint.
+                this.publish_change();
             }
             if let Ok(mut live) = this.live.lock() {
                 live.remove(&key);
             }
+            finalized.notify_waiters();
         });
-        let mut result = json!({"terminal_id":id,"state":"running","cursor":0,"next_action":"terminal_read","pty":interactive});
+        let mut result = json!({"terminal_id":id,"state":"running","cursor":0,"next_action":"operation_get","pty":interactive});
         if wait_ms > 0 {
             let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms as u64);
             loop {
+                // Register before reading so a concurrent final commit is not lost.
+                let changed = completion.notified();
                 let status = match tokio::time::timeout_at(deadline, self.status(ws, id)).await {
                     Ok(Ok(status)) => status,
                     _ => break,
@@ -335,10 +437,10 @@ impl Terminals {
                 {
                     break;
                 }
-                tokio::time::sleep_until(
-                    deadline.min(tokio::time::Instant::now() + Duration::from_millis(20)),
-                )
-                .await;
+                tokio::select! {
+                    _ = changed => {},
+                    _ = tokio::time::sleep_until(deadline) => break,
+                }
             }
             match self
                 .read(ws, &json!({"terminal_id":id,"max_bytes":16000}))
@@ -385,10 +487,16 @@ impl Terminals {
             .lock()
             .map_err(|_| anyhow::anyhow!("terminal lock poisoned"))?;
         if let Some(t) = live.get_mut(id) {
-            t.input.take();
+            #[cfg(unix)]
+            if let Some(control) = &t.io_control {
+                control.close_input();
+            }
+            // Stop the owned process group before releasing its input. A PTY
+            // writer must never try to enqueue EOF into a full input queue here.
             kill_group(t.pid)?;
             #[cfg(not(unix))]
             t.killer.kill()?;
+            t.input.take();
         }
         Ok(())
     }
@@ -524,9 +632,10 @@ impl Terminals {
     pub async fn cancel(&self, ws: &Workspace, v: &Value) -> Result<Value> {
         let id = files::text(v, "terminal_id")?;
         self.status(ws, id).await?;
-        let changed: Option<(String,)> = sqlx::query_as("UPDATE kv SET value=json_set(value,'$.state','cancelled') WHERE kind='terminal' AND key=? AND json_extract(value,'$.workspace_id')=? AND json_extract(value,'$.state')='running' RETURNING value")
-            .bind(id).bind(&ws.id).fetch_optional(&self.store.pool).await?;
+        let changed: Option<(String,)> = sqlx::query_as("UPDATE kv SET value=json_set(value,'$.state','cancelled','$.updated_at',?) WHERE kind='terminal' AND key=? AND json_extract(value,'$.workspace_id')=? AND json_extract(value,'$.state')='running' RETURNING value")
+            .bind(now()).bind(id).bind(&ws.id).fetch_optional(&self.store.pool).await?;
         let status = if let Some((value,)) = changed {
+            self.publish_change();
             self.kill(id)?;
             serde_json::from_str::<Status>(&value)?
         } else {
@@ -540,6 +649,8 @@ struct Spawned {
     reader: Box<dyn Read + Send>,
     input: Option<Box<dyn Write + Send>>,
     master: Option<Box<dyn portable_pty::MasterPty + Send>>,
+    #[cfg(unix)]
+    io_control: Option<crate::terminal_io::Control>,
 }
 fn spawn(
     config: &AgentConfig,
@@ -556,7 +667,20 @@ fn spawn(
             pixel_width: 0,
             pixel_height: 0,
         })?;
+        #[cfg(not(unix))]
         let reader = pair.master.try_clone_reader()?;
+        #[cfg(unix)]
+        let (reader, input, io_control) = {
+            use std::os::fd::BorrowedFd;
+            let fd = pair
+                .master
+                .as_raw_fd()
+                .context("native PTY master descriptor unavailable")?;
+            // SAFETY: the master owns fd for this borrow. The I/O pair duplicates
+            // it before returning, has bounded writes, and never writes EOF on Drop.
+            crate::terminal_io::pair(unsafe { BorrowedFd::borrow_raw(fd) })?
+        };
+        #[cfg(not(unix))]
         let input = pair.master.take_writer()?;
         let mut cmd = CommandBuilder::new(&config.shell);
         for arg in shell_args(&config.shell, command, true) {
@@ -566,42 +690,60 @@ fn spawn(
         cmd.env("TERM", "xterm-256color");
         let child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
+        #[cfg(unix)]
+        let reader: Box<dyn Read + Send> = Box::new(reader);
+        #[cfg(unix)]
+        let input: Box<dyn Write + Send> = Box::new(input);
         Ok(Spawned {
             child,
             reader,
             input: Some(input),
             master: Some(pair.master),
+            #[cfg(unix)]
+            io_control: Some(io_control),
         })
     } else {
-        // A single kernel pipe preserves the observed stdout/stderr write order.
-        // It is intentionally a combined stream, not falsely labeled stdout-only.
-        let (reader, writer) = std::io::pipe()?;
         let mut cmd = std::process::Command::new(&config.shell);
-        cmd.args(shell_args(&config.shell, command, false))
-            .current_dir(&ws.root)
-            .stdin(std::process::Stdio::null())
-            .stdout(writer.try_clone()?)
-            .stderr(writer)
-            .env("TERM", "dumb")
-            .env("NO_COLOR", "1")
-            .env("CLICOLOR", "0")
-            .env("PAGER", "cat")
-            .env("GIT_PAGER", "cat");
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-        }
-        let child = cmd.spawn()?;
-        drop(cmd); // Close the parent's pipe writers, or EOF would never arrive.
-        Ok(Spawned {
-            child: Box::new(child),
-            reader: Box::new(reader),
-            input: None,
-            master: None,
-        })
+        cmd.args(shell_args(&config.shell, command, false));
+        spawn_pipes(ws, cmd)
     }
 }
+fn spawn_pipes(ws: &Workspace, mut cmd: std::process::Command) -> Result<Spawned> {
+    // A single kernel pipe preserves the observed stdout/stderr write order.
+    // It is intentionally a combined stream, not falsely labeled stdout-only.
+    let (reader, writer) = std::io::pipe()?;
+    cmd.current_dir(&ws.root)
+        .stdin(std::process::Stdio::null())
+        .stdout(writer.try_clone()?)
+        .stderr(writer)
+        .env("TERM", "dumb")
+        .env("NO_COLOR", "1")
+        .env("CLICOLOR", "0")
+        .env("PAGER", "cat")
+        .env("GIT_PAGER", "cat");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Native pipes must not allocate a console when the Agent has none.
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let child = cmd.spawn()?;
+    drop(cmd); // Close the parent's pipe writers, or EOF would never arrive.
+    Ok(Spawned {
+        child: Box::new(child),
+        reader: Box::new(reader),
+        input: None,
+        master: None,
+        #[cfg(unix)]
+        io_control: None,
+    })
+}
+
 fn kill_group(pid: Option<u32>) -> Result<()> {
     #[cfg(unix)]
     if let Some(pid) = pid {
@@ -703,6 +845,79 @@ fn shell_quote(s: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fixed_process_uses_existing_pipe_pid_and_exit_receipts() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = AgentConfig {
+            gateway_url: "https://fixture.invalid".into(),
+            device_id: uuid::Uuid::new_v4().to_string(),
+            device_token: "fixture-unused".into(),
+            state_dir: temp.path().join("state"),
+            roots: vec![temp.path().to_owned()],
+            allow_write: false,
+            allow_exec: true,
+            shell: "/nonexistent-shell".into(),
+        };
+        let ws = Workspace {
+            id: "fixture".into(),
+            device_id: config.device_id.clone(),
+            root: temp.path().to_owned(),
+        };
+        let store = Store::open(&config.state_dir).await.unwrap();
+        let terminals = Terminals::new(
+            store,
+            config.state_dir.join("terminals"),
+            config.device_token.clone(),
+        )
+        .await
+        .unwrap();
+        for exit in [0, 2] {
+            let id = uuid::Uuid::new_v4().to_string();
+            // This fixed fixture process has no maintenance or production target access.
+            let launch = crate::maintenance_tasks::FixedLaunch { executable: "/bin/sh".into(),
+                args: vec!["-c".into(), format!("if [ -t 1 ]; then exit 9; fi; printf 'out\\n'; printf 'err\\n' >&2; exit {exit}").into()] };
+            terminals
+                .start_maintenance(
+                    &config,
+                    &ws,
+                    &json!({"timeout_seconds":30,"wait_ms":0}),
+                    &id,
+                    launch,
+                )
+                .await
+                .unwrap();
+            let value = tokio::time::timeout(Duration::from_secs(45), async {
+                loop {
+                    let value = terminals
+                        .read(&ws, &json!({"terminal_id":id,"max_bytes":4096}))
+                        .await
+                        .unwrap();
+                    if value["terminal"]["output_complete"] == true
+                        && !matches!(
+                            value["terminal"]["state"].as_str(),
+                            Some("starting" | "running")
+                        )
+                    {
+                        break value;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("fixed process did not close its pipe");
+            assert_eq!(value["terminal"]["state"], "exited", "{value}");
+            assert_eq!(value["terminal"]["exit_code"], exit);
+            assert_eq!(value["terminal"]["pty"], false);
+            assert!(
+                value["terminal"]["process_id"]
+                    .as_u64()
+                    .is_some_and(|pid| pid > 1)
+            );
+            assert_eq!(value["output"], "out\nerr\n");
+        }
+    }
+
     #[test]
     fn dsr_responder_handles_split_and_repeated_queries() {
         let mut responder = DsrResponder::default();
@@ -754,12 +969,54 @@ mod tests {
             exit_code: None,
             output_truncated: false,
             created_at,
+            updated_at: created_at,
+            process_id: None,
+            working_directory: None,
             pty: false,
             log_format: 1,
             output_complete: false,
             output_error: None,
             output_profile: OutputProfile::Generic,
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn short_noninteractive_command_returns_exit_and_output_without_explicit_wait() {
+        let d = tempfile::tempdir().unwrap();
+        let store = Store::open(d.path()).await.unwrap();
+        let terminals = Terminals::new(
+            store,
+            d.path().join("terminals"),
+            "synthetic-terminal-secret-0123456789".into(),
+        )
+        .await
+        .unwrap();
+        let ws = Workspace {
+            id: "workspace".into(),
+            device_id: "device".into(),
+            root: d.path().to_path_buf(),
+        };
+        let config = AgentConfig {
+            gateway_url: "https://unused.example".into(),
+            device_id: "device".into(),
+            device_token: "unused".into(),
+            state_dir: d.path().join("state"),
+            roots: vec![d.path().to_path_buf()],
+            allow_write: true,
+            allow_exec: true,
+            shell: PathBuf::from("/bin/sh"),
+        };
+        let id = uuid::Uuid::new_v4().to_string();
+        let out = terminals
+            .start(&config, &ws, &json!({"command":"printf one-call"}), &id)
+            .await
+            .unwrap();
+        assert_eq!(out["terminal"]["exit_code"], 0, "{out}");
+        assert_eq!(out["terminal"]["output_complete"], true, "{out}");
+        assert_eq!(out["has_more"], false, "{out}");
+        assert_eq!(out["output"], "one-call", "{out}");
+        assert!(out["next_action"].is_null(), "{out}");
     }
 
     #[tokio::test]

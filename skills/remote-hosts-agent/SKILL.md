@@ -5,7 +5,45 @@ description: Operate and maintain the user's transport-first Remote Hosts system
 
 # Remote Hosts Agent Skill
 
-Use this skill to interact with the user's Remote Hosts service instead of opening raw SSH sessions directly.
+Use this skill for Remote Hosts code editing across authorized devices and for managed SSH operations.
+
+For code work, prefer the Code Gateway tools (`devices_list`, `workspace_open`,
+`code_search`, `code_read`, `code_apply_edits`, `terminal_exec`) whether exposed by
+a desktop MCP server or a hosted connector. Choose the device explicitly, open a
+project under its advertised roots, use bounded reads and version-checked edits,
+and reuse the returned workspace and operation identities. The SSH inventory's
+host IDs are not Code Gateway device IDs. Never silently substitute one for the
+other or fail over an offline device to a different machine.
+
+## Owner-approved continued tasks
+
+A managed task may have a persistent, versioned owner grant. Read its
+task_context authorization and attach task_id plus authorization_version to
+execution calls. The grant only restricts current account/device scopes and
+Agent local flags; it never creates credentials or platform/admin permission.
+A task label alone is correlation, not approval. Keep work within the user's
+already approved scope when the owner is offline; no owner browser login is
+needed again merely to execute an unchanged approved task.
+
+Only the owner establishes or changes a grant through the Gateway's
+/status/task-authorization form using the existing owner password. Do not read,
+enter or transmit that password for the owner. Refer to
+[task authorization](../../docs/task-authorization.md) for the exact scope.
+
+After an owner changes a grant version, use task_resume only for a durable
+task-policy rejection with execution_state=not_started and no operation, or a
+queued operation with no dispatch timestamp. Preserve the original request or
+operation, arguments, file versions and idempotency key. Concurrent resume
+attempts do not authorize duplicates. A recovery claim with no confirmed result
+is unknown and must be observed.
+
+Never use task_resume for platform prompts, local allow-flag denials, generic
+access_denied, source-address policy rejection, credentials/terminal input,
+running/completed work or unknown outcomes. Do not change task labels, omit a
+managed task's binding, choose another device or route, or acquire broader
+scopes to evade a denial. Continue independent authorized work and report the
+specific blocked boundary. This feature neither creates Codex conversations nor
+keeps an external assistant scheduled; those platform controls remain separate.
 
 ## Core Rules
 
@@ -41,6 +79,14 @@ Use this skill to interact with the user's Remote Hosts service instead of openi
 30. For sharing between Remote Hosts installations, read [instance-sync.md](references/instance-sync.md). Use `remote_hosts_configure_instance_sync_peer` once per approved direction, then `remote_hosts_sync_instance_peer`. The default includes `inventory`, `knowledge`, and all user-authorized SSH credentials, carried as peer-sealed ciphertext and re-encrypted in the receiving vault. Do not move SQLite files, vault master keys, Workspaces, PTYs, operations, output artifacts, or active repositories. Resolve a reported conflict explicitly instead of retrying it.
 31. For Remote Hosts Code rollout, prefer one immutable release bundle plus `fleet_status`: upgrade the Gateway before Agents, require explicit wire compatibility, and declare convergence only when version, tool schema, and embedded Skill revision all match. Never interpret an incompatible/offline Agent as proof that installation failed.
 32. If a mutating Code operation returns `outcome_unknown`, observe the original operation and verify scoped side effects. A new idempotency key must not bypass the semantic guard; use `outcome_resolve` only after evidence proves `verified_applied` or `verified_not_applied`.
+
+## Ordinary maintenance task candidate
+
+For controlled maintenance descriptions and ordinary-user checks, read [admin-maintenance.md](../../docs/admin-maintenance.md). Use the same candidate `remote-hosts-admin task` CLI through an already authorized channel. This source feature is not proof the installed runtime exposes it. Preserve the request UUID, plan digest, operation and private journal through retries; observe interrupted running records instead of using another UUID. Task prepare/run write journal state and require a truthful mutating scope. Metadata-check success, caller-declared device UUID, admin_status_protocol and upgrade receipts never establish root authorization. The repair task is deliberately blocked: separate platform installation/access confirmation and a privileged executor are still required. Never use it to circumvent a denied application/tool action or transmit a password.
+
+## Remote Hosts Code Observation Contract
+
+For Code tools, submit once with a stable idempotency key, then observe `operation_get` with the same `operation_id`, including while its terminal is running. Use `wait_ms`, state `cursor` and byte `terminal_cursor` only when actually exposed by the host. `terminal_read` is the full-log or missing-range recovery path, not a mandatory second task. A compact preview may use `output_ref: "#/output"` to reference the identical top-level output; do not treat it as missing bytes. Byte cursors apply to sanitized UTF-8, not compressed character counts. `output_complete` means capture is sealed; also inspect range completeness, gaps, truncation and the exit code. Process success does not imply business acceptance. `paused` and `awaiting_source` require recovery of the original transfer, never a replacement upload. A server or adapter catalog report is not proof of final host exposure; missing host reports remain unknown.
 
 ## Service Assumptions
 
