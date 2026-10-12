@@ -81,7 +81,7 @@ pub fn no_symlinks(path: &Path) -> Result<()> {
 }
 pub fn private_dir(path: &Path) -> Result<()> {
     no_symlinks(path)?;
-    // Preserve existing workspace permissions.
+    // Do not chmod an existing user workspace just to create a run below it.
     if !path.exists() {
         fs::create_dir_all(path)?;
         #[cfg(unix)]

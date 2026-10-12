@@ -4,12 +4,12 @@ use axum::{
     Router,
     body::{Body, Bytes},
     response::Response,
-    routing::get,
+    routing::{get, post},
 };
 use futures_util::StreamExt;
 use std::sync::{
     Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 async fn fixture() -> (
@@ -181,7 +181,14 @@ async fn expired_source_keeps_checkpoint_for_explicit_authorization_refresh() {
     )
     .await
     .unwrap_err();
-    assert_eq!(e.downcast_ref::<Fault>().unwrap().state, "awaiting_source");
+    let fault = e.downcast_ref::<transfers::SourceHttpFault>().unwrap();
+    assert_eq!(fault.status, 403);
+    let diagnostic = fault.diagnostic();
+    assert_eq!(diagnostic["failure_boundary"], "source_http_authorization");
+    assert_eq!(diagnostic["http_request_started"], true);
+    assert_eq!(diagnostic["destination_changed"], false);
+    assert!(!diagnostic.to_string().contains("/source"));
+    assert_eq!(fault.to_string(), "source_http_authorization_rejected");
     assert_eq!(std::fs::read(j.data_path(&c)).unwrap(), b"old");
     task.abort();
 }
@@ -501,4 +508,254 @@ async fn inbound_checkpoint_survives_a_real_process_kill_and_resumes_only_the_ta
         ["", &format!("bytes={CHUNK}-")]
     );
     server.abort();
+}
+
+// Actual source authorization failure followed by an independently spawned
+// transfer process. All URLs/state/credentials belong to this temporary fixture.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn expired_source_refresh_resumes_same_checkpoint_in_a_new_process() {
+    let (d, c, ws, mut job, store, mut j) = fixture().await;
+    let bytes = b"old-and-unchanged-tail".to_vec();
+    job.arguments["sha256"] = json!(crate::hash(&bytes));
+    j.fingerprint = crate::hash(serde_json::to_vec(&job).unwrap());
+    prefix(&c, &mut j, b"old");
+    j.etag = Some("\"v1\"".into());
+    j.save(&store).await.unwrap();
+    let (raw, digest) = transfer_journal::restore_prefix(
+        transfer_journal::open_data(&j.data_path(&c), false).unwrap(),
+        j.offset,
+        &j.prefix_sha256,
+    )
+    .unwrap();
+    let mut file = tokio::fs::File::from_std(raw);
+    let (expired, expired_server) = static_source(vec![], "expired").await;
+    let error = fetch(
+        &http().unwrap(),
+        &expired,
+        &mut file,
+        &job,
+        &Progress::new(&job.id),
+        &store,
+        &mut j,
+        digest,
+    )
+    .await
+    .unwrap_err();
+    let fault = error.downcast_ref::<transfers::SourceHttpFault>().unwrap();
+    assert_eq!(fault.status, 403);
+    let diagnostic = fault.diagnostic();
+    assert_eq!(diagnostic["failure_boundary"], "source_http_authorization");
+    assert_eq!(diagnostic["http_request_started"], true);
+    assert_eq!(diagnostic["destination_changed"], false);
+    assert!(!diagnostic.to_string().contains("/source"));
+    drop(file);
+    expired_server.abort();
+    assert_eq!(std::fs::read(j.data_path(&c)).unwrap(), b"old");
+    assert!(!ws.root.join("received.bin").exists());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fresh = format!("http://{}/source", listener.local_addr().unwrap());
+    let ranges = Arc::new(Mutex::new(Vec::new()));
+    let captured = ranges.clone();
+    let tail = bytes[3..].to_vec();
+    let router = Router::new().route(
+        "/source",
+        get(move |headers: axum::http::HeaderMap| {
+            let captured = captured.clone();
+            let tail = tail.clone();
+            async move {
+                let range = headers.get("range").unwrap().to_str().unwrap().to_owned();
+                captured.lock().unwrap().push(range);
+                Response::builder()
+                    .status(206)
+                    .header("etag", "\"v1\"")
+                    .header(
+                        "content-range",
+                        format!("bytes 3-{}/{}", tail.len() + 2, tail.len() + 3),
+                    )
+                    .body(Body::from(tail))
+                    .unwrap()
+            }
+        }),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let spec = d.path().join("refresh-child.json");
+    std::fs::write(&spec, json!({"config":c,"job":job,"url":fresh}).to_string()).unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "durable_transfer::tests::inbound_child_process",
+            "--nocapture",
+        ])
+        .env("RH040_CHECKPOINT_FIXTURE", &spec)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let finished = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    if finished.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    server.abort();
+    assert!(
+        finished.unwrap().success(),
+        "refreshed transfer child failed"
+    );
+    let reopened = Store::open(&c.state_dir).await.unwrap();
+    let saved: Journal = reopened
+        .get("transfer_local", &job.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.operation_id, job.id);
+    assert_eq!(saved.offset, bytes.len() as u64);
+    assert_eq!(saved.content_sha256, Some(crate::hash(&bytes)));
+    assert_eq!(std::fs::read(saved.data_path(&c)).unwrap(), bytes);
+    assert_eq!(ranges.lock().unwrap().as_slice(), ["bytes=3-"]);
+}
+
+#[tokio::test]
+async fn destination_permission_suspension_preserves_recovery_state_and_boundary() {
+    let (_d, mut c, ws, job, store, mut j) = fixture().await;
+    prefix(&c, &mut j, b"checkpoint");
+    j.save(&store).await.unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    c.gateway_url = format!("http://{}", listener.local_addr().unwrap());
+    j.origin = c.gateway_url.clone();
+    let status_posts = Arc::new(AtomicUsize::new(0));
+    let seen_posts = status_posts.clone();
+    let router = Router::new().route(
+        "/device/transfer-status/{id}",
+        post(move || {
+            let seen_posts = seen_posts.clone();
+            async move {
+                seen_posts.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({"accepted":true}))
+            }
+        }),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let staging_error = transfers::classify_destination_error(
+        anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "secret /private/staging/path",
+        )),
+        "destination_staging",
+        Some(false),
+    );
+    let staging_fault = staging_error
+        .downcast_ref::<transfers::DestinationPermissionFault>()
+        .unwrap();
+    let staging = suspended(
+        &c,
+        &store,
+        &mut j,
+        &Progress::new(&job.id),
+        "paused",
+        "destination_file_permission_denied",
+        Some(staging_fault.diagnostic()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(staging["state"], "paused");
+    assert_eq!(staging["failure_boundary"], "destination_file_permission");
+    assert_eq!(staging["diagnostic"]["stage"], "destination_staging");
+    assert_eq!(staging["destination_changed"], false);
+    assert_eq!(
+        staging["next_action"],
+        "fix_destination_permissions_then_resume_original"
+    );
+    assert!(!staging.to_string().contains("/private/staging/path"));
+    let saved: Journal = store.get("transfer_local", &job.id).await.unwrap().unwrap();
+    assert_eq!(saved.phase, "paused");
+    assert_eq!(saved.offset, b"checkpoint".len() as u64);
+    assert!(saved.result.is_none());
+    assert!(!ws.root.join("received.bin").exists());
+
+    j.phase = "publishing".into();
+    j.publication_temp = Some(".remote-hosts-transfer-fixture.tmp".into());
+    j.publication_identity = Some((1, 2));
+    j.save(&store).await.unwrap();
+    let publication_error = transfers::classify_destination_error(
+        anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "private publication target",
+        )),
+        "destination_publication",
+        None,
+    );
+    let publication_fault = publication_error
+        .downcast_ref::<transfers::DestinationPermissionFault>()
+        .unwrap();
+    let publication = suspended(
+        &c,
+        &store,
+        &mut j,
+        &Progress::new(&job.id),
+        "paused",
+        "destination_file_permission_denied",
+        Some(publication_fault.diagnostic()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(publication["state"], "paused");
+    assert_eq!(publication["publication_pending"], true);
+    assert_eq!(
+        publication["diagnostic"]["stage"],
+        "destination_publication"
+    );
+    assert!(publication["destination_changed"].is_null());
+    assert_eq!(
+        publication["next_action"],
+        "inspect_destination_before_resuming_original"
+    );
+    assert_eq!(
+        publication["retry_policy"],
+        "resume_original_only_after_destination_permissions_and_state_confirmed"
+    );
+    assert!(
+        !publication
+            .to_string()
+            .contains("private publication target")
+    );
+    let saved: Journal = store.get("transfer_local", &job.id).await.unwrap().unwrap();
+    assert_eq!(saved.phase, "publishing");
+    assert_eq!(
+        saved.publication_temp.as_deref(),
+        Some(".remote-hosts-transfer-fixture.tmp")
+    );
+    assert_eq!(saved.publication_identity, Some((1, 2)));
+    assert_eq!(saved.offset, b"checkpoint".len() as u64);
+    assert!(saved.result.is_none());
+    assert_eq!(status_posts.load(Ordering::SeqCst), 2);
+    assert!(!ws.root.join("received.bin").exists());
+    server.abort();
+}
+
+#[tokio::test]
+async fn legacy_transfer_journal_without_publication_metadata_decodes_with_safe_defaults() {
+    let (_d, _c, _ws, _job, _store, journal) = fixture().await;
+    let mut legacy = serde_json::to_value(journal).unwrap();
+    let fields = legacy.as_object_mut().unwrap();
+    assert!(fields.remove("publication_identity").is_some());
+    assert!(fields.remove("data_cleaned").is_some());
+
+    let decoded: Journal = serde_json::from_value(legacy).unwrap();
+    assert_eq!(decoded.publication_identity, None);
+    assert!(!decoded.data_cleaned);
 }

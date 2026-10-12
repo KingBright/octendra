@@ -53,14 +53,101 @@ def required_tool_names(version):
         tools |= {'change_resume','workspace_gc'}
     if parsed >= (0, 10, 2):
         tools |= {'fleet_status','outcome_resolve'}
+    if parsed >= (0, 10, 4):
+        tools |= {'task_context'}
     return tools
 
 
 def stable_operation_receipt(value):
-    """Compare durable operation content, not live observation snapshots."""
+    """Compare operation evidence, excluding per-call identity and observation time.
+
+    Errors, execution state, completeness, replay policy and operation identity
+    remain part of the comparison. A new observation is not a new execution.
+    """
     stable = dict(value)
-    stable.pop('operation_lifecycle', None)
+    for key in ('operation_lifecycle', 'request_id', 'observation', 'terminal_observation'):
+        stable.pop(key, None)
+    if isinstance(stable.get('receipt'), dict):
+        stable['receipt'] = dict(stable['receipt'])
+        receipt = stable['receipt']
+        if receipt.get('protocol') == 2:
+            # Protocol 2 separates this query's retention from the original
+            # operation's durable evidence. Compare that evidence with v1.
+            receipt['durable'] = (receipt.get('evidence_durable') is True and
+                (receipt.get('request_record_persisted') is True and receipt.get('durable') is True or
+                 receipt.get('request_record_persisted') is False and receipt.get('durable') is False and
+                 receipt.get('durability_scope') == 'observed_facts_only_not_this_query'))
+            receipt['protocol'] = 1
+            for key in ('evidence_durable', 'request_record_persisted', 'durability_scope', 'request_retention'):
+                receipt.pop(key, None)
+            stable.pop('request_retention', None)
+        for key in ('request_id', 'observed_at'):
+            stable['receipt'].pop(key, None)
     return stable
+
+
+def machine_tool_params(name, arguments):
+    """Acceptance consumes the full machine contract, not presentation compaction."""
+    arguments = dict(arguments)
+    arguments['response_mode'] = 'full'
+    return {'name': name, 'arguments': arguments}
+
+
+def validate_receipt_protocol(value):
+    """Both durable-v1 and observation-v2 receipts are understood by this client."""
+    if type(value) is not int or value not in (1, 2):
+        raise ValueError('unsupported request receipt protocol')
+
+
+def python_probe_command(code, platform):
+    if platform == 'windows':
+        # PowerShell does not interpret POSIX shlex's nested quote syntax.
+        payload = base64.b64encode(code.encode('utf-8')).decode('ascii')
+        return 'python3 -c "import base64;exec(base64.b64decode(\'' + payload + '\'))"'
+    return 'python3 -c ' + shlex.quote(code)
+
+
+def settle_operation(name, value, invoke, *, deadline=None):
+    """Observe the original operation; resume only known transient transfers."""
+    end = time.monotonic() + 300 if deadline is None else deadline
+    resumes = 0
+    while True:
+        pending = bool(value.get('pending')) or value.get('next_action') == 'operation_get'
+        paused = value.get('state') in ('paused', 'awaiting_source')
+        if not pending and not paused:
+            return value
+        ident = value.get('operation_id')
+        if not ident:
+            raise RuntimeError('Incomplete operation without identity: ' + name)
+        if time.monotonic() >= end:
+            raise RuntimeError('Operation pending; observe original: ' + ident)
+        if paused:
+            transient = (value.get('diagnostic') or {}).get('code') in (
+                'gateway_connection', 'network_retry_exhausted')
+            if (name not in ('file_upload', 'file_download') or not transient or
+                    value.get('state') != 'paused' or
+                    value.get('next_action') != 'transfer_resume' or resumes >= 2):
+                raise RuntimeError('Operation incomplete; inspect original: ' + ident)
+            resumes += 1
+            # A lost resume response is not permission to repeat that mutation.
+            try:
+                value = invoke('transfer_resume', {'operation_id': ident,
+                    'idempotency_key': 'acceptance-resume-' + ident + '-' + str(resumes)})
+            except Exception as error:
+                raise RuntimeError('Resume response unavailable; observe original: ' + ident) from error
+        else:
+            time.sleep(0.5)
+            value = invoke('operation_get', {'operation_id': ident})
+        if value.get('operation_id') != ident:
+            raise RuntimeError('Recovery changed operation identity: ' + ident)
+
+
+def assert_transfer_rejected(value, reason):
+    if (value.get('state') != 'failed' or not value.get('error') or
+            reason not in value.get('message', '') or
+            value.get('destination_changed') is not False):
+        raise AssertionError('Expected transfer rejection ' + reason +
+                             '; inspect original: ' + str(value.get('operation_id')))
 
 
 def acceptance_summary(report):
@@ -78,6 +165,8 @@ def acceptance_summary(report):
 
 
 def main():
+    from release_client import Client
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--origin", required=True)
     parser.add_argument("--password-file", required=True, type=pathlib.Path)
@@ -117,13 +206,27 @@ def main():
     assert metadata["resource"] == args.origin + "/mcp"
     assert call("/mcp", {})[0] == 401
     redirect = "https://chatgpt.com/connector_platform_oauth_redirect"
-    version_tuple = tuple(map(int, args.expected_version.split('.')))
-    redirects = [redirect]
-    if version_tuple >= (0, 10, 5):
-        spark_suffix = "remote-hosts-acceptance-" + args.run_id.replace("_", "-")
-        redirects.append("https://oauth-redirect.googleusercontent.com/r/" + spark_suffix)
-    client = parsed("/oauth/register", {"redirect_uris": redirects, "token_endpoint_auth_method": "none"})
-    assert client["redirect_uris"] == redirects
+    parsed_version = tuple(map(int, args.expected_version.split('.')))
+    if parsed_version >= (0, 10, 4):
+        status, _, body = call("/status")
+        assert status == 200 and b"Gateway password" in body
+        status, headers, _ = call(
+            "/status/login",
+            {"password": args.password_file.read_text().strip()},
+            form=True,
+        )
+        assert status == 303 and headers["Location"] == "/status"
+        status, headers, body = call("/status")
+        assert status == 200 and b"Authoritative Gateway state" in body
+        assert b"Heartbeat is not counted as business progress" in body
+        assert "no-store" in headers.get("Cache-Control", "")
+    if parsed_version >= (0, 10, 4):
+        spark_redirect = "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-remote-hosts-acceptance-" + args.run_id
+        spark = parsed("/oauth/register", {"redirect_uris": [spark_redirect], "client_name": "Gemini Spark acceptance"})
+        assert spark["redirect_uris"] == [spark_redirect]
+        assert spark["token_endpoint_auth_method"] == "client_secret_basic"
+        assert spark.get("client_secret")
+    client = parsed("/oauth/register", {"redirect_uris": [redirect], "token_endpoint_auth_method": "none"})
     verifier = secrets.token_urlsafe(48)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
     query = urllib.parse.urlencode({"client_id": client["client_id"], "redirect_uri": redirect, "response_type": "code", "code_challenge": challenge, "code_challenge_method": "S256", "state": "acceptance-" + args.run_id, "resource": metadata["resource"]})
@@ -135,26 +238,12 @@ def main():
     result = urllib.parse.parse_qs(urllib.parse.urlsplit(headers["Location"]).query)
     assert result["iss"] == [args.origin]
     token = parsed("/oauth/token", {"grant_type": "authorization_code", "client_id": client["client_id"], "code": result["code"][0], "code_verifier": verifier, "redirect_uri": redirect, "resource": metadata["resource"]}, form=True)
-    bearer = token["access_token"]
-    # Failed acceptance must not leave its temporary OAuth grant active.
-    atexit.register(lambda: call("/oauth/revoke", {"token": token["refresh_token"]}, form=True))
-    sequence = 0
-
-    def rpc(method, params):
-        nonlocal sequence
-        sequence += 1
-        payload = {"jsonrpc": "2.0", "id": sequence, "method": method, "params": params}
-        for attempt in range(5):
-            try:
-                result = parsed("/mcp", payload, bearer=bearer)
-                break
-            except (TimeoutError, urllib.error.URLError, OSError):
-                if attempt == 4:
-                    raise
-                time.sleep(min(2 ** attempt, 8))
-        if "error" in result:
-            raise RuntimeError("MCP protocol error: " + str(result["error"].get("code")))
-        return result["result"]
+    # Reuse the release client's native persistent transport and durable request
+    # receipts. Selection happens before RPC; uncertain calls never fall back.
+    mcp = Client(args.origin, access=token["access_token"])
+    mcp.refresh = token["refresh_token"]
+    atexit.register(mcp.close)
+    rpc = mcp.rpc
 
     rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "remote-hosts-live-acceptance", "version": "1"}})
     catalog = rpc("tools/list", {})
@@ -167,10 +256,19 @@ def main():
     assert upload_descriptor["_meta"]["openai/fileParams"] == ["file"]
     health = parsed("/healthz")
     assert health["version"] == args.expected_version
-    parsed_version = version_tuple
     if parsed_version >= (0, 10, 2):
         assert health.get("wire_protocol", 0) >= 2
         assert health.get("min_agent_wire_protocol", 0) <= 1
+    if parsed_version >= (0, 10, 4):
+        assert health.get("machine_contract_protocol") == 1
+        assert health.get("capabilities_protocol") == 2
+        assert health.get("schema_diagnostics_protocol") == 2
+        validate_receipt_protocol(health.get("request_receipt_protocol"))
+        assert health.get("terminal_observation_protocol") == 2
+        assert health.get("tool_schema_revision") == health.get("tools_sha256")
+        operation_get = next(t for t in catalog["tools"] if t["name"] == "operation_get")
+        op_props = operation_get["inputSchema"]["properties"]
+        assert "request_id" in op_props and "terminal_cursor" in op_props
     if args.dispatch_protocol is not None:
         assert health.get("dispatch_protocol") == args.dispatch_protocol
     if parsed_version >= (0, 7, 0):
@@ -179,20 +277,15 @@ def main():
         assert health.get("max_file_bytes") == 268435456
         assert health.get("storage_reserve_bytes") == 268435456
 
-    def tool(name, arguments, allow_error=False):
-        result = rpc("tools/call", {"name": name, "arguments": arguments})
+    def invoke(name, arguments):
+        result = rpc("tools/call", machine_tool_params(name, arguments))
         value = result.get("structuredContent")
         if value is None:
             value = json.loads(result["content"][0]["text"]) if not result.get("isError") else {"error": "tool_failed", "message": result["content"][0]["text"]}
-        deadline = time.monotonic() + 300
-        def needs_operation_poll(v):
-            return bool(v.get("pending")) or v.get("next_action") == "operation_get"
-        while needs_operation_poll(value) and time.monotonic() < deadline:
-            time.sleep(0.5)
-            polled = rpc("tools/call", {"name": "operation_get", "arguments": {"operation_id": value["operation_id"]}})
-            value = polled.get("structuredContent") or {"error": "poll_failed"}
-        if needs_operation_poll(value):
-            raise RuntimeError("Operation pending: " + value["operation_id"])
+        return value
+
+    def tool(name, arguments, allow_error=False):
+        value = settle_operation(name, invoke(name, arguments), invoke)
         if "error" in value and not allow_error:
             raise RuntimeError(name + ": " + str(value.get("message", value["error"]))[:300])
         return value
@@ -215,6 +308,7 @@ def main():
     report = json.loads(args.report.read_text()) if args.report.exists() else {"origin": args.origin, "version": args.expected_version, "run_id": args.run_id, "selected_device_ids":sorted(d['device_id'] for d in devices), "dispatch_protocol": health.get("dispatch_protocol"), "oauth": "passed", "mcp_tool_count": len(catalog["tools"]), "devices": []}
     validate_report_scope(report, args.origin, args.expected_version, args.run_id, devices)
     report['test_oauth_grant_revoked'] = False
+    report['rpc_transport'] = mcp.transport_mode
     report['state'] = 'running'
     completed = {d["device_id"] for d in report["devices"]}
     for device in devices:
@@ -242,7 +336,9 @@ def main():
         assert "error" in tool("code_apply_edits", stale, allow_error=True)
         found = tool("code_search", {"workspace_id": ws, "query": "return 42", "glob": path, "max_bytes": 4096})
         assert len(found["matches"]) == 1
-        terminal = tool("terminal_exec", {"workspace_id": ws, "idempotency_key": key + "-test", "command": "python3 " + path, "timeout_seconds": 30})
+        platform = device["capabilities"].get("platform")
+        probe_command = python_probe_command("import runpy;runpy.run_path(" + repr(path) + ")", platform)
+        terminal = tool("terminal_exec", {"workspace_id": ws, "idempotency_key": key + "-test", "command": probe_command, "timeout_seconds": 30})
         deadline = time.monotonic() + 45
         while True:
             output = tool("terminal_read", {"workspace_id": ws, "terminal_id": terminal["terminal_id"]})
@@ -259,7 +355,7 @@ def main():
         checksum = hashlib.sha256(payload).hexdigest()
 
         def run_probe(code, suffix):
-            command = "python3 -c " + shlex.quote(code)
+            command = python_probe_command(code, platform)
             term = tool("terminal_exec", {"workspace_id": ws, "idempotency_key": key + suffix, "command": command, "timeout_seconds": 30})
             until = time.monotonic() + 45
             while True:
@@ -284,14 +380,16 @@ def main():
         assert imported["sha256"] == checksum and imported["size"] == len(payload)
         retried_import = tool("file_upload", imported_args)
         assert stable_operation_receipt(retried_import) == stable_operation_receipt(imported), "import retry must reuse original durable receipt"
-        assert "error" in tool("file_upload", dict(imported_args, idempotency_key=key+"-no-clobber"), allow_error=True)
-        assert "error" in tool("file_upload", dict(imported_args, idempotency_key=key+"-bad-checksum", path=bad_path, sha256="0"*64), allow_error=True)
+        assert_transfer_rejected(tool("file_upload", dict(imported_args, idempotency_key=key+"-no-clobber"), allow_error=True), 'version_conflict')
+        assert_transfer_rejected(tool("file_upload", dict(imported_args, idempotency_key=key+"-bad-checksum", path=bad_path, sha256="0"*64), allow_error=True), 'sha256_mismatch')
         run_probe("import pathlib,hashlib; p=pathlib.Path(" + repr(imported_path) + "); assert hashlib.sha256(p.read_bytes()).hexdigest()==" + repr(checksum) + "; assert not pathlib.Path(" + repr(bad_path) + ").exists(); p.unlink(); pathlib.Path(" + repr(binary_path) + ").unlink()", "-binary-cleanup")
         tool("code_apply_edits", {"workspace_id": ws, "idempotency_key": key + "-cleanup", "files": [{"path": path, "expected_version": edited["changed"][0]["version"], "action": "delete"}]})
         report["devices"].append({"device_id": device["device_id"], "name": device["name"], "workspace_id": ws, "range_read": "passed", "syntax_tree": "passed", "precise_edit": "passed", "duplicate_edit": "passed", "stale_version_rejected": True, "search": "passed", "terminal_test_exit_code": 0, "probe_file_removed": True, "agent_version": device["capabilities"]["version"], "binary_transfer_bytes": len(payload), "binary_sha256": checksum, "download": "passed", "upload": "passed", "http_range": "passed", "upload_retry": "passed", "overwrite_rejected": True, "checksum_mismatch_rejected": True})
         args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2))
         print(device["name"] + ": code, terminal, 2 MiB binary upload/download, Range, retry and failure checks all passed", flush=True)
-    parsed("/oauth/revoke", {"token": token["refresh_token"]}, form=True)
+    mcp.close()
+    if not mcp.oauth_revoke_complete:
+        raise RuntimeError('Temporary acceptance OAuth grant revocation unconfirmed')
     report["test_oauth_grant_revoked"] = True
     summary = acceptance_summary(report)
     report['state'] = 'passed'

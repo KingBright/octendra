@@ -10,8 +10,10 @@ uncertain mutation: its journal is the recovery boundary.
 import argparse
 import json
 import pathlib
+import re
 import shlex
 import subprocess
+import sys
 import tarfile
 import time
 
@@ -24,6 +26,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 def platform(device):
     caps=device.get('capabilities') or {}
     value=caps.get('platform') or ''
+    if value == 'android':
+        raise ValueError('android_requires_separate_apk_release: desktop fleet upgrade refused; never infer Linux from an Android path')
     if value in ('macos','linux','windows'): return value
     roots=caps.get('roots') or []
     root=roots[0] if roots else ''
@@ -90,23 +94,157 @@ def controller_device_id(config):
     return workspace.split(':',1)[0] if ':' in workspace else None
 
 
-def verified_import(client, imported, exported, bundle, bundle_sha, version, ident):
-    if imported.get('state')=='completed' and imported.get('sha256')==bundle_sha:return imported
-    if imported.get('state') in ('paused','awaiting_source') and imported.get('next_action')=='transfer_resume':
-        resumed=client.tool('transfer_resume',{'operation_id':imported['operation_id'],
-            'idempotency_key':'fleet-'+version+'-bundle-resume-'+ident,
-            'file':{'file_id':exported['artifact_id'],'download_url':exported['download_url'],'file_name':bundle.name}})
-        if resumed.get('state')=='completed' and resumed.get('sha256')==bundle_sha:return resumed
+def exported_size(exported, bundle):
+    value=exported.get('size')
+    return value if isinstance(value,int) and value>=0 else bundle.stat().st_size
+
+
+def recover_transfer(client, value, resume_key, *, file=None, deadline=None, max_resumes=2):
+    """Continue one original file operation; this never submits an upload/download.
+
+    A lost resume acknowledgement stops with the original exception/handle.
+    New resume generations use the device's revision, not a timeout or a new run.
+    """
+    if type(max_resumes) is not int or not 0 <= max_resumes <= 5:
+        raise ValueError('invalid transfer resume budget')
+    end=time.monotonic()+300 if deadline is None else deadline
+    ident=value.get('operation_id')
+    if not ident: raise RuntimeError('bundle transfer missing operation identity')
+    resumes=0
+    while True:
+        if value.get('operation_id')!=ident:
+            raise RuntimeError('bundle transfer recovery changed operation identity: '+ident)
+        if (value.get('state') in ('unknown','outcome_unknown') or value.get('outcome')=='outcome_unknown'
+                or value.get('receipt',{}).get('execution_state')=='outcome_unknown'):
+            raise RuntimeError('bundle transfer outcome uncertain; observe original: '+ident)
+        if value.get('error'):
+            raise RuntimeError('bundle transfer failed; observe original: '+ident)
+        if value.get('state')=='completed': return value
+        if time.monotonic()>=end:
+            raise RuntimeError('bundle transfer recovery timeout; observe original: '+ident)
+        if value.get('pending') or value.get('next_action')=='operation_get':
+            name='operation_get';args={'operation_id':ident,'wait_ms':5000}
+        elif (value.get('state') in ('paused','awaiting_source')
+                and value.get('next_action')=='transfer_resume' and value.get('resumable') is not False):
+            if value['state']=='awaiting_source' and file is None:
+                raise RuntimeError('bundle transfer needs refreshed source authorization; observe original: '+ident)
+            if resumes>=max_resumes:
+                raise RuntimeError('bundle transfer resume limit reached; observe original: '+ident)
+            revision=value.get('transfer_revision')
+            if revision is not None and (type(revision) is not int or revision<0):
+                raise RuntimeError('bundle transfer revision invalid; observe original: '+ident)
+            # Legacy results have no revision; retain their bounded attempt identity.
+            generation=revision if revision is not None else 'legacy-'+str(resumes+1)
+            args={'operation_id':ident,'idempotency_key':resume_key+'-'+rr.identity([ident,generation])[:16]}
+            if file is not None: args['file']=dict(file)
+            name='transfer_resume';resumes+=1
+        else:
+            raise RuntimeError('bundle transfer not recoverable: '+str(value.get('state'))+'; observe original: '+ident)
+        try:
+            value=client.tool(name,args,deadline=end,allow_incomplete=True)
+        except Exception as error:
+            error.add_note('bundle transfer interrupted; observe original: '+ident+'; no producing request replayed')
+            raise
+
+
+def verified_export(client, exported, bundle, bundle_sha, version, *, deadline=None, max_resumes=2):
+    value=recover_transfer(client,exported,'fleet-'+version+'-bundle-export-resume',
+                           deadline=deadline,max_resumes=max_resumes)
+    if value.get('sha256')!=bundle_sha or not value.get('artifact_id') or not value.get('download_url'):
+        raise RuntimeError('bundle export completed without verified artifact identity')
+    return value
+
+
+def verified_import(client, imported, exported, bundle, bundle_sha, version, ident, *, deadline=None, max_resumes=2):
+    if imported.get('state')=='completed' and imported.get('sha256')!=bundle_sha:
+        raise RuntimeError('bundle import not verified: '+ident)
+    value=recover_transfer(client,imported,'fleet-'+version+'-bundle-resume-'+ident,
+        file={'file_id':exported['artifact_id'],'download_url':exported['download_url'],'file_name':bundle.name},
+        deadline=deadline,max_resumes=max_resumes)
+    if value.get('sha256')==bundle_sha:return value
     raise RuntimeError('bundle import not verified: '+ident)
 
 
 def accept_fleet(config,package,directory,version,fleet):
     ids=[d['device_id'] for d in fleet['devices']]
-    acceptance=directory/'acceptance.json';run_id='fleet-'+version.replace('.','-')+'-'+rr.identity(ids)[:8]
-    command(['python3',str(package/'check-code-gateway.py'),'--origin',config['origin'],'--password-file',config['password_file'],'--report',str(acceptance),'--run-id',run_id,'--expected-version',version,'--dispatch-protocol','2',*[x for ident in ids for x in ('--device-id',ident)]],1200)
+    acceptance=directory/'acceptance.json'
+    validator=pathlib.Path(config.get('acceptance_script') or package/'check-code-gateway.py').resolve()
+    validator_sha=rr.digest(validator)
+    run_id='fleet-'+version.replace('.','-')+'-'+rr.identity(ids)[:8]+'-'+validator_sha[:8]
+    identity_path=directory/'acceptance-validator.json'
+    if acceptance.exists():
+        previous=json.loads(identity_path.read_text()) if identity_path.exists() else {}
+        if previous.get('sha256')!=validator_sha:
+            raise RuntimeError('saved acceptance belongs to another validator; use a new report directory')
+    rr.atomic_json(identity_path,{'path':str(validator),'sha256':validator_sha,
+        'packaged_validator':validator==(package/'check-code-gateway.py').resolve(),
+        'package_manifest_sha256':rr.digest(package/'manifest.json')})
+    try:
+        command(['python3',str(validator),'--origin',config['origin'],'--password-file',config['password_file'],'--report',str(acceptance),'--run-id',run_id,'--expected-version',version,'--dispatch-protocol','2',*[x for ident in ids for x in ('--device-id',ident)]],1200)
+    except subprocess.CalledProcessError as error:
+        diagnostic=re.sub(r'https?://\S+', '<url omitted>', error.stderr or '')
+        diagnostic=re.sub(r'(?i)Bearer\s+\S+', 'Bearer <redacted>', diagnostic)
+        rr.atomic_json(directory/'acceptance-failure.json',{'exit_code':error.returncode,
+            'validator_sha256':validator_sha,'stderr_tail':diagnostic[-4096:]})
+        raise RuntimeError('acceptance failed; inspect '+str(directory/'acceptance-failure.json')) from None
+    if rr.digest(validator)!=validator_sha:raise RuntimeError('acceptance validator changed during execution')
     result=json.loads(acceptance.read_text())
     if result.get('state')!='passed':raise RuntimeError('fleet capability acceptance failed')
     return acceptance
+
+
+def desktop_scope(fleet):
+    """Android APKs use a separate signing/version lane, never a desktop bundle.
+
+    Keep the original all_converged fact, and report desktop convergence separately.
+    Excluded devices remain visible rather than being labelled upgraded.
+    """
+    selected=dict(fleet)
+    android=[d for d in fleet['devices'] if (d.get('capabilities') or {}).get('platform')=='android']
+    selected['devices']=[d for d in fleet['devices'] if (d.get('capabilities') or {}).get('platform')!='android']
+    selected['excluded_devices']=[{'device_id':d['device_id'],'name':d.get('name'),
+        'platform':'android','reason':'separate_signed_apk_release'} for d in android]
+    gateway_ready=fleet.get('summary',{}).get('gateway_converged',fleet.get('all_converged',False))
+    selected['desktop_converged']=bool(gateway_ready and all(d.get('converged') for d in selected['devices']))
+    return selected
+
+
+def rollout_targets(devices, controller_id):
+    online=[d for d in devices if d.get('online')]
+    deferred=[d for d in devices if not d.get('online')]
+    ordered=[d for d in online if d['device_id']!=controller_id]+[d for d in online if d['device_id']==controller_id]
+    return ordered,deferred
+
+
+def finish_observed_fleet(config,package,directory,version,state,fleet):
+    """Accept the actual reachable scope; never label offline devices as upgraded."""
+    excluded=fleet.get('excluded_devices',[])
+    state['excluded_devices']=excluded
+    if fleet.get('desktop_converged',fleet.get('all_converged')):
+        acceptance=accept_fleet(config,package,directory,version,fleet) if fleet['devices'] else None
+        state.update(state='passed',phase='finished',all_converged=bool(fleet.get('all_converged')),online_converged=True,
+                     desktop_converged=True,pending_device_ids=[],
+                     acceptance_scope='desktop_devices' if excluded else 'all_devices',
+                     acceptance=str(acceptance) if acceptance else None)
+    else:
+        pending=[d for d in fleet['devices'] if not d['converged']]
+        if not fleet.get('summary',{}).get('gateway_converged') or not pending or any(d.get('online') for d in pending):
+            return False
+        online=[d for d in fleet['devices'] if d.get('online')]
+        acceptance=None
+        if online:
+            scope=directory/'online-only';scope.mkdir(parents=True,exist_ok=True)
+            acceptance=accept_fleet(config,package,scope,version,dict(fleet,devices=online))
+        for d in pending:
+            state['agents'][d['device_id']]={'name':d['name'],'platform':platform(d),'state':'waiting_online'}
+        state.update(state='waiting_online',phase='offline_devices',all_converged=False,
+                     online_converged=bool(online),pending_device_ids=[d['device_id'] for d in pending],
+                     acceptance_scope='online_desktop_devices' if excluded else 'online_devices',acceptance=str(acceptance) if acceptance else None,
+                     next_action='rerun this fleet command after the deferred devices reconnect; no offline upgrade was queued')
+    state['fleet']=fleet
+    rr.atomic_json(directory/'fleet.json',state)
+    print(json.dumps({k:state.get(k) for k in ('state','version','all_converged','online_converged','pending_device_ids','acceptance_scope')}))
+    return True
 
 
 def gateway_upgrade_api(client,version,bundle_sha,timeout=600):
@@ -185,23 +323,120 @@ def launch_command(device,destination,manifest,version):
             ' -Sha256 '+sha+' -Version '+version+' -Result '+ps_quote(destination+'\\upgrade-result.json'))
 
 
+def validate_transfer_acceptance(spec):
+    """Only an explicit original transfer and borrowed grant may enter here."""
+    if not isinstance(spec, dict) or spec.get('schema_version') != 1:
+        raise ValueError('invalid transfer acceptance specification')
+    if spec.get('kind') not in ('export', 'import'):
+        raise ValueError('transfer acceptance requires export or import')
+    for field in ('operation_id', 'resume_key'):
+        if not isinstance(spec.get(field), str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,160}', spec[field]):
+            raise ValueError('invalid transfer acceptance identity')
+    if not isinstance(spec.get('sha256'), str) or not re.fullmatch(r'[0-9a-f]{64}', spec['sha256']):
+        raise ValueError('transfer acceptance requires original SHA-256')
+    if not isinstance(spec.get('origin'), str):
+        raise ValueError('transfer acceptance requires explicit origin')
+    seconds=spec.get('deadline_seconds',300)
+    budget=spec.get('max_resumes',2)
+    if type(seconds) is not int or not 1 <= seconds <= 300:
+        raise ValueError('invalid transfer acceptance deadline')
+    if type(budget) is not int or not 0 <= budget <= 5:
+        raise ValueError('invalid transfer acceptance resume budget')
+    source=spec.get('file')
+    if source is not None:
+        if spec['kind'] != 'import' or not isinstance(source,dict):
+            raise ValueError('source refresh requires original import')
+        if set(source) != {'file_id','download_url','file_name'} or not all(isinstance(x,str) and x for x in source.values()):
+            raise ValueError('source refresh requires explicit original file identity')
+    return seconds,budget
+
+
+def accept_existing_transfer(client, spec, report):
+    """Observe/resume one existing operation; never distribute or deploy bytes.
+
+    The caller supplies its existing authorized client. Source refresh is explicit
+    and the existing server verifies unchanged file identity. Reports omit URLs,
+    bearer tokens, credentials and arbitrary exception text.
+    """
+    seconds,budget=validate_transfer_acceptance(spec)
+    if client.origin != spec['origin']:
+        raise ValueError('transfer acceptance origin changed')
+    ident=spec['operation_id']
+    state={'schema_version':1,'mode':'existing_transfer_acceptance','operation_id':ident,
+           'kind':spec['kind'],'sha256':spec['sha256'],'state':'observing',
+           'producer_submitted':False,'deployment_requested':False,'new_oauth_grant':False}
+    rr.atomic_json(report,state)
+    try:
+        deadline=time.monotonic()+seconds
+        value=client.tool('operation_get',{'operation_id':ident},deadline=deadline,allow_incomplete=True)
+        if value.get('operation_id') != ident:
+            raise RuntimeError('transfer acceptance changed original operation identity')
+        value=recover_transfer(client,value,spec['resume_key'],file=spec.get('file'),
+                               deadline=deadline,max_resumes=budget)
+        if value.get('sha256') != spec['sha256']:
+            raise RuntimeError('transfer acceptance SHA-256 mismatch')
+        if spec['kind']=='export' and (not value.get('artifact_id') or not value.get('download_url')):
+            raise RuntimeError('transfer acceptance export artifact unconfirmed')
+        state.update(state='accepted',transfer_revision=value.get('transfer_revision'),size=value.get('size'),
+                     acceptance_scope='original_transfer_only')
+        rr.atomic_json(report,state)
+        return state
+    except Exception as error:
+        state.update(state='needs_recovery',error_type=type(error).__name__,
+                     next_action='observe the same original operation; do not replay producer or deploy')
+        rr.atomic_json(report,state)
+        raise
+
+
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--version',required=True);p.add_argument('--package',type=pathlib.Path,required=True);p.add_argument('--config',type=pathlib.Path,required=True);p.add_argument('--report-dir',type=pathlib.Path,required=True);args=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--version');p.add_argument('--package',type=pathlib.Path);p.add_argument('--config',type=pathlib.Path);p.add_argument('--report-dir',type=pathlib.Path,required=True)
+    p.add_argument('--acceptance-script',type=pathlib.Path,help='Explicit verified validator update; keep the immutable package unchanged and record both identities')
+    p.add_argument('--acceptance-only',type=pathlib.Path,metavar='ORIGINAL_TRANSFER_JSON',
+                   help='Observe/resume only the specified existing transfer; no login, producer, upgrade or fleet deployment')
+    p.add_argument('--access-token-stdin',action='store_true',help='Borrow an already authorized bearer from stdin; never register, approve, refresh or revoke its grant')
+    args=p.parse_args()
+    if args.acceptance_only:
+        if any((args.version,args.package,args.config,args.acceptance_script)) or not args.access_token_stdin:
+            p.error('acceptance-only requires --access-token-stdin and excludes deployment inputs')
+        if args.acceptance_only.stat().st_size > 65536:
+            p.error('transfer acceptance input exceeds 64 KiB')
+        spec=json.loads(args.acceptance_only.read_text())
+        validate_transfer_acceptance(spec)
+        access=sys.stdin.read(4097).strip()
+        if not access or len(access)>4096 or not re.fullmatch(r'[A-Za-z0-9._~+/=-]+',access):
+            p.error('explicit borrowed access token required on stdin')
+        client=Client(spec['origin'],access=access)
+        try:
+            result=accept_existing_transfer(client,spec,args.report_dir/'transfer-acceptance.json')
+            print(json.dumps(result))
+        except Exception as error:
+            # Preserve the cause for in-process callers, but never print a
+            # transport exception/capability URL at this borrowed-token CLI.
+            raise SystemExit('transfer acceptance needs recovery; error_type='+type(error).__name__+
+                             '; observe original operation='+spec['operation_id']) from None
+        finally:
+            client.close()  # refresh is None: borrowed grant is never revoked.
+        return
+    if args.access_token_stdin or not all((args.version,args.package,args.config)):
+        p.error('deployment requires --version, --package and --config')
     package=args.package.resolve();directory=args.report_dir.resolve();directory.mkdir(parents=True,exist_ok=True);config=json.loads(args.config.read_text());manifest=verify_package(package,args.version);bundle,bundle_sha=ensure_bundle(package,manifest)
+    if args.acceptance_script:config['acceptance_script']=str(args.acceptance_script.resolve(strict=True))
     state={'state':'running','phase':'gateway','version':args.version,'manifest_sha256':rr.digest(package/'manifest.json'),'bundle_sha256':bundle_sha,'agents':{}}
     def save(): rr.atomic_json(directory/'fleet.json',state)
     save();client=Client(config['origin'],pathlib.Path(config['password_file'])).login()
     try:
-        gateway=gateway_upgrade_api(client,args.version,bundle_sha)
-        if gateway is None:
-            if 'gateway' not in config: raise RuntimeError('legacy gateway requires one-time SSH bootstrap configuration')
+        # Local package is the authority. The configured management path stages
+        # verified local bytes before cutover; GitHub releases/check-runs are not
+        # consulted. API-only setups must have staged the same bundle explicitly.
+        if 'gateway' in config:
             gateway=gateway_upgrade_ssh(config,package,manifest,args.version,directory)
+        else:
+            gateway=gateway_upgrade_api(client,args.version,bundle_sha)
+            if gateway is None:
+                raise RuntimeError('local gateway management configuration required')
         state['gateway']=gateway;save()
-        fleet=client.tool('fleet_status',{'desired_version':args.version});devices=fleet['devices'];state['fleet']=fleet;save()
-        if fleet.get('all_converged'):
-            acceptance=accept_fleet(config,package,directory,args.version,fleet)
-            state.update(state='passed',phase='finished',all_converged=True,acceptance=str(acceptance));save()
-            print(json.dumps({'state':state['state'],'version':args.version,'all_converged':True,'report':str(directory/'fleet.json')}));return
+        fleet=desktop_scope(client.tool('fleet_status',{'desired_version':args.version}));devices=fleet['devices'];state['fleet']=fleet;save()
+        if finish_observed_fleet(config,package,directory,args.version,state,fleet):return
         controller_id=controller_device_id(config)
         local_candidates=[d for d in devices if d['online'] and platform(d) in ('macos','linux')
                           and any(str(bundle).startswith(root.rstrip('/')+'/') for root in (d.get('capabilities') or {}).get('roots',[]))]
@@ -211,15 +446,20 @@ def main():
         controller_root=next(root for root in (controller.get('capabilities') or {}).get('roots',[]) if str(bundle).startswith(root.rstrip('/')+'/'))
         relative=str(bundle.relative_to(pathlib.Path(controller_root)))
         cws=open_workspace(client,controller['device_id'],controller_root,'fleet-'+args.version+'-controller')
-        exported=client.tool('file_download',{'workspace_id':cws,'path':relative,'expected_version':bundle_sha,'max_bytes':268435456,'idempotency_key':'fleet-'+args.version+'-bundle-export'})
-        state['source_artifact']={'operation_id':exported['operation_id'],'sha256':bundle_sha,'size':exported['size']};save()
-        ordered=[d for d in devices if d['device_id']!=controller_id]+[d for d in devices if d['device_id']==controller_id]
+        export_attempt=rr.identity([args.version,str(directory)])[:12]
+        exported=client.tool('file_download',{'workspace_id':cws,'path':relative,'expected_version':bundle_sha,'max_bytes':268435456,'idempotency_key':'fleet-'+args.version+'-bundle-export-'+export_attempt},allow_incomplete=True)
+        exported=verified_export(client,exported,bundle,bundle_sha,args.version)
+        state['source_artifact']={'operation_id':exported['operation_id'],'sha256':bundle_sha,'size':exported_size(exported,bundle)};save()
+        ordered,deferred=rollout_targets(devices,controller_id)
+        for device in deferred:
+            state['agents'][device['device_id']]={'name':device['name'],'platform':platform(device),'state':'waiting_online'}
+        save()
         for device in ordered:
             ident=device['device_id'];state['agents'][ident]={'name':device['name'],'platform':platform(device),'state':'already_converged' if device['converged'] else 'staging'};save()
             if device['converged']: continue
             ws=open_workspace(client,ident,root_path(device),'fleet-'+args.version+'-'+ident)
             remote_bundle='.remote-hosts-release-staging-'+args.version+'/'+bundle.name
-            imported=client.tool('file_upload',{'workspace_id':ws,'path':remote_bundle,'expected_version':'absent','sha256':bundle_sha,'max_bytes':268435456,'idempotency_key':'fleet-'+args.version+'-bundle-import-'+ident,'file':{'file_id':exported['artifact_id'],'download_url':exported['download_url'],'file_name':bundle.name}})
+            imported=client.tool('file_upload',{'workspace_id':ws,'path':remote_bundle,'expected_version':'absent','sha256':bundle_sha,'max_bytes':268435456,'idempotency_key':'fleet-'+args.version+'-bundle-import-'+ident,'file':{'file_id':exported['artifact_id'],'download_url':exported['download_url'],'file_name':bundle.name}},allow_incomplete=True)
             imported=verified_import(client,imported,exported,bundle,bundle_sha,args.version,ident)
             h=home(device);destination=(h+'/.local/share/remote-hosts-code/releases/'+args.version) if platform(device)!='windows' else (h+'\\.local\\share\\remote-hosts-code\\releases\\'+args.version)
             client.terminal(ws,extract_command(device,remote_bundle,destination,bundle_sha),'fleet-'+args.version+'-extract-'+ident,120)
@@ -231,12 +471,10 @@ def main():
                 save();print(json.dumps({'state':state['state'],'version':args.version,'all_converged':False,'report':str(directory/'fleet.json')}));return
         deadline=time.monotonic()+900
         while time.monotonic()<deadline:
-            fleet=client.tool('fleet_status',{'desired_version':args.version});state['fleet']=fleet;save()
-            if fleet.get('all_converged'):break
+            fleet=desktop_scope(client.tool('fleet_status',{'desired_version':args.version}));state['fleet']=fleet;save()
+            if finish_observed_fleet(config,package,directory,args.version,state,fleet):return
             time.sleep(3)
         else: raise RuntimeError('fleet did not converge; inspect fleet.json without replaying upgrades')
-        acceptance=accept_fleet(config,package,directory,args.version,fleet)
-        state.update(state='passed',phase='finished',all_converged=True,acceptance=str(acceptance));save()
     except Exception as error:
         state.update(state='needs_recovery',phase='finished',error_type=type(error).__name__,next_action='inspect fleet.json and original operation/updater receipts; do not replay blindly');save();raise
     finally: client.close()

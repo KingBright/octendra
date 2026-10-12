@@ -1,4 +1,4 @@
-//! Interpreter-free one-shot installation core.
+//! Interpreter-free one-shot installation core. Service launch and remote readiness stay outside this narrow primitive.
 use crate::evidence;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -7,12 +7,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RestartSpec {
-    pub program: PathBuf,
-    pub args: Vec<String>,
-}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstallRequest {
@@ -27,6 +22,12 @@ pub struct InstallRequest {
     pub restart: Option<RestartSpec>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestartSpec {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InstallReceipt {
     pub schema: u32,
     pub state: String,
@@ -39,15 +40,17 @@ pub struct InstallReceipt {
     pub rollback: Option<String>,
     pub error_code: Option<String>,
 }
-fn valid_version(v: &str) -> bool {
-    let p: Vec<_> = v.split('.').collect();
-    p.len() == 3
-        && p.iter()
-            .all(|x| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit()))
+fn valid_version(value: &str) -> bool {
+    let parts: Vec<_> = value.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
-fn valid_hash(v: &str) -> bool {
-    v.len() == 64
-        && v.bytes()
+fn valid_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 fn copy_atomic(source: &Path, target: &Path) -> Result<()> {
@@ -68,82 +71,88 @@ fn copy_atomic(source: &Path, target: &Path) -> Result<()> {
     fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
-fn save(path: &Path, value: &InstallReceipt) -> Result<()> {
-    if let Some(p) = path.parent() {
-        fs::create_dir_all(p)?;
+fn write_receipt(path: &Path, value: &InstallReceipt) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
     }
     evidence::atomic(path, value)
 }
-pub fn install(r: &InstallRequest) -> Result<InstallReceipt> {
+pub fn install(request: &InstallRequest) -> Result<InstallReceipt> {
     ensure!(
-        r.schema == 1 && valid_version(&r.version) && valid_hash(&r.candidate_sha256),
+        request.schema == 1
+            && valid_version(&request.version)
+            && valid_hash(&request.candidate_sha256),
         "invalid_install_request"
     );
     ensure!(
-        r.candidate.is_absolute()
-            && r.target.is_absolute()
-            && r.backup_dir.is_absolute()
-            && r.result.is_absolute(),
+        request.candidate.is_absolute()
+            && request.target.is_absolute()
+            && request.backup_dir.is_absolute()
+            && request.result.is_absolute(),
         "absolute_install_paths_required"
     );
-    ensure!(r.candidate != r.target, "candidate_target_alias");
     ensure!(
-        evidence::hash_file(&r.candidate)?.sha256 == r.candidate_sha256,
+        request.candidate != request.target,
+        "candidate_target_alias"
+    );
+    let actual = evidence::hash_file(&request.candidate)?;
+    ensure!(
+        actual.sha256 == request.candidate_sha256,
         "candidate_checksum_mismatch"
     );
-    let v = Command::new(&r.candidate)
+    let version = Command::new(&request.candidate)
         .arg("--version")
         .output()
         .context("candidate_version_probe_failed")?;
     ensure!(
-        v.status.success()
-            && String::from_utf8_lossy(&v.stdout).trim()
-                == format!("remote-hosts-code {}", r.version),
+        version.status.success()
+            && String::from_utf8_lossy(&version.stdout).trim()
+                == format!("remote-hosts-code {}", request.version),
         "candidate_version_mismatch"
     );
-    if r.result.exists() {
-        let old: InstallReceipt = evidence::load(&r.result)?;
+    if request.result.exists() {
+        let old: InstallReceipt = evidence::load(&request.result)?;
         ensure!(
-            old.version == r.version && old.candidate_sha256 == r.candidate_sha256,
+            old.version == request.version && old.candidate_sha256 == request.candidate_sha256,
             "install_receipt_identity_conflict"
         );
         return Ok(old);
     }
-    fs::create_dir_all(&r.backup_dir)?;
-    let previous = r
+    fs::create_dir_all(&request.backup_dir)?;
+    let previous = request
         .target
         .is_file()
-        .then(|| evidence::hash_file(&r.target))
+        .then(|| evidence::hash_file(&request.target))
         .transpose()?;
     let backup = previous
         .as_ref()
-        .map(|_| r.backup_dir.join("remote-hosts-code.previous"));
-    if let Some(p) = &backup {
-        ensure!(!p.exists(), "backup_already_exists");
-        copy_atomic(&r.target, p)?;
+        .map(|_| request.backup_dir.join("remote-hosts-code.previous"));
+    if let Some(path) = &backup {
+        ensure!(!path.exists(), "backup_already_exists");
+        copy_atomic(&request.target, path)?;
     }
-    let mut out = InstallReceipt {
+    let mut receipt = InstallReceipt {
         schema: 1,
         state: "installing".into(),
-        version: r.version.clone(),
-        candidate_sha256: r.candidate_sha256.clone(),
-        previous_sha256: previous.as_ref().map(|x| x.sha256.clone()),
+        version: request.version.clone(),
+        candidate_sha256: request.candidate_sha256.clone(),
+        previous_sha256: previous.as_ref().map(|v| v.sha256.clone()),
         installed_sha256: None,
         backup: backup.clone(),
         service_changed: false,
         rollback: None,
         error_code: None,
     };
-    let attempt = (|| -> Result<()> {
-        copy_atomic(&r.candidate, &r.target)?;
-        out.service_changed = true;
-        let installed = evidence::hash_file(&r.target)?;
+    let outcome = (|| -> Result<()> {
+        copy_atomic(&request.candidate, &request.target)?;
+        receipt.service_changed = true;
+        let installed = evidence::hash_file(&request.target)?;
         ensure!(
-            installed.sha256 == r.candidate_sha256,
+            installed.sha256 == request.candidate_sha256,
             "installed_checksum_mismatch"
         );
-        out.installed_sha256 = Some(installed.sha256);
-        if let Some(restart) = &r.restart {
+        receipt.installed_sha256 = Some(installed.sha256);
+        if let Some(restart) = &request.restart {
             ensure!(
                 restart.program.is_absolute(),
                 "absolute_restart_program_required"
@@ -153,35 +162,66 @@ pub fn install(r: &InstallRequest) -> Result<InstallReceipt> {
                 .status()
                 .context("service_restart_failed")?;
             ensure!(status.success(), "service_restart_failed");
-            out.state = "restarted_needs_readiness".into();
+            receipt.state = "restarted_needs_readiness".into();
         } else {
-            out.state = "installed_needs_restart".into();
+            receipt.state = "installed_needs_restart".into();
         }
         Ok(())
     })();
-    if let Err(e) = attempt {
-        out.state = "failed".into();
-        out.error_code = Some(
-            e.to_string()
+    if let Err(error) = outcome {
+        receipt.state = "failed".into();
+        receipt.error_code = Some(
+            error
+                .to_string()
                 .split(':')
                 .next()
                 .unwrap_or("install_failed")
-                .into(),
+                .to_string(),
         );
-        if out.service_changed
-            && let Some(p) = &backup
+        if receipt.service_changed
+            && let Some(path) = &backup
         {
-            match copy_atomic(p, &r.target) {
-                Ok(()) => out.rollback = Some("restored_previous_binary".into()),
-                Err(_) => out.rollback = Some("rollback_failed".into()),
+            match copy_atomic(path, &request.target) {
+                Ok(()) => receipt.rollback = Some("restored_previous_binary".into()),
+                Err(_) => receipt.rollback = Some("rollback_failed".into()),
             }
         }
-        save(&r.result, &out)?;
+        write_receipt(&request.result, &receipt)?;
         anyhow::bail!(
             "native_install_failed: {}",
-            out.error_code.as_deref().unwrap_or("unknown")
+            receipt.error_code.as_deref().unwrap_or("unknown")
         );
     }
-    save(&r.result, &out)?;
-    Ok(out)
+    write_receipt(&request.result, &receipt)?;
+    Ok(receipt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn invalid_candidate_is_rejected_without_touching_target() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().canonicalize().unwrap();
+        let candidate = root.join("candidate");
+        fs::write(&candidate, "not executable\n").unwrap();
+        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755)).unwrap();
+        let target = root.join("target");
+        fs::write(&target, "old").unwrap();
+        let req = InstallRequest {
+            schema: 1,
+            version: "0.10.4".into(),
+            candidate: candidate.clone(),
+            candidate_sha256: evidence::hash_file(&candidate).unwrap().sha256,
+            target: target.clone(),
+            backup_dir: root.join("backup"),
+            result: root.join("result.json"),
+            restart: None,
+        };
+        assert!(install(&req).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"old");
+        assert!(!req.result.exists());
+    }
 }

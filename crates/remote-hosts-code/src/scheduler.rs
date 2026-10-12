@@ -27,7 +27,7 @@ impl Lane {
     ];
     pub fn for_tool(tool: &str) -> Self {
         match tool {
-            "file_upload" | "file_download" => Self::Transfer,
+            "file_upload" | "file_download" | "desktop_frame" => Self::Transfer,
             "terminal_exec" | "terminal_input" => Self::Terminal,
             "terminal_cancel" | "terminal_read" | "workspace_gc" => Self::Control,
             "code_apply_edits" | "change_resume" | "workspace_open" | "files_sync" => Self::Write,

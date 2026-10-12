@@ -1,4 +1,5 @@
 //! Single-owner OAuth authorization-code/PKCE service with hashed opaque tokens.
+mod clients;
 use crate::{GatewayConfig, SCOPES, hash, now, random, secret_eq, store::Store};
 use axum::{
     Form, Json, Router,
@@ -9,6 +10,7 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use clients::{Client, redirect_uri_allowed};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -18,6 +20,22 @@ use std::{
 };
 
 type HttpResult<T> = Result<T, (StatusCode, Json<Value>)>;
+/// Keep confidential-client state invisible to binaries that cannot authenticate it.
+/// This is a namespace in the existing KV store, not a separate database.
+pub fn oauth_state_kind(kind: &str, opaque: &str) -> String {
+    if opaque.starts_with("rh2_") {
+        format!("oauth2_{kind}")
+    } else {
+        kind.into()
+    }
+}
+fn oauth_random(confidential: bool) -> String {
+    if confidential {
+        format!("rh2_{}", random())
+    } else {
+        random()
+    }
+}
 fn invalid() -> (StatusCode, Json<Value>) {
     (
         StatusCode::BAD_REQUEST,
@@ -40,12 +58,6 @@ pub struct Auth {
 pub struct Principal {
     pub owner: String,
     pub scopes: Vec<String>,
-}
-#[derive(Clone, Serialize, Deserialize)]
-struct Client {
-    client_id: String,
-    redirect_uris: Vec<String>,
-    token_endpoint_auth_method: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Grant {
@@ -81,6 +93,22 @@ impl Auth {
         entry.1 += 1;
         entry.1 <= limit
     }
+    pub(crate) fn allow_owner_password_attempt(&self) -> bool {
+        self.limit("password", 10)
+    }
+    pub(crate) async fn owner_password_valid(&self, password: String) -> bool {
+        let encoded = self.config.password_hash.clone();
+        tokio::task::spawn_blocking(move || {
+            use argon2::{Argon2, PasswordHash, PasswordVerifier};
+            PasswordHash::new(&encoded).ok().is_some_and(|h| {
+                Argon2::default()
+                    .verify_password(password.as_bytes(), &h)
+                    .is_ok()
+            })
+        })
+        .await
+        .unwrap_or(false)
+    }
     pub fn routes(&self) -> Router {
         Router::new()
             .route(
@@ -108,7 +136,11 @@ impl Auth {
             .to_str()
             .ok()?
             .strip_prefix("Bearer ")?;
-        let access: Access = self.store.get("access", &hash(token)).await.ok()??;
+        let access: Access = self
+            .store
+            .get(&oauth_state_kind("access", token), &hash(token))
+            .await
+            .ok()??;
         if access.resource != format!("{}/mcp", self.config.public_url)
             || self
                 .store
@@ -150,37 +182,14 @@ pub async fn require_auth(State(auth): State<Auth>, mut req: Request, next: Next
 }
 async fn resource_metadata(State(a): State<Auth>) -> Json<Value> {
     Json(
-        json!({"resource":format!("{}/mcp",a.config.public_url),"authorization_servers":[a.config.public_url],"scopes_supported":SCOPES.split_whitespace().collect::<Vec<_>>(),"bearer_methods_supported":["header"]}),
+        json!({"resource":format!("{}/mcp",a.config.public_url),"authorization_servers":[a.config.public_url],"scopes_supported":crate::SUPPORTED_SCOPES.split_whitespace().collect::<Vec<_>>(),"bearer_methods_supported":["header"]}),
     )
 }
 async fn auth_metadata(State(a): State<Auth>) -> Json<Value> {
     let u = &a.config.public_url;
     Json(
-        json!({"issuer":u,"authorization_endpoint":format!("{u}/oauth/authorize"),"token_endpoint":format!("{u}/oauth/token"),"registration_endpoint":format!("{u}/oauth/register"),"revocation_endpoint":format!("{u}/oauth/revoke"),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"],"scopes_supported":SCOPES.split_whitespace().collect::<Vec<_>>(),"authorization_response_iss_parameter_supported":true}),
+        json!({"issuer":u,"authorization_endpoint":format!("{u}/oauth/authorize"),"token_endpoint":format!("{u}/oauth/token"),"registration_endpoint":format!("{u}/oauth/register"),"revocation_endpoint":format!("{u}/oauth/revoke"),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["none","client_secret_basic","client_secret_post"],"revocation_endpoint_auth_methods_supported":["none","client_secret_basic","client_secret_post"],"code_challenge_methods_supported":["S256"],"scopes_supported":crate::SUPPORTED_SCOPES.split_whitespace().collect::<Vec<_>>(),"authorization_response_iss_parameter_supported":true}),
     )
-}
-fn dynamic_redirect_allowed(config: &GatewayConfig, candidate: &str) -> bool {
-    if config.redirect_uris.iter().any(|uri| uri == candidate) {
-        return true;
-    }
-    let Ok(uri) = reqwest::Url::parse(candidate) else {
-        return false;
-    };
-    uri.scheme() == "https"
-        && uri.host_str() == Some("oauth-redirect.googleusercontent.com")
-        && uri.port().is_none()
-        && uri.username().is_empty()
-        && uri.password().is_none()
-        && uri.query().is_none()
-        && uri.fragment().is_none()
-        && uri.path().strip_prefix("/r/").is_some_and(|suffix| {
-            !suffix.is_empty()
-                && suffix.len() <= 512
-                && !suffix.contains('/')
-                && suffix
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"-_.~".contains(&b))
-        })
 }
 async fn register(
     State(a): State<Auth>,
@@ -192,43 +201,8 @@ async fn register(
             Json(json!({"error":"rate_limited"})),
         ));
     }
-    let uris: Vec<String> =
-        serde_json::from_value(v.get("redirect_uris").cloned().ok_or_else(invalid)?)
-            .map_err(|_| invalid())?;
-    if uris.is_empty()
-        || uris.len() > 5
-        || !uris.iter().all(|u| dynamic_redirect_allowed(&a.config, u))
-        || v.get("token_endpoint_auth_method")
-            .and_then(Value::as_str)
-            .is_some_and(|s| s != "none")
-    {
-        return Err(invalid());
-    }
-    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM kv WHERE kind='client'")
-        .fetch_one(&a.store.pool)
-        .await
-        .map_err(internal)?;
-    if count.0 >= 1000 {
-        return Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({"error":"client_capacity"})),
-        ));
-    }
-    let c = Client {
-        client_id: random(),
-        redirect_uris: uris,
-        token_endpoint_auth_method: "none".into(),
-    };
-    a.store
-        .put("client", &c.client_id, &c, i64::MAX)
-        .await
-        .map_err(internal)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(
-            json!({"client_id":c.client_id,"redirect_uris":c.redirect_uris,"token_endpoint_auth_method":"none","grant_types":["authorization_code","refresh_token"],"response_types":["code"]}),
-        ),
-    ))
+    let client = a.register_client(&v).await?;
+    Ok((StatusCode::CREATED, Json(client)))
 }
 #[derive(Deserialize)]
 struct Authorize {
@@ -238,7 +212,7 @@ struct Authorize {
     code_challenge: String,
     code_challenge_method: String,
     state: String,
-    resource: String,
+    resource: Option<String>,
     scope: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
@@ -255,12 +229,14 @@ async fn authorize(State(a): State<Auth>, Query(q): Query<Authorize>) -> HttpRes
     }
     let c: Client = a
         .store
-        .get("client", &q.client_id)
+        .get(&oauth_state_kind("client", &q.client_id), &q.client_id)
         .await
         .map_err(internal)?
         .ok_or_else(invalid)?;
-    let scope = q.scope.unwrap_or_else(|| SCOPES.into());
+    let resource = a.client_resource(&c, q.resource.as_deref())?;
+    let scope = a.client_scope(&c, q.scope.as_deref())?;
     if !c.redirect_uris.contains(&q.redirect_uri)
+        || !redirect_uri_allowed(&a.config, &q.redirect_uri)
         || q.response_type != "code"
         || q.code_challenge_method != "S256"
         || q.code_challenge.len() != 43
@@ -268,36 +244,46 @@ async fn authorize(State(a): State<Auth>, Query(q): Query<Authorize>) -> HttpRes
             .code_challenge
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
-        || q.resource != format!("{}/mcp", a.config.public_url)
         || q.state.len() > 4096
-        || scope.is_empty()
-        || !scope
-            .split_whitespace()
-            .all(|s| SCOPES.split_whitespace().any(|x| x == s))
     {
         return Err(invalid());
     }
-    let nonce = random();
+    let nonce = oauth_random(c.client_id.starts_with("rh2_"));
     let pending = Pending {
         grant: Grant {
             client_id: q.client_id,
             redirect_uri: q.redirect_uri,
             code_challenge: q.code_challenge,
-            resource: q.resource,
+            resource,
             scope: scope.clone(),
         },
         state: q.state,
     };
     a.store
-        .put("pending", &hash(&nonce), &pending, now() + 600)
+        .put(
+            &oauth_state_kind("pending", &nonce),
+            &hash(&nonce),
+            &pending,
+            now() + 600,
+        )
         .await
         .map_err(internal)?;
     let html = format!(
-        "<!doctype html><html lang=zh-CN><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>Remote Hosts 授权</title><body><main><h1>连接你的 Remote Hosts</h1><p>授权 ChatGPT 访问已登记的个人电脑。终端权限可以在本机用户权限范围内执行任意命令，包括项目目录以外的操作。</p><p>本次权限：{}</p><form method=post action=/oauth/approve><input type=hidden name=nonce value='{}'><label>网关登录密码 <input type=password name=password required autocomplete=current-password></label><p><button type=submit>登录并授权</button></p></form></main></body></html>",
+        "<!doctype html><html lang=zh-CN><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>Remote Hosts 授权</title><body><main><h1>连接你的 Remote Hosts</h1><p>客户端名称（由申请方提供，未经验证）：{}</p><p>客户端 ID：{}</p><p>授权回调：{}</p><p>允许该客户端访问已登记的个人电脑。终端权限可以在本机用户权限范围内执行任意命令，包括项目目录以外的操作。</p><p>本次权限：{}</p><form method=post action=/oauth/approve><input type=hidden name=nonce value='{}'><label>网关登录密码 <input type=password name=password required autocomplete=current-password></label><p><button type=submit>登录并授权</button></p></form></main></body></html>",
+        html_escape(c.client_name.as_deref().unwrap_or("未提供")),
+        html_escape(&c.client_id),
+        html_escape(&pending.grant.redirect_uri),
         html_escape(&scope),
         nonce
     );
     let mut response = Html(html).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        a.config
+            .authorization_csp_for_callback(Some(&pending.grant.redirect_uri))
+            .parse()
+            .map_err(internal)?,
+    );
     response.headers_mut().insert(
         header::SET_COOKIE,
         format!("rh_oauth={nonce}; Secure; HttpOnly; SameSite=Lax; Path=/oauth; Max-Age=600")
@@ -316,13 +302,15 @@ async fn approve(
     headers: HeaderMap,
     Form(f): Form<Approval>,
 ) -> HttpResult<Response> {
-    if !a.limit("password", 10) {
+    if !a.allow_owner_password_attempt() {
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({"error":"rate_limited"})),
         ));
     }
-    if f.password.len() > 1024 || f.nonce.len() != 64 {
+    if f.password.len() > 1024
+        || !(f.nonce.len() == 64 || (f.nonce.starts_with("rh2_") && f.nonce.len() == 68))
+    {
         return Err(invalid());
     }
     let cookie = headers
@@ -335,17 +323,7 @@ async fn approve(
     if cookie.is_none_or(|c| !secret_eq(c, &f.nonce)) {
         return Err(invalid());
     }
-    let encoded = a.config.password_hash.clone();
-    let valid = tokio::task::spawn_blocking(move || {
-        use argon2::{Argon2, PasswordHash, PasswordVerifier};
-        PasswordHash::new(&encoded).ok().is_some_and(|h| {
-            Argon2::default()
-                .verify_password(f.password.as_bytes(), &h)
-                .is_ok()
-        })
-    })
-    .await
-    .map_err(internal)?;
+    let valid = a.owner_password_valid(f.password).await;
     if !valid {
         return Err((
             StatusCode::UNAUTHORIZED,
@@ -354,13 +332,21 @@ async fn approve(
     }
     let pending: Pending = a
         .store
-        .take("pending", &hash(&f.nonce))
+        .take(&oauth_state_kind("pending", &f.nonce), &hash(&f.nonce))
         .await
         .map_err(internal)?
         .ok_or_else(invalid)?;
-    let code = random();
+    if !redirect_uri_allowed(&a.config, &pending.grant.redirect_uri) {
+        return Err(invalid());
+    }
+    let code = oauth_random(pending.grant.client_id.starts_with("rh2_"));
     a.store
-        .put("code", &hash(&code), &pending.grant, now() + 120)
+        .put(
+            &oauth_state_kind("code", &code),
+            &hash(&code),
+            &pending.grant,
+            now() + 120,
+        )
         .await
         .map_err(internal)?;
     let mut redirect = reqwest::Url::parse(&pending.grant.redirect_uri).map_err(internal)?;
@@ -370,6 +356,13 @@ async fn approve(
         .append_pair("state", &pending.state)
         .append_pair("iss", &a.config.public_url);
     let mut response = Redirect::to(redirect.as_str()).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        a.config
+            .authorization_csp_for_callback(Some(&pending.grant.redirect_uri))
+            .parse()
+            .map_err(internal)?,
+    );
     response.headers_mut().insert(
         header::SET_COOKIE,
         "rh_oauth=; Secure; HttpOnly; SameSite=Lax; Path=/oauth; Max-Age=0"
@@ -381,23 +374,39 @@ async fn approve(
 #[derive(Deserialize)]
 struct TokenRequest {
     grant_type: String,
-    client_id: String,
+    client_id: Option<String>,
+    client_secret: Option<String>,
     code: Option<String>,
     code_verifier: Option<String>,
     redirect_uri: Option<String>,
-    resource: String,
+    resource: Option<String>,
     refresh_token: Option<String>,
 }
-async fn token(State(a): State<Auth>, Form(f): Form<TokenRequest>) -> HttpResult<Json<Value>> {
+async fn token(State(a): State<Auth>, headers: HeaderMap, Form(f): Form<TokenRequest>) -> Response {
+    client_response(token_inner(a, &headers, f).await)
+}
+fn client_response(result: HttpResult<Json<Value>>) -> Response {
+    let mut response = result.into_response();
+    if response.status() == StatusCode::UNAUTHORIZED {
+        response.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            axum::http::HeaderValue::from_static("Basic realm=\"remote-hosts-code\""),
+        );
+    }
+    response
+}
+async fn token_inner(a: Auth, headers: &HeaderMap, f: TokenRequest) -> HttpResult<Json<Value>> {
     if !a.limit("token", 120) {
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({"error":"rate_limited"})),
         ));
     }
-    if f.resource != format!("{}/mcp", a.config.public_url) {
-        return Err(invalid());
-    }
+    let client = a
+        .authenticate_client(headers, f.client_id.as_deref(), f.client_secret.as_deref())
+        .await?;
+    let client_id = &client.client_id;
+    let resource = a.client_resource(&client, f.resource.as_deref())?;
     let access = match f.grant_type.as_str() {
         "authorization_code" => {
             let code = f.code.ok_or_else(invalid)?;
@@ -411,13 +420,13 @@ async fn token(State(a): State<Auth>, Form(f): Form<TokenRequest>) -> HttpResult
             }
             let g: Grant = a
                 .store
-                .take("code", &hash(code))
+                .get(&oauth_state_kind("code", &code), &hash(&code))
                 .await
                 .map_err(internal)?
                 .ok_or_else(invalid)?;
-            if g.client_id != f.client_id
+            if &g.client_id != client_id
                 || Some(g.redirect_uri) != f.redirect_uri
-                || g.resource != f.resource
+                || g.resource != resource
                 || !secret_eq(
                     &g.code_challenge,
                     &URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
@@ -425,86 +434,214 @@ async fn token(State(a): State<Auth>, Form(f): Form<TokenRequest>) -> HttpResult
             {
                 return Err(invalid());
             }
+            // Invalid credentials, redirect or PKCE must not consume another
+            // client's code. The final atomic take still enforces single use.
+            a.store
+                .take::<Grant>(&oauth_state_kind("code", &code), &hash(&code))
+                .await
+                .map_err(internal)?
+                .ok_or_else(invalid)?;
             Access {
                 principal: Principal {
                     owner: a.config.owner.clone(),
                     scopes: g.scope.split_whitespace().map(str::to_owned).collect(),
                 },
-                client_id: f.client_id,
-                resource: f.resource,
+                client_id: client_id.clone(),
+                resource,
                 family: random(),
             }
         }
         "refresh_token" => {
-            let key = hash(f.refresh_token.ok_or_else(invalid)?);
-            let Some(access) = a
-                .store
-                .take::<Access>("refresh", &key)
-                .await
-                .map_err(internal)?
-            else {
-                if let Some(family) = a
-                    .store
-                    .get::<String>("used_refresh", &key)
-                    .await
-                    .map_err(internal)?
-                {
-                    a.store
-                        .put("revoked", &family, &true, now() + 2592000)
+            let refresh = f.refresh_token.ok_or_else(invalid)?;
+            let key = hash(&refresh);
+            let refresh_kind = oauth_state_kind("refresh", &refresh);
+            let used_kind = oauth_state_kind("used_refresh", &refresh);
+            let access: Option<Access> =
+                a.store.get(&refresh_kind, &key).await.map_err(internal)?;
+            if let Some(access) = &access
+                && (&access.client_id != client_id
+                    || access.resource != resource
+                    || a.store
+                        .get::<bool>("revoked", &access.family)
                         .await
-                        .map_err(internal)?;
-                }
-                return Err(invalid());
-            };
-            if access.client_id != f.client_id
-                || access.resource != f.resource
-                || a.store
-                    .get::<bool>("revoked", &access.family)
-                    .await
-                    .map_err(internal)?
-                    .is_some()
+                        .map_err(internal)?
+                        .is_some())
             {
                 return Err(invalid());
             }
-            a.store
-                .put("used_refresh", &key, &access.family, now() + 2592000)
-                .await
-                .map_err(internal)?;
+            // Consume and record the replay marker in one transaction so two
+            // concurrent refresh requests cannot miss each other's marker.
+            let mut tx = a.store.pool.begin().await.map_err(internal)?;
+            let row: Option<(String,)> = sqlx::query_as(
+                "DELETE FROM kv WHERE kind=? AND key=? AND expires>? RETURNING value",
+            )
+            .bind(&refresh_kind)
+            .bind(&key)
+            .bind(now())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(internal)?;
+            let Some((encoded,)) = row else {
+                tx.commit().await.map_err(internal)?;
+                let used = match a
+                    .store
+                    .get::<UsedRefresh>("oauth_refresh_binding", &key)
+                    .await
+                    .map_err(internal)?
+                {
+                    Some(used) => Some(used),
+                    None => a
+                        .store
+                        .get::<UsedRefresh>(&used_kind, &key)
+                        .await
+                        .map_err(internal)?,
+                };
+                if let Some(used) = used {
+                    let family = match used {
+                        UsedRefresh::Bound {
+                            family,
+                            client_id: owner,
+                        } if &owner == client_id => Some(family),
+                        // Records issued before multi-client authentication used a string.
+                        UsedRefresh::Legacy(family)
+                            if client.token_endpoint_auth_method == "none" =>
+                        {
+                            Some(family)
+                        }
+                        _ => None,
+                    };
+                    if let Some(family) = family {
+                        a.store
+                            .put("revoked", &family, &true, now() + 2592000)
+                            .await
+                            .map_err(internal)?;
+                    }
+                }
+                return Err(invalid());
+            };
+            let access: Access = serde_json::from_str(&encoded).map_err(internal)?;
+            if &access.client_id != client_id || access.resource != resource {
+                tx.rollback().await.map_err(internal)?;
+                return Err(invalid());
+            }
+            let used = UsedRefresh::Bound {
+                family: access.family.clone(),
+                client_id: client_id.clone(),
+            };
+            // Preserve the legacy string format for public-client rollback.
+            // A separate binding row adds client ownership without changing it.
+            for (kind, value) in [
+                (
+                    used_kind.as_str(),
+                    serde_json::to_string(&access.family).map_err(internal)?,
+                ),
+                (
+                    "oauth_refresh_binding",
+                    serde_json::to_string(&used).map_err(internal)?,
+                ),
+            ] {
+                sqlx::query("INSERT INTO kv (kind,key,value,expires) VALUES(?,?,?,?) ON CONFLICT(kind,key) DO UPDATE SET value=excluded.value, expires=excluded.expires")
+                    .bind(kind).bind(&key).bind(value).bind(now() + 2592000)
+                    .execute(&mut *tx).await.map_err(internal)?;
+            }
+            tx.commit().await.map_err(internal)?;
             access
         }
         _ => return Err(invalid()),
     };
-    let bearer = random();
-    let refresh = random();
+    let bearer = oauth_random(client_id.starts_with("rh2_"));
+    let refresh = oauth_random(client_id.starts_with("rh2_"));
     a.store
-        .put("access", &hash(&bearer), &access, now() + 3600)
+        .put(
+            &oauth_state_kind("access", &bearer),
+            &hash(&bearer),
+            &access,
+            now() + 3600,
+        )
         .await
         .map_err(internal)?;
     a.store
-        .put("refresh", &hash(&refresh), &access, now() + 2592000)
+        .put(
+            &oauth_state_kind("refresh", &refresh),
+            &hash(&refresh),
+            &access,
+            now() + 2592000,
+        )
         .await
         .map_err(internal)?;
     Ok(Json(
         json!({"access_token":bearer,"refresh_token":refresh,"token_type":"Bearer","expires_in":3600,"scope":access.principal.scopes.join(" "),"resource":access.resource}),
     ))
 }
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum UsedRefresh {
+    Bound { family: String, client_id: String },
+    Legacy(String),
+}
 async fn revoke(
     State(a): State<Auth>,
+    headers: HeaderMap,
     Form(v): Form<HashMap<String, String>>,
+) -> Response {
+    client_response(revoke_inner(a, &headers, v).await)
+}
+async fn revoke_inner(
+    a: Auth,
+    headers: &HeaderMap,
+    v: HashMap<String, String>,
 ) -> HttpResult<Json<Value>> {
-    if let Some(t) = v.get("token") {
+    if !a.limit("revoke", 120) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error":"rate_limited"})),
+        ));
+    }
+    let token = v.get("token").ok_or_else(invalid)?;
+    let key = hash(token);
+    let access: Option<Access> = match a
+        .store
+        .get(&oauth_state_kind("access", token), &key)
+        .await
+        .map_err(internal)?
+    {
+        Some(access) => Some(access),
+        None => a
+            .store
+            .get(&oauth_state_kind("refresh", token), &key)
+            .await
+            .map_err(internal)?,
+    };
+    // Preserve token-possession revocation for legacy public clients. A
+    // confidential client always has to authenticate with its registered method.
+    let legacy_id =
+        if !headers.contains_key(header::AUTHORIZATION) && !v.contains_key("client_secret") {
+            access.as_ref().map(|access| access.client_id.as_str())
+        } else {
+            None
+        };
+    let id = v.get("client_id").map(String::as_str).or(legacy_id);
+    if id.is_none()
+        && !headers.contains_key(header::AUTHORIZATION)
+        && !v.contains_key("client_secret")
+    {
+        return Ok(Json(json!({})));
+    }
+    let client = a
+        .authenticate_client(headers, id, v.get("client_secret").map(String::as_str))
+        .await?;
+    if let Some(access) = access
+        && access.client_id == client.client_id
+    {
+        a.store
+            .put("revoked", &access.family, &true, now() + 2592000)
+            .await
+            .map_err(internal)?;
         for kind in ["access", "refresh"] {
-            if let Some(access) = a
-                .store
-                .take::<Access>(kind, &hash(t))
+            a.store
+                .take::<Access>(&oauth_state_kind(kind, token), &key)
                 .await
-                .map_err(internal)?
-            {
-                a.store
-                    .put("revoked", &access.family, &true, now() + 2592000)
-                    .await
-                    .map_err(internal)?;
-            }
+                .map_err(internal)?;
         }
     }
     Ok(Json(json!({})))
@@ -515,53 +652,4 @@ fn html_escape(v: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
-}
-
-#[cfg(test)]
-mod redirect_tests {
-    use super::*;
-
-    fn configured() -> GatewayConfig {
-        GatewayConfig {
-            public_url: "https://mcp.example.test".into(),
-            bind: "127.0.0.1:0".into(),
-            state_dir: std::path::PathBuf::from("/tmp/unused"),
-            owner: "owner".into(),
-            password_hash: "unused".into(),
-            devices: vec![],
-            redirect_uris: vec!["https://chatgpt.com/connector_platform_oauth_redirect".into()],
-        }
-    }
-
-    #[test]
-    fn configured_redirect_remains_exact() {
-        let c = configured();
-        assert!(dynamic_redirect_allowed(
-            &c,
-            "https://chatgpt.com/connector_platform_oauth_redirect"
-        ));
-        assert!(!dynamic_redirect_allowed(
-            &c,
-            "https://chatgpt.com/connector_platform_oauth_redirect/extra"
-        ));
-    }
-
-    #[test]
-    fn gemini_spark_dynamic_redirect_is_narrowly_allowed() {
-        let c = configured();
-        assert!(dynamic_redirect_allowed(
-            &c,
-            "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-116109532806053202916-mcp_swiggy_com"
-        ));
-        for invalid in [
-            "http://oauth-redirect.googleusercontent.com/r/client",
-            "https://oauth-redirect.googleusercontent.com.evil.test/r/client",
-            "https://oauth-redirect.googleusercontent.com/r/",
-            "https://oauth-redirect.googleusercontent.com/r/client/extra",
-            "https://oauth-redirect.googleusercontent.com/r/client?next=evil",
-            "https://oauth-redirect.googleusercontent.com/r/client#fragment",
-        ] {
-            assert!(!dynamic_redirect_allowed(&c, invalid), "{invalid}");
-        }
-    }
 }

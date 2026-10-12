@@ -8,10 +8,14 @@ pub fn scope(name: &str) -> Option<&'static str> {
     match name {
         "devices_list" | "fleet_status" | "workspace_open" | "code_list" | "code_search"
         | "code_read" | "code_symbols" | "code_diff" | "operation_get" | "terminal_read"
-        | "file_download" | "workspace_context" => Some("code:read"),
+        | "file_download" | "workspace_context" | "task_context" | "task_resume" => {
+            Some("code:read")
+        }
         "code_apply_edits" | "change_resume" | "workspace_gc" | "files_sync" | "file_upload"
         | "transfer_cancel" | "transfer_resume" | "outcome_resolve" => Some("code:write"),
         "terminal_exec" | "terminal_input" | "terminal_cancel" => Some("terminal:exec"),
+        "desktop_worker" => Some("desktop:input"),
+        "desktop_frame" => Some("desktop:observe"),
         _ => None,
     }
 }
@@ -28,10 +32,80 @@ pub fn validate(name: &str, arguments: &Value) -> Result<()> {
         .iter()
         .find(|t| t.name == name)
         .context("unknown tool")?;
-    validate_node(&tool.input_schema, arguments, "$")
+    validate_node(&tool.input_schema, arguments, "$")?;
+    if name == "desktop_worker" {
+        let a: crate::agent::DesktopJob = serde_json::from_value(arguments.clone())
+            .map_err(|_| anyhow::anyhow!("invalid_arguments: desktop request envelope"))?;
+        ensure!(
+            a.capability_version > 0 && !a.task_id.is_nil(),
+            "invalid_arguments: desktop task/capability"
+        );
+        if let Some(id) = a.request.identity() {
+            ensure!(
+                id.task_id == a.task_id
+                    && a.device_id == Some(id.device_id)
+                    && !id.owner.is_empty()
+                    && id.owner.len() <= 128
+                    && id.desktop_id.len() <= 256,
+                "invalid_arguments: desktop identity"
+            );
+        }
+    }
+    if name == "desktop_frame" {
+        let a: crate::agent::DesktopFrameJob = serde_json::from_value(arguments.clone())
+            .map_err(|_| anyhow::anyhow!("invalid_arguments: desktop artifact envelope"))?;
+        ensure!(
+            !a.task_id.is_nil()
+                && !a.device_id.is_nil()
+                && !a.observed_operation_id.is_nil()
+                && a.capability_version > 0,
+            "invalid_arguments: desktop artifact identity"
+        );
+    }
+    if name == "outcome_resolve" {
+        if arguments["resolution"] == "close_not_enqueued" {
+            ensure!(
+                arguments.get("operation_id").is_none(),
+                "invalid_arguments: a submission has no operation id"
+            );
+            crate::submission_fence::identity(
+                "validation",
+                crate::files::text(arguments, "workspace_id")?,
+                crate::files::text(arguments, "original_idempotency_key")?,
+            )?;
+        } else {
+            uuid::Uuid::parse_str(crate::files::text(arguments, "operation_id")?)?;
+            ensure!(
+                arguments.get("workspace_id").is_none()
+                    && arguments.get("original_idempotency_key").is_none(),
+                "invalid_arguments: operation resolution does not seal a submission"
+            );
+        }
+    }
+    crate::maintenance_tasks::validate(name, arguments)
 }
 
 fn validate_node(schema: &Map<String, Value>, value: &Value, path: &str) -> Result<()> {
+    if schema.get("x-desktop-request") == Some(&json!(true)) {
+        let request: remote_hosts_desktop_protocol::Request = serde_json::from_value(value.clone())
+            .map_err(|_| anyhow::anyhow!("invalid_arguments: {path} desktop request"))?;
+        match request {
+            remote_hosts_desktop_protocol::Request::Open { lease_ms, .. } => ensure!(
+                lease_ms > 0 && lease_ms <= remote_hosts_desktop_protocol::MAX_LEASE_MS,
+                "invalid_arguments: lease"
+            ),
+            remote_hosts_desktop_protocol::Request::Act {
+                sequence, actions, ..
+            } => ensure!(
+                sequence > 0
+                    && !actions.is_empty()
+                    && actions.len() <= remote_hosts_desktop_protocol::MAX_ACTIONS,
+                "invalid_arguments: action bounds"
+            ),
+            _ => {}
+        }
+        return Ok(());
+    }
     if let Some(choices) = schema.get("enum").and_then(Value::as_array) {
         ensure!(
             choices.contains(value),
@@ -122,19 +196,79 @@ fn validate_node(schema: &Map<String, Value>, value: &Value, path: &str) -> Resu
     Ok(())
 }
 
+/// Complete OAuth requirements. Desktop worker uses one consent for its typed API.
+pub fn required_scopes(name: &str) -> Vec<&'static str> {
+    if name == "desktop_worker" {
+        vec!["desktop:observe", "desktop:input"]
+    } else {
+        scope(name).into_iter().collect()
+    }
+}
+
+pub(crate) fn has_required_scopes(p: &crate::auth::Principal, name: &str) -> bool {
+    scope(name).is_some()
+        && required_scopes(name)
+            .iter()
+            .all(|required| p.scopes.iter().any(|s| s == required))
+}
+
 fn build_catalog() -> Vec<Tool> {
     let string = || json!({"type":"string"});
     let integer = |min, max| json!({"type":"integer","minimum":min,"maximum":max});
     let mut tools: Vec<Tool> = vec![];
     let mut add = |name: &str, description: &str, mut properties: Value, required: Vec<&str>| {
         properties["response_mode"] = json!({"type":"string","enum":["full","compact"],"default":"compact","description":"MCP envelope view; compact is the default. full restores diagnostic metadata."});
-        let read = scope(name) == Some("code:read") && name != "workspace_open";
-        let value = json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"outputSchema":{"type":"object","additionalProperties":true},"annotations":{"readOnlyHint":read,"destructiveHint":!read&&name!="workspace_open","idempotentHint":true,"openWorldHint":name.starts_with("terminal_")}});
+        if name != "task_context" {
+            properties["authorization_version"] = json!({"type":"integer","minimum":1,"maximum":9223372036854775807u64,"description":"Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions."});
+            properties["task_id"] = json!({"type":"string","description":"Optional correlation label for one authorized cross-device task; it never authorizes or replays work."});
+        }
+        let read = scope(name) == Some("code:read")
+            && !matches!(name, "workspace_open" | "file_download" | "task_resume");
+        let value = json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"outputSchema":{"type":"object","additionalProperties":true},"_meta":{"securitySchemes":[{"type":"oauth2","scopes":required_scopes(name)}]},"annotations":{"readOnlyHint":read,"destructiveHint":!read&&name!="workspace_open","idempotentHint":true,"openWorldHint":name.starts_with("terminal_")}});
         // Catalog is composed entirely from static, server-controlled JSON.
         if let Ok(tool) = serde_json::from_value(value) {
             tools.push(tool);
         }
     };
+    add(
+        "desktop_worker",
+        "Run one typed desktop operation using an explicitly authorized persistent owner/device/desktop capability. Each Open binds the current task and a short lease. Terminal/code permission does not grant desktop authority. Defaults unavailable.",
+        json!({"device_id":string(),"task_id":string(),"capability_version":integer(1,9223372036854775807u64),
+            "idempotency_key":string(),"request":{"type":"object","x-desktop-request":true,"description":"Strict tagged desktop protocol. Task/owner/device/desktop/epoch are checked again at admission.","oneOf":[{"type":"object","properties":{"operation":{"const":"open"},"identity":{"type":"object","properties":{"owner":{"type":"string"},"task_id":{"type":"string","format":"uuid"},"device_id":{"type":"string","format":"uuid"},"desktop_id":{"type":"string"}},"required":["owner","task_id","device_id","desktop_id"],"additionalProperties":false},"lease_ms":{"type":"integer","minimum":1,"maximum":30000}},"required":["operation","identity","lease_ms"],"additionalProperties":false},{"type":"object","properties":{"operation":{"enum":["observe","close"]},"binding":{"type":"object"}},"required":["operation","binding"],"additionalProperties":false},{"type":"object","properties":{"operation":{"const":"act"},"frame":{"type":"object"},"sequence":{"type":"integer","minimum":1},"actions":{"type":"array","minItems":1,"maxItems":16,"items":{"type":"object"}}},"required":["operation","frame","sequence","actions"],"additionalProperties":false},{"type":"object","properties":{"operation":{"const":"capabilities"}},"required":["operation"],"additionalProperties":false}]}}),
+        vec![
+            "device_id",
+            "task_id",
+            "capability_version",
+            "idempotency_key",
+            "request",
+        ],
+    );
+    add(
+        "desktop_frame",
+        "Export the complete owned pixels of an authorized Observe operation through the existing 4 MiB chunk/artifact channel. Requires matching owner/task/device/capability, active epoch and TTL. Accepts an operation UUID; no filesystem path.",
+        json!({"device_id":string(),"task_id":string(),"capability_version":integer(1,9223372036854775807u64),
+            "observed_operation_id":string(),"idempotency_key":string()}),
+        vec![
+            "device_id",
+            "task_id",
+            "capability_version",
+            "observed_operation_id",
+            "idempotency_key",
+        ],
+    );
+    add(
+        "task_context",
+        "Restore one authorized cross-device task: linked operations, workspaces, execution states, evidence boundaries and the next existing handle. Read-only; never resumes or replays work. Follow next_page when has_more=true. No evidence of a task is not proof of a host rejection.",
+        json!({"task_id":string(),"limit":integer(1,100),"after_operation":string(),"cursor":string()}),
+        vec!["task_id"],
+    );
+    add(
+        "task_resume",
+        "Explicitly resume an owner-bound task-policy rejection after its authorization version changes. Supply exactly one original request_id or operation_id. Only durable not-started requests and never-dispatched queued jobs are eligible. Keeps the original arguments, CAS versions and idempotency identity. Never resumes unknown, running, completed, platform-denied, or source-policy-rejected work.",
+        json!({"task_id":string(),"authorization_version":integer(1,9223372036854775807u64),
+            "request_id":string(),"operation_id":string()}),
+        vec!["task_id", "authorization_version"],
+    );
     add(
         "devices_list",
         "List authorized devices, freshness and roots, explicit gateway/agent wire compatibility, tool schema revision and separately reported agent/Skill features. Optional known_tools_sha256 detects a stale client catalog; refresh is controlled by the host, not this server. Choose a device explicitly; never fail over.",
@@ -179,15 +313,15 @@ fn build_catalog() -> Vec<Tool> {
     );
     add(
         "code_apply_edits",
-        "Apply version-checked precise replacements or a unified patch. All files preflight before changes; each file is atomic, and every batch returns a durable change_set_id with before/after versions. Partial or uncertain batches can be inspected and continued with change_resume. Never guess when a version or unique match conflicts. Reuse the same idempotency_key only for an uncertain identical submission. Return compact diffs.",
-        json!({"workspace_id":string(),"idempotency_key":string(),"files":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"object","properties":{"path":string(),"expected_version":string(),"action":{"type":"string","enum":["edit","create","delete"]},"edits":{"type":"array","maxItems":100,"items":{"type":"object","properties":{"old_text":string(),"new_text":string()},"required":["old_text","new_text"],"additionalProperties":false}},"patch":string(),"content":string()},"required":["path","expected_version"],"additionalProperties":false}}}),
+        "Apply version-checked precise replacements or a unified patch. For action=create, use expected_version=\"absent\" and full content only; an empty version is a conflict. For edit/delete, use the current file SHA-256. All files preflight before changes; each file is atomic, and every batch returns a durable change_set_id with before/after versions. Partial or uncertain batches can be inspected and continued with change_resume. Never guess when a version or unique match conflicts. Reuse the same idempotency_key only for an uncertain identical submission. Return compact diffs.",
+        json!({"workspace_id":string(),"idempotency_key":string(),"files":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"object","properties":{"path":string(),"expected_version":{"type":"string","description":"Required CAS version: literal absent for create; current file SHA-256 for edit/delete. An empty string is not a missing-file marker."},"action":{"type":"string","enum":["edit","create","delete"]},"edits":{"type":"array","maxItems":100,"items":{"type":"object","properties":{"old_text":string(),"new_text":string()},"required":["old_text","new_text"],"additionalProperties":false}},"patch":string(),"content":string()},"required":["path","expected_version"],"additionalProperties":false}}}),
         vec!["workspace_id", "idempotency_key", "files"],
     );
     add(
         "outcome_resolve",
-        "Resolve an existing mutation whose durable agent result is outcome_unknown. This never replays work. resolution=verified_not_applied clears the semantic guard so a later deliberate new operation may run; verified_applied records completion evidence and also clears the guard. Inspect scoped evidence first; the original operation_id and owner must match.",
-        json!({"operation_id":string(),"resolution":{"type":"string","enum":["verified_not_applied","verified_applied"]},"idempotency_key":string()}),
-        vec!["operation_id", "resolution", "idempotency_key"],
+        "Resolve an existing mutation whose durable agent result is outcome_unknown. This never replays work. resolution=verified_not_applied clears the semantic guard so a later deliberate new operation may run; verified_applied records completion evidence and also clears the guard. Inspect scoped evidence first; the original operation_id and owner must match. resolution=close_not_enqueued instead requires workspace_id and original_idempotency_key, with no operation_id: atomically seal a code_apply_edits submission key only when no operation exists. A delayed old request then cannot enqueue; an existing operation is returned unchanged.",
+        json!({"operation_id":string(),"workspace_id":string(),"original_idempotency_key":string(),"resolution":{"type":"string","enum":["verified_not_applied","verified_applied","close_not_enqueued"]},"idempotency_key":string()}),
+        vec!["resolution", "idempotency_key"],
     );
     add(
         "change_resume",
@@ -209,9 +343,9 @@ fn build_catalog() -> Vec<Tool> {
     );
     add(
         "terminal_exec",
-        "Start a command in the bound workspace. Default pty=false uses real pipes with stdin EOF and combined stdout/stderr; use pty=true only for interactive input. Shell has local-user authority outside code roots. Write-capable action. Default returns terminal_id immediately. Optional wait_ms up to 2000 returns initial output/status without rerunning; a wait timeout does not stop the command. Follow the returned cursor. Never retry uncertain execution with a new key.",
-        json!({"workspace_id":string(),"idempotency_key":string(),"command":string(),"pty":{"type":"boolean"},"timeout_seconds":integer(1,7200),"cols":integer(20,500),"rows":integer(5,200),"wait_ms":integer(0,2000)}),
-        vec!["workspace_id", "idempotency_key", "command"],
+        "Start a command in the bound workspace. Default pty=false uses real pipes with stdin EOF and combined stdout/stderr; use pty=true only for interactive input. Shell has local-user authority outside code roots. Write-capable action. By default waits up to 1000 ms so short commands can return exit/output in one call; long commands return the same durable terminal_id. wait_ms may be 0..2000 and never stops the command. Follow the returned cursor; never replay uncertain execution. action=maintenance_task uses fixed argv and the shared ordinary-user maintenance core: prepare requires maintenance_action and a canonical maintenance_request_id; run requires the same ID and plan_sha256; approve records one short-lived approval bound to that plan and authenticated owner/workspace/device; cancel requires the same ID and plan_sha256; verify uses the same ID. A running or unknown request must be recovered through its original operation. Command/PTY fields are forbidden for maintenance; privileged execution remains unavailable. No root grant.",
+        json!({"workspace_id":string(),"idempotency_key":string(),"action":{"type":"string","enum":["shell","maintenance_task"],"default":"shell"},"command":string(),"pty":{"type":"boolean"},"timeout_seconds":integer(1,7200),"cols":integer(20,500),"rows":integer(5,200),"wait_ms":{"type":"integer","minimum":0,"maximum":2000,"default":1000},"maintenance_step":{"type":"string","enum":["prepare","run","approve","cancel","verify"]},"maintenance_request_id":string(),"maintenance_action":{"type":"string","enum":["inspect_remoteplay_mesh","repair_remoteplay_mesh_ownership"]},"plan_sha256":string()}),
+        vec!["workspace_id", "idempotency_key"],
     );
     add(
         "terminal_read",
@@ -233,8 +367,8 @@ fn build_catalog() -> Vec<Tool> {
     );
     add(
         "operation_get",
-        "Observe one operation_id OR 1..20 operation_ids. Optional wait_ms up to 5000 waits for meaningful state/progress changes; cursor is a latest-state fingerprint, not an event replay cursor. Results include gateway queue/dispatch/result lifecycle timing, agent monotonic execution phases when available, linked terminal status/exit_code, and transfer progress. Never subtract gateway wall timestamps from agent clocks. It does not read terminal output, queue, retry or cancel work. Query omitted results individually.",
-        json!({"operation_id":string(),"operation_ids":{"type":"array","minItems":1,"maxItems":20,"items":string()},"wait_ms":integer(0,5000),"cursor":string(),"max_bytes":integer(4096,131072)}),
+        "Observe one request_id, one operation_id, or 1..20 operation_ids without creating another task. request_id exposes the Gateway receipt even when no remote operation was created, and resolves to its operation when one exists. A bounded wait defaults to 1200 ms. Terminal operations include a bounded sanitized live-output preview; terminal_cursor continues that preview when retained. Use terminal_read only for full history/recovery. It never queues, retries, cancels or replays work.",
+        json!({"request_id":string(),"operation_id":string(),"operation_ids":{"type":"array","minItems":1,"maxItems":20,"items":string()},"wait_ms":{"type":"integer","minimum":0,"maximum":5000,"default":1200},"cursor":string(),"terminal_cursor":integer(0,100000000),"max_bytes":integer(4096,131072)}),
         vec![],
     );
     add(
@@ -251,8 +385,8 @@ fn build_catalog() -> Vec<Tool> {
     );
     add(
         "workspace_context",
-        "Read bounded workspace transfer/terminal facts, recent durable change-set summaries, state counts and runtime identity. active_only narrows terminal/transfer facts; terminal_cursor and transfer_after continue independent live pages. Cursors bind the workspace and filters; restart pages for a fresh view after state changes. after_event replays durable workspace transitions from the returned scoped event cursor; expired cursors require a fresh snapshot. Reports whether explicit workspace_gc is available. No command text or credentials. Device-wide counts are labelled. Not chat-memory or build-verification evidence.",
-        json!({"workspace_id":string(),"cursor":string(),"limit":integer(1,50),"transfer_after":string(),"terminal_cursor":string(),"active_only":{"type":"boolean"},"after_event":string()}),
+        "Read bounded workspace transfer/terminal facts, recent durable change-set summaries, state counts and runtime identity. active_only narrows terminal/transfer facts; terminal_cursor and transfer_after continue independent live pages. Cursors bind the workspace and filters; restart pages for a fresh view after state changes. after_event replays durable workspace transitions from the returned scoped event cursor; expired cursors require a fresh snapshot. Reports whether explicit workspace_gc is available. No command text or credentials. Device-wide counts are labelled. Not chat-memory or build-verification evidence. action=maintenance_describe requires maintenance_action; maintenance_receipt requires the original canonical maintenance_request_id. Both read without creating a journal, target files or write lock; snapshot paging fields cannot be mixed with maintenance. Requires the selected agent to advertise optional maintenance capability.",
+        json!({"workspace_id":string(),"action":{"type":"string","enum":["snapshot","maintenance_describe","maintenance_receipt"],"default":"snapshot"},"cursor":string(),"limit":integer(1,50),"transfer_after":string(),"terminal_cursor":string(),"active_only":{"type":"boolean"},"after_event":string(),"maintenance_action":{"type":"string","enum":["inspect_remoteplay_mesh","repair_remoteplay_mesh_ownership"]},"maintenance_request_id":string()}),
         vec!["workspace_id"],
     );
     add(

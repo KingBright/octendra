@@ -100,6 +100,10 @@ pub struct Attempt {
     pub stdout_blob: Option<Blob>,
     pub stderr_blob: Option<Blob>,
     pub outcome: Option<Outcome>,
+    #[serde(default)]
+    pub command: Option<CommandSpec>,
+    #[serde(default)]
+    pub test_evidence: Option<crate::test_evidence::Tests>,
     pub artifacts: Vec<Artifact>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -320,10 +324,48 @@ async fn execute_plan(
 ) -> Result<()> {
     source::verify(&run.join("source"), &plan.inputs)?;
     plan.toolchain.check_files()?;
-    for attempts in receipt.attempts.values() {
+    for (name, attempts) in &receipt.attempts {
         if let Some(last) = attempts.last() {
             if last.state == "passed" {
                 verify_attempt(run, last)?;
+                let gate = plan
+                    .gates
+                    .iter()
+                    .find(|gate| gate.name() == name)
+                    .context("unknown_recorded_gate")?;
+                let command = last
+                    .command
+                    .as_ref()
+                    .context("legacy_step_command_not_recorded")?;
+                let mut expected_env = plan.toolchain.env.clone();
+                expected_env.insert(
+                    "CARGO_TARGET_DIR".into(),
+                    run.join("cargo-target").display().to_string(),
+                );
+                expected_env.insert("CARGO_BUILD_JOBS".into(), "2".into());
+                ensure!(
+                    command.env == expected_env
+                        && command.program == plan.toolchain.programs["cargo"]
+                        && command.args == gate.command(&plan.package)
+                        && command.cwd == run.join("source")
+                        && command.timeout_seconds
+                            == plan.gate_budgets
+                                [plan.gates.iter().position(|g| g == gate).unwrap()],
+                    "step_command_identity_changed"
+                );
+                if *gate == Gate::Tests {
+                    let evidence = crate::test_evidence::from_logs(
+                        &run.join(&last.stdout),
+                        &run.join(&last.stderr),
+                        true,
+                        true,
+                    )?;
+                    ensure!(
+                        evidence.evidence_complete
+                            && last.test_evidence.as_ref() == Some(&evidence),
+                        "completed_test_evidence_changed"
+                    );
+                }
             }
             if last.state == "running" || last.state == "cleanup_unconfirmed" {
                 let pgid = last.process_group.context("interrupted_spawn_outcome_unknown: inspect the original attempt; never guess ownership")?;
@@ -396,6 +438,8 @@ async fn execute_plan(
             stdout_blob: None,
             stderr_blob: None,
             outcome: None,
+            command: None,
+            test_evidence: None,
             artifacts: Vec::new(),
         });
         receipt.state = "running".into();
@@ -414,6 +458,14 @@ async fn execute_plan(
             env,
             timeout_seconds: plan.gate_budgets[index],
         };
+        receipt
+            .attempts
+            .get_mut(name)
+            .unwrap()
+            .last_mut()
+            .unwrap()
+            .command = Some(spec.clone());
+        update(run, receipt)?;
         println!(
             "{}",
             serde_json::json!({"schema":1,"event":"step_started","step":name,"attempt":number,"run":run})
@@ -462,6 +514,38 @@ async fn execute_plan(
             attempt.state = "invalid_source".into();
             receipt.state = "blocked".into();
             receipt.last_error = Some(error.to_string());
+        }
+        if *gate == Gate::Tests {
+            let complete = attempt.stdout_blob.is_some()
+                && attempt.stderr_blob.is_some()
+                && attempt
+                    .outcome
+                    .as_ref()
+                    .is_some_and(|o| o.cleanup_confirmed);
+            match crate::test_evidence::from_logs(
+                &run.join(&stdout),
+                &run.join(&stderr),
+                complete,
+                attempt.state == "passed",
+            ) {
+                Ok(evidence) => {
+                    let valid = evidence.evidence_complete;
+                    attempt.test_evidence = Some(evidence);
+                    if attempt.state == "passed" && !valid {
+                        attempt.state = "incomplete_test_evidence".into();
+                        receipt.state = "failed".into();
+                        receipt.last_error = Some(
+                            "No executed passing test evidence, failed cases, or incomplete output"
+                                .into(),
+                        );
+                    }
+                }
+                Err(error) => {
+                    attempt.state = "test_evidence_error".into();
+                    receipt.state = "failed".into();
+                    receipt.last_error = Some(error.to_string());
+                }
+            }
         }
         if attempt.state == "passed" && *gate == Gate::Build {
             match archive_artifacts(run, &run.join(&stdout), number) {
@@ -530,7 +614,10 @@ pub fn verify_package(package: &Path) -> Result<serde_json::Value> {
         proof["state"] == "passed"
             && proof["source_inputs_unchanged"] == true
             && proof["functional_tests"]["failed"] == 0
-            && proof["functional_tests"]["test_gates_completed_successfully"] == true,
+            && proof["functional_tests"]["test_gates_completed_successfully"] == true
+            && proof["functional_tests"]["passed"]
+                .as_u64()
+                .is_some_and(|n| n > 0),
         "release_verification_incomplete"
     );
     ensure!(

@@ -307,7 +307,7 @@ fn legacy_package(root: &Path) {
             serde_json::json!({"state":"finished","exit_code":0}),
         );
     }
-    let proof = serde_json::json!({"state":"passed","version":"0.10.4","snapshot_id":"fixture","source_inputs":{},"source_inputs_unchanged":true,"functional_tests":{"failed":0,"test_gates_completed_successfully":true},"checks":checks});
+    let proof = serde_json::json!({"state":"passed","version":"0.10.4","snapshot_id":"fixture","source_inputs":{},"source_inputs_unchanged":true,"functional_tests":{"passed":1,"failed":0,"test_gates_completed_successfully":true},"checks":checks});
     evidence::atomic(&root.join("source-verification.json"), &proof).unwrap();
     evidence::atomic(&root.join("manifest.json"), &serde_json::json!({"version":"0.10.4","snapshot_id":"fixture","source_inputs":{},"source_verification_sha256":evidence::hash_file(&root.join("source-verification.json")).unwrap().sha256,"artifacts":{"candidate":evidence::hash_file(&root.join("candidate")).unwrap()}})).unwrap();
 }
@@ -320,6 +320,24 @@ fn prior_package_is_verified_without_executing_helpers() {
     assert_eq!(result["executed_scripts"], false);
     assert_eq!(result["deployed"], false);
 }
+#[test]
+fn legacy_package_with_no_executed_tests_is_rejected() {
+    let (_d, root) = temp();
+    legacy_package(&root);
+    let mut proof: serde_json::Value =
+        evidence::load(&root.join("source-verification.json")).unwrap();
+    proof["functional_tests"]["passed"] = serde_json::json!(0);
+    evidence::atomic(&root.join("source-verification.json"), &proof).unwrap();
+    let mut manifest: serde_json::Value = evidence::load(&root.join("manifest.json")).unwrap();
+    manifest["source_verification_sha256"] = serde_json::json!(
+        evidence::hash_file(&root.join("source-verification.json"))
+            .unwrap()
+            .sha256
+    );
+    evidence::atomic(&root.join("manifest.json"), &manifest).unwrap();
+    assert!(pipeline::verify_package(&root).is_err());
+}
+
 #[test]
 fn corrupt_package_is_rejected() {
     let (_d, root) = temp();
@@ -360,8 +378,9 @@ async fn real_cargo_failure_resume_reuses_passed_gates_and_binds_artifact() {
 mod tests {
     #[test]
     fn external_fixture_gate() {
-        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let run = manifest.parent().unwrap();
+        let run = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
         assert!(
             run.join("allow-test").exists(),
             "intentional fixture failure"
