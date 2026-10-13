@@ -8,6 +8,7 @@
 - Verify one frozen source snapshot, preserve test and build receipts, then transfer its immutable bundle directly through the authorized Remote Hosts or configured management channel. Do not download deployment input from GitHub Releases.
 - Keep main as the collaboration branch. Preserve unrelated worktree changes. Stage explicit task files only.
 - Upgrade Gateway first, then Agents using existing maintenance leases, platform signing, exact SHA-256 validation, health observations, and rollback paths. Never bypass local macOS signing or device authorization.
+- For macOS Agent upgrades, use `scripts/launch-code-upgrade.py --start`. Never use `launchctl submit` or a repeating updater: submit jobs can retain KeepAlive and reinstall obsolete candidates. Preserve the prepared request marker and observe its original result before another launch.
 - Do not restart other projects or kill unrelated compiler processes. Cancel only operations whose ownership is confirmed.
 - Run bounded regression tests on the appropriate owned target machine. Investigate hangs locally; disabling cloud CI does not authorize skipping the equivalent tests.
 - Never overwrite a published version or its artifacts. A retry preserves its original request/operation and evidence. Ambiguous execution requires observation, not replay.
@@ -18,6 +19,7 @@
 - `scripts/source_snapshot.py`: capture/check the declared source inputs.
 - `scripts/release-code.py`: local verification and three-platform Cargo cross-builds in a leased build slot; no cloud runner and no deployment.
 - `scripts/fleet-upgrade.py`: verified local bundle distribution and per-platform updaters. Use only a verified local package and explicit deployment configuration.
+- `scripts/launch-code-upgrade.py`: macOS immutable request preparation and explicit one-shot launch through the stable dispatcher; KeepAlive and automatic triggers are disabled.
 - `scripts/check-code-gateway.py`: live acceptance, with authoritative results rather than presentation-only compaction.
 
 The current release coordinator still contains transitional Python helpers. Rust produces the executables; do not describe the whole coordinator as Python-free until those helpers are actually replaced and tested.
