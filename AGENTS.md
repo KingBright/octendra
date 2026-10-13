@@ -6,7 +6,7 @@
 - Do not add or enable GitHub Actions workflows for builds, tests, release gates, or deployments. Do not wait for GitHub check-runs. Git hosting is source storage only; optional release mirroring must never block delivery.
 - Use the pinned local Rust toolchain and Cargo to produce macOS arm64, Linux x86_64 musl, and Windows x86_64 MSVC artifacts. Use the existing cargo-zigbuild/cargo-xwin linkers and SDKs. A successful cross-build is not target-platform execution evidence.
 - Verify one frozen source snapshot, preserve test and build receipts, then transfer its immutable bundle directly through the authorized Remote Hosts or configured management channel. Do not download deployment input from GitHub Releases.
-- Keep main as the collaboration branch. Preserve unrelated worktree changes. Stage explicit task files only.
+- Develop only in the project's actual primary directory on main; do not create or continue development branches or temporary worktrees. Preserve unrelated changes and stage explicit task files only.
 - Upgrade Gateway first, then Agents using existing maintenance leases, platform signing, exact SHA-256 validation, health observations, and rollback paths. Never bypass local macOS signing or device authorization.
 - For macOS Agent upgrades, use `scripts/launch-code-upgrade.py --start`. Never use `launchctl submit` or a repeating updater: submit jobs can retain KeepAlive and reinstall obsolete candidates. Preserve the prepared request marker and observe its original result before another launch.
 - Do not restart other projects or kill unrelated compiler processes. Cancel only operations whose ownership is confirmed.
