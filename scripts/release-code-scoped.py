@@ -76,7 +76,7 @@ try:
   for label,selection,minimum in checks:
    state.update(state='verifying',stage=label);build_slot.atomic_json(report,state)
    argv=prefix+(['test','-p','remote-hosts-code','--lib','--locked','--offline',selection,'--','--nocapture'] if selection else ['clippy','-p','remote-hosts-code','--all-targets','--locked','--offline','--','-D','warnings'])
-   log=base/(label+'-'+args.version+'-'+args.platform+'.log');res=build_process.run(argv,checkout,log,env,idle_timeout=300,on_update=update);text=log.read_text();counts=[int(n) for n in re.findall(r'test result: ok\. (\d+) passed;',text)];count=sum(counts);passed=res['state']=='finished' and res['exit_code']==0 and (not selection or count>=minimum)
+   log=base/(report.stem+'-'+label+'.log');res=build_process.run(argv,checkout,log,env,idle_timeout=300,on_update=update);text=log.read_text();counts=[int(n) for n in re.findall(r'test result: ok\. (\d+) passed;',text)];count=sum(counts);passed=res['state']=='finished' and res['exit_code']==0 and (not selection or count>=minimum)
    state['checks'].append({'stage':label,'passed':passed,'tests':count,'minimum':minimum,'exit_code':res.get('exit_code'),'log':str(log)});build_slot.atomic_json(report,state)
    print(json.dumps(state['checks'][-1]),flush=True)
    if not passed:state['state']='verification_failed';build_slot.atomic_json(report,state);print(text[-10000:],flush=True);sys.exit(1)
@@ -86,7 +86,7 @@ try:
    state.update(state='verified',packaged=False,deployed=False);build_slot.atomic_json(report,state);print(json.dumps({'state':'verified','snapshot_id':m['snapshot_id'],'test_count':state['test_count'],'packaged':False,'deployed':False}),flush=True);sys.exit(0)
   state.update(state='packaging',stage=args.platform+'_release');build_slot.atomic_json(report,state)
   target_triple='aarch64-apple-darwin' if args.platform=='macos' else 'x86_64-unknown-linux-musl'
-  log=base/(args.platform+'-release-'+args.version+'.log');res=build_process.run(prefix+[('build' if args.platform=='macos' else 'zigbuild'),'-p','remote-hosts-code','--release','--locked','--offline','--target',target_triple],checkout,log,env,idle_timeout=300,on_update=update)
+  log=base/(report.stem+'-release.log');res=build_process.run(prefix+[('build' if args.platform=='macos' else 'zigbuild'),'-p','remote-hosts-code','--release','--locked','--offline','--target',target_triple],checkout,log,env,idle_timeout=300,on_update=update)
   if res['state']!='finished' or res['exit_code']!=0:state['state']='package_failed';build_slot.atomic_json(report,state);print(log.read_text()[-10000:],flush=True);sys.exit(1)
   binary=target/target_triple/'release/remote-hosts-code';data=binary.read_bytes()
   if args.platform=='macos':
@@ -100,6 +100,11 @@ try:
    assert contract['version']==args.version and contract['task_authorization_protocol']==2 and contract['tools_sha256']==contract['tool_schema_revision']
    state['machine_contract']=contract
   check_source()
+  if (out/'manifest.json').exists():
+   current=json.loads((out/'manifest.json').read_text())
+   assert current['version']!=args.version or current['sha256']==build_slot.digest(binary), 'same version with different artifact SHA; never overwrite'
+  elif out.exists():
+   assert not any(out.iterdir()), 'unfinished current publication; inspect original receipt'
   out.mkdir(parents=True,exist_ok=True)
   def publish_file(src,dst,mode):
    pending=build_slot.no_links(dst.with_name('.'+dst.name+'.pending'))
