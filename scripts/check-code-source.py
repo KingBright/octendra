@@ -37,7 +37,7 @@ def inputs(root):
     # Include path dependencies and fixtures, not only the primary crate. Added
     # and deleted files are part of identity, as are compiler/Cargo settings.
     paths = {root/n for n in ('AGENTS.md', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml', 'build.rs',
-                             'rustfmt.toml', '.rustfmt.toml', 'clippy.toml', '.clippy.toml') if (root/n).is_file()}
+                             'rustfmt.toml', '.rustfmt.toml', 'clippy.toml', '.clippy.toml', 'desktop-worker/src/lifecycle.rs') if (root/n).is_file()}
     # sqlx::migrate!("../../migrations") and root fixtures are compiled/tested
     # inputs too. Include their membership, not only .rs files inside crates.
     for subtree in ('crates', 'skills', '.cargo', '.github', 'migrations', 'fixtures', 'tests', 'assets', '.sqlx'):
