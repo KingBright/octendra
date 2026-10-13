@@ -1,5 +1,6 @@
 //! Fixed-argv private worker pipe. Authority is independent of shell/code grants.
 //! The Agent journal owns results/replay; this module owns one short-lived child and pixel cache.
+use super::lifecycle::{Tracker, interrupted, process_identity};
 use anyhow::{Context, Result, bail, ensure};
 use remote_hosts_desktop_protocol::*;
 use serde::{Deserialize, Serialize};
@@ -71,10 +72,19 @@ fn uid() -> Result<u32> {
     );
     Ok(values[0])
 }
-#[cfg(all(test, not(target_os = "linux")))]
+#[cfg(all(test, not(any(target_os = "linux", target_os = "macos"))))]
 fn uid() -> Result<u32> {
     use std::os::unix::fs::MetadataExt;
     Ok(std::fs::metadata(std::env::current_exe()?)?.uid())
+}
+#[cfg(target_os = "macos")]
+fn uid() -> Result<u32> {
+    let actual = unsafe { nix::libc::getuid() };
+    ensure!(
+        actual != 0 && actual == unsafe { nix::libc::geteuid() },
+        "unprivileged desktop Agent required"
+    );
+    Ok(actual)
 }
 fn owned_file(path: &Path, mode: u32, max: u64, owner: u32) -> Result<Vec<u8>> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -173,8 +183,14 @@ fn crate_now_ms() -> u64 {
 }
 struct Pipe {
     child: Child,
+    worker_pid: Option<u32>,
+    open_operation_id: Option<Uuid>,
+    exit_evidence: Option<serde_json::Value>,
     input: Option<ChildStdin>,
     output: ChildStdout,
+    stderr: Option<tokio::process::ChildStderr>,
+    diagnostics: Option<tokio::task::JoinHandle<()>>,
+    lifecycle: Option<Tracker>,
 }
 impl Pipe {
     fn spawn(approval: &LaunchApproval, config: &Path) -> Result<Self> {
@@ -186,18 +202,50 @@ impl Pipe {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
         let input = child.stdin.take().context("worker stdin")?;
         let output = child.stdout.take().context("worker stdout")?;
         Ok(Self {
+            worker_pid: child.id(),
+            open_operation_id: None,
+            exit_evidence: None,
+            stderr: child.stderr.take(),
+            diagnostics: None,
+            lifecycle: None,
             child,
             input: Some(input),
             output,
         })
     }
+    async fn track(&mut self, tracker: Tracker) -> bool {
+        self.lifecycle = Some(tracker.clone());
+        let persisted = tracker
+            .phase(
+                "spawned",
+                tracker.snapshot()["operation_id"]
+                    .as_str()
+                    .and_then(|s| Uuid::parse_str(s).ok())
+                    .expect("original operation"),
+            )
+            .await;
+        if let Some(stderr) = self.stderr.take() {
+            self.diagnostics = Some(tokio::spawn(async move {
+                tracker.read(stderr).await;
+            }));
+        }
+        persisted
+    }
     async fn exchange(&mut self, id: Uuid, request: Request) -> Result<(WorkerReply, Vec<u8>)> {
+        let is_open = matches!(request, Request::Open { .. });
+        if let Some(tracker) = &self.lifecycle {
+            tracker.admit(id);
+            ensure!(
+                tracker.phase("request_send_started", id).await,
+                "lifecycle persistence failed"
+            );
+        }
         ensure!(self.child.try_wait()?.is_none(), "worker already exited");
         let encoded = serde_json::to_vec(&WorkerRequest {
             request_id: id,
@@ -210,6 +258,14 @@ impl Pipe {
             .await?;
         input.write_all(&encoded).await?;
         input.flush().await?;
+        if let Some(tracker) = &self.lifecycle {
+            ensure!(
+                tracker
+                    .phase(if is_open { "open_sent" } else { "request_sent" }, id)
+                    .await,
+                "lifecycle persistence failed"
+            );
+        }
         let length = self.output.read_u32().await? as usize;
         ensure!(
             length > 0 && length <= MAX_WORKER_HEADER,
@@ -245,15 +301,47 @@ impl Pipe {
                 "observation missing real bytes"
             );
         }
+        if let Some(tracker) = &self.lifecycle {
+            ensure!(
+                tracker.phase("reply_received", id).await,
+                "lifecycle persistence failed"
+            );
+        }
         Ok((reply, bytes))
     }
     async fn disconnect(&mut self) -> Result<()> {
+        if let (Some(t), Some(id)) = (&self.lifecycle, self.open_operation_id) {
+            t.phase("cleanup_started", id).await;
+        }
+        self.disconnect_child().await
+    }
+    async fn disconnect_child(&mut self) -> Result<()> {
+        use std::os::unix::process::ExitStatusExt;
         self.input.take(); // EOF gives the worker its bounded release/Close path.
         match tokio::time::timeout(Duration::from_secs(3), self.child.wait()).await {
-            Ok(Ok(status)) if status.success() => Ok(()),
+            Ok(Ok(status)) => {
+                self.exit_evidence = Some(serde_json::json!({
+                    "protocol":1,"pid":self.worker_pid,"reaped":true,
+                    "exit_code":status.code(),"signal":status.signal(),
+                    "forced_stop":false,"exit_success":status.success()
+                }));
+                ensure!(status.success(), "worker cleanup outcome unknown");
+                Ok(())
+            }
             _ => {
-                let _ = self.child.start_kill();
-                let _ = tokio::time::timeout(Duration::from_secs(1), self.child.wait()).await;
+                let kill_requested = self.child.start_kill().is_ok();
+                let reaped = tokio::time::timeout(Duration::from_secs(1), self.child.wait()).await;
+                self.exit_evidence = Some(match reaped {
+                    Ok(Ok(status)) => serde_json::json!({
+                        "protocol":1,"pid":self.worker_pid,"reaped":true,
+                        "exit_code":status.code(),"signal":status.signal(),
+                        "forced_stop":true,"kill_request_succeeded":kill_requested,"exit_success":status.success()
+                    }),
+                    _ => serde_json::json!({
+                        "protocol":1,"pid":self.worker_pid,"reaped":false,
+                        "exit_code":null,"signal":null,"forced_stop":true,"kill_request_succeeded":kill_requested,"exit_success":false
+                    }),
+                });
                 bail!("worker cleanup outcome unknown")
             }
         }
@@ -295,6 +383,7 @@ struct State {
     sequence: u64,
     poisoned: bool,
     guard_key: Option<String>,
+    lifecycle: Option<Tracker>,
     expires_at_ms: u64,
     worker_config: Option<PathBuf>,
     artifacts: BTreeMap<Uuid, FrameArtifact>,
@@ -302,6 +391,18 @@ struct State {
     source: Option<(PathBuf, String)>,
     #[cfg(test)]
     fixture: Option<String>,
+}
+fn desktop_lock_path() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    return std::env::temp_dir().join(format!(
+        "remote-hosts-desktop-{}.lock",
+        uid().unwrap_or(u32::MAX)
+    ));
+    #[cfg(not(target_os = "macos"))]
+    PathBuf::from(format!(
+        "/run/user/{}/remote-hosts-desktop.lock",
+        uid().unwrap_or(u32::MAX)
+    ))
 }
 #[derive(Clone)]
 pub struct NativeWorkers {
@@ -315,10 +416,7 @@ impl NativeWorkers {
         Self {
             store: None,
             cache: state_dir.join("desktop-frames"),
-            lock_path: PathBuf::from(format!(
-                "/run/user/{}/remote-hosts-desktop.lock",
-                uid().unwrap_or(u32::MAX)
-            )),
+            lock_path: desktop_lock_path(),
             state: Arc::new(Mutex::new(State {
                 approval: None,
                 pipe: None,
@@ -327,6 +425,7 @@ impl NativeWorkers {
                 sequence: 0,
                 poisoned: false,
                 guard_key: None,
+                lifecycle: None,
                 expires_at_ms: 0,
                 worker_config: None,
                 artifacts: BTreeMap::new(),
@@ -363,6 +462,75 @@ impl NativeWorkers {
         drop(state);
         result
     }
+    #[cfg(target_os = "macos")]
+    pub async fn capabilities(&self) -> Capabilities {
+        self.capabilities_with_probe(super::macos_worker::platform_status(), |a| {
+            a.validate(&a.identity.device_id.to_string()).is_ok()
+                && super::macos_worker::window_scope_ready(
+                    &a.desktop_session,
+                    a.logical_size,
+                    a.logical_position,
+                )
+        })
+        .await
+    }
+    #[cfg(any(target_os = "macos", test))]
+    async fn capabilities_with_probe(
+        &self,
+        platform: &str,
+        target_valid: impl FnOnce(&LaunchApproval) -> bool,
+    ) -> Capabilities {
+        let state = self.state.lock().await;
+        let blocked = |reason: &str| Capabilities {
+            backend: reason.into(),
+            ..Capabilities::default()
+        };
+        let Some(a) = &state.approval else {
+            return blocked(if platform == "screencapturekit" {
+                "window_scoped_authority_required"
+            } else {
+                platform
+            });
+        };
+        // Use the same current owned-file/hash boundary as dispatch. A readiness
+        // read must not preserve a revoked grant or mutate its evidence.
+        if state.source.as_ref().is_none_or(|(path, hash)| {
+            !owned_file(path, 0o600, 16384, uid().unwrap_or(u32::MAX))
+                .is_ok_and(|bytes| digest(&bytes) == *hash)
+        }) {
+            return blocked("desktop_approval_changed");
+        }
+        if state.poisoned
+            || state
+                .lifecycle
+                .as_ref()
+                .is_some_and(|t| t.snapshot()["persistence_failed"] == true)
+        {
+            return blocked("outcome_unknown");
+        }
+        if state.pipe.is_none()
+            && let Some(store) = &self.store
+        {
+            let key =
+                digest(format!("{}:{}", a.identity.device_id, a.identity.desktop_id).as_bytes());
+            match store.get::<serde_json::Value>("desktop_guard", &key).await {
+                Ok(Some(_)) => return blocked("desktop_recovery_required"),
+                Err(_) => return blocked("desktop_state_unavailable"),
+                Ok(None) => {}
+            }
+        }
+        if !target_valid(a) {
+            return blocked("window_target_unavailable");
+        }
+        if platform != "screencapturekit" {
+            return blocked(platform);
+        }
+        Capabilities {
+            available: true,
+            backend: "macos_pid_private_window_poc".into(),
+            ..Capabilities::default()
+        }
+    }
     pub async fn dispatch(
         &self,
         id: Uuid,
@@ -371,6 +539,49 @@ impl NativeWorkers {
         request: Request,
     ) -> Result<serde_json::Value> {
         let mut state = self.state.lock().await;
+        let had_pipe = state.pipe.is_some();
+        let result = self
+            .dispatch_locked(&mut state, id, identity, version, request)
+            .await;
+        let result = if result.is_err() && !had_pipe && state.pipe.is_some() {
+            state.poisoned = true;
+            self.close_state(&mut state).await;
+            Ok(serde_json::json!({"error":"outcome_unknown","automatic_replay_safe":false}))
+        } else {
+            result
+        };
+        let mut result = result?;
+        if let Some(tracker) = &state.lifecycle {
+            let snapshot = tracker.snapshot();
+            if snapshot["persistence_failed"] == true {
+                state.poisoned = true;
+                self.close_state(&mut state).await;
+                result =
+                    serde_json::json!({"error":"outcome_unknown","automatic_replay_safe":false});
+            }
+            result["worker_lifecycle"] = state
+                .lifecycle
+                .as_ref()
+                .expect("lifecycle retained")
+                .snapshot();
+        }
+        Ok(result)
+    }
+    async fn dispatch_locked(
+        &self,
+        state: &mut State,
+        id: Uuid,
+        identity: &Identity,
+        version: u64,
+        request: Request,
+    ) -> Result<serde_json::Value> {
+        if state
+            .lifecycle
+            .as_ref()
+            .is_some_and(|t| t.snapshot()["persistence_failed"] == true)
+        {
+            state.poisoned = true;
+        }
         let Some(a) = state.approval.clone() else {
             return Ok(serde_json::json!({"error":"unavailable"}));
         };
@@ -385,7 +596,7 @@ impl NativeWorkers {
                         .map_or(true, |bytes| digest(&bytes) != *hash)
                 }))
         {
-            let clean = self.close_state(&mut state).await;
+            let clean = self.close_state(state).await;
             state.approval = None;
             return Ok(
                 serde_json::json!({"error":if clean {"unavailable"}else{"outcome_unknown"},"automatic_replay_safe":false}),
@@ -404,6 +615,12 @@ impl NativeWorkers {
         if matches!(request, Request::Capabilities {}) {
             return Ok(serde_json::to_value(unavailable(&request).unwrap())?);
         }
+        if let Request::Close { binding } = &request
+            && state.pipe.is_none()
+            && let Some(result) = self.reconcile_closed_guard(state, binding, version).await?
+        {
+            return Ok(result);
+        }
         if state.poisoned {
             return Ok(
                 serde_json::json!({"error":"outcome_unknown","automatic_replay_safe":false}),
@@ -417,15 +634,20 @@ impl NativeWorkers {
             state.lock = Some(self.acquire_lock()?);
             let key = digest(format!("{}:{}", identity.device_id, identity.desktop_id).as_bytes());
             if let Some(store) = &self.store {
-                if store
+                if let Some(guard) = store
                     .get::<serde_json::Value>("desktop_guard", &key)
                     .await?
-                    .is_some()
                 {
+                    let evidence = if guard["worker_lifecycle"].is_object() {
+                        &guard["worker_lifecycle"]
+                    } else {
+                        &guard
+                    };
+                    let parent_lost = interrupted(evidence, &process_identity(std::process::id()));
                     state.poisoned = true;
                     state.guard_key = Some(key);
                     return Ok(
-                        serde_json::json!({"error":"outcome_unknown","automatic_replay_safe":false}),
+                        serde_json::json!({"error":"outcome_unknown","automatic_replay_safe":false,"recovery_reason":if parent_lost {"parent_runtime_interrupted"} else {"unresolved_original_intent"},"original_operation_id":guard["operation_id"]}),
                     );
                 }
                 // Commit intent before spawning a child or touching the desktop.
@@ -435,7 +657,8 @@ impl NativeWorkers {
                         &key,
                         &serde_json::json!({
                             "operation_id":id,"identity":identity,"capability_version":version,
-                            "state":"opening_or_active","recorded_at_ms":crate_now_ms()
+                            "state":"opening_or_active","recorded_at_ms":crate_now_ms(),
+                            "parent_identity":process_identity(std::process::id()),"worker_exit":null
                         }),
                         i64::MAX,
                     )
@@ -471,6 +694,21 @@ impl NativeWorkers {
                         .context("worker execution config")?,
                 )?);
             }
+            let pipe = state.pipe.as_mut().context("worker missing")?;
+            pipe.open_operation_id = Some(id);
+            let tracker = Tracker::new(
+                id,
+                pipe.worker_pid.context("worker PID")?,
+                self.store.clone().zip(state.guard_key.clone()),
+            );
+            state.lifecycle = Some(tracker.clone());
+            if !pipe.track(tracker).await {
+                state.poisoned = true;
+                self.close_state(state).await;
+                return Ok(
+                    serde_json::json!({"error":"outcome_unknown","automatic_replay_safe":false}),
+                );
+            }
         } else {
             let binding = match &request {
                 Request::Observe { binding } | Request::Close { binding } => binding,
@@ -492,7 +730,7 @@ impl NativeWorkers {
             }
         }
         if matches!(request, Request::Observe { .. }) {
-            self.expire_frames(&mut state);
+            self.expire_frames(state);
             ensure!(
                 state.artifacts.len() < 2
                     && state.artifacts.values().map(|a| a.bytes).sum::<usize>() + MAX_WORKER_PIXELS
@@ -501,8 +739,10 @@ impl NativeWorkers {
             );
         }
         let is_close = matches!(request, Request::Close { .. });
+        // Worker handling has a 25-second bound after startup. Leave time for
+        // private approval validation and delivery of its terminal response.
         let budget = if matches!(request, Request::Open { .. }) {
-            25
+            35
         } else {
             3
         };
@@ -517,9 +757,21 @@ impl NativeWorkers {
         .await;
         let (reply, bytes) = match response {
             Ok(Ok(v)) => v,
-            _ => {
+            failure => {
+                if let Some(tracker) = &state.lifecycle {
+                    tracker
+                        .phase(
+                            if failure.is_err() {
+                                "operation_timeout"
+                            } else {
+                                "transport_failed"
+                            },
+                            id,
+                        )
+                        .await;
+                }
                 state.poisoned = true;
-                self.close_state(&mut state).await;
+                self.close_state(state).await;
                 return Ok(
                     serde_json::json!({"error":"outcome_unknown","automatic_replay_safe":false}),
                 );
@@ -529,7 +781,7 @@ impl NativeWorkers {
             Ok(value) => value,
             Err(error) => {
                 state.poisoned = matches!(error, ErrorCode::OutcomeUnknown);
-                let clean = self.close_state(&mut state).await;
+                let clean = self.close_state(state).await;
                 return Ok(
                     serde_json::json!({"error":if clean {error}else{ErrorCode::OutcomeUnknown},"automatic_replay_safe":false}),
                 );
@@ -587,7 +839,7 @@ impl NativeWorkers {
         };
         if !valid {
             state.poisoned = true;
-            self.close_state(&mut state).await;
+            self.close_state(state).await;
             return Ok(serde_json::json!({"error":"outcome_unknown"}));
         }
         let mut result = serde_json::to_value(&value)?;
@@ -596,6 +848,15 @@ impl NativeWorkers {
                 binding,
                 expires_at_ms,
             } => {
+                if let Some(tracker) = &state.lifecycle
+                    && !tracker.bind(&binding).await
+                {
+                    state.poisoned = true;
+                    self.close_state(state).await;
+                    return Ok(
+                        serde_json::json!({"error":"outcome_unknown","automatic_replay_safe":false}),
+                    );
+                }
                 state.binding = Some(binding.clone());
                 state.expires_at_ms = expires_at_ms;
                 state.sequence = 0;
@@ -621,7 +882,7 @@ impl NativeWorkers {
                 };
                 if self.write_frame(id, &bytes).is_err() {
                     state.poisoned = true;
-                    self.close_state(&mut state).await;
+                    self.close_state(state).await;
                     return Ok(
                         serde_json::json!({"error":"outcome_unknown","automatic_replay_safe":false}),
                     );
@@ -634,7 +895,7 @@ impl NativeWorkers {
             _ => {}
         }
         if is_close {
-            let clean = self.close_state(&mut state).await;
+            let clean = self.close_state(state).await;
             if !clean {
                 return Ok(
                     serde_json::json!({"error":"outcome_unknown","automatic_replay_safe":false}),
@@ -642,6 +903,91 @@ impl NativeWorkers {
             }
         }
         Ok(result)
+    }
+    // Existing Close only: reconcile durable proof of an already closed owned
+    // child. No signal, Portal call, input, restart or original outcome change.
+    async fn reconcile_closed_guard(
+        &self,
+        state: &mut State,
+        binding: &Binding,
+        version: u64,
+    ) -> Result<Option<serde_json::Value>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let key = digest(
+            format!(
+                "{}:{}",
+                binding.identity.device_id, binding.identity.desktop_id
+            )
+            .as_bytes(),
+        );
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM kv WHERE kind='desktop_guard' AND key=?")
+                .bind(&key)
+                .fetch_optional(&store.pool)
+                .await?;
+        let Some((raw,)) = row else { return Ok(None) };
+        let guard: serde_json::Value = serde_json::from_str(&raw)?;
+        let evidence = &guard["worker_lifecycle"];
+        let exit = &evidence["worker_exit"];
+        let worker = &evidence["worker_identity"];
+        let valid = evidence["protocol"] == 1
+            && exit["protocol"] == 1
+            && guard["identity"] == serde_json::to_value(&binding.identity)?
+            && guard["capability_version"] == version
+            && !binding.epoch.is_nil()
+            && evidence["binding"] == serde_json::to_value(binding)?
+            && guard["operation_id"] == evidence["operation_id"]
+            && evidence["operation_id"]
+                .as_str()
+                .is_some_and(|s| Uuid::parse_str(s).is_ok_and(|id| !id.is_nil()))
+            && evidence["persistence_failed"] == false
+            && evidence["shutdown_status"] == "confirmed"
+            && worker["identity_state"] == "observed"
+            && worker["start_ticks"].as_u64().is_some_and(|n| n > 0)
+            && worker["boot_id"]
+                .as_str()
+                .is_some_and(|s| Uuid::parse_str(s).is_ok())
+            && guard["worker_pid"] == worker["pid"]
+            && exit["pid"] == worker["pid"]
+            && exit == &guard["worker_exit"]
+            && exit["reaped"] == true
+            && exit["exit_success"] == true
+            && exit["exit_code"] == 0
+            && exit["signal"].is_null()
+            && exit["forced_stop"] == false;
+        let pid = worker["pid"].as_u64().and_then(|n| u32::try_from(n).ok());
+        if !valid || pid.is_none_or(|pid| process_identity(pid) == *worker) {
+            return Ok(Some(
+                serde_json::json!({"error":"outcome_unknown","automatic_replay_safe":false,
+                "recovery_reason":"owned_terminal_close_evidence_required","original_operation_id":guard["operation_id"]}),
+            ));
+        }
+        if state.lock.is_none() {
+            state.lock = Some(self.acquire_lock()?);
+        }
+        let removed =
+            sqlx::query("DELETE FROM kv WHERE kind='desktop_guard' AND key=? AND value=?")
+                .bind(&key)
+                .bind(&raw)
+                .execute(&store.pool)
+                .await?
+                .rows_affected();
+        ensure!(removed == 1, "desktop close evidence changed");
+        state.guard_key = None;
+        state.binding = None;
+        state.last = None;
+        state.poisoned = false;
+        state.lifecycle = None;
+        if let Some(lock) = state.lock.take() {
+            fs2::FileExt::unlock(&lock)?;
+        }
+        Ok(Some(
+            serde_json::json!({"state":"closed","recovered_from_guard":true,
+            "original_operation_id":guard["operation_id"],"original_outcome_unchanged":true,
+            "worker_lifecycle":evidence}),
+        ))
     }
     fn acquire_lock(&self) -> Result<std::fs::File> {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -833,7 +1179,25 @@ impl NativeWorkers {
         state.binding = None;
         state.last = None;
         let clean = match state.pipe.take() {
-            Some(mut pipe) => pipe.disconnect().await.is_ok(),
+            Some(mut pipe) => {
+                let clean = pipe.disconnect().await.is_ok();
+                if let Some(mut task) = pipe.diagnostics.take()
+                    && !matches!(
+                        tokio::time::timeout(Duration::from_secs(1), &mut task).await,
+                        Ok(Ok(()))
+                    )
+                {
+                    task.abort();
+                    let _ = task.await;
+                    state.poisoned = true;
+                }
+                if let (Some(tracker), Some(exit)) = (&pipe.lifecycle, &pipe.exit_evidence)
+                    && !tracker.exit(exit.clone()).await
+                {
+                    state.poisoned = true;
+                }
+                clean
+            }
             None => true,
         };
         state.poisoned |= !clean;

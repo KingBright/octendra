@@ -121,6 +121,30 @@ fn lock(dir: &std::path::Path) -> Result<std::fs::File> {
 }
 #[tokio::main]
 async fn main() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let args: Vec<_> = std::env::args_os().collect();
+        if args.get(1).is_some_and(|v| v == "--approval") {
+            ensure!(args.len() == 3, "worker requires one private approval path");
+            return remote_hosts_code::computer_use::macos_worker::run(std::path::Path::new(
+                &args[2],
+            ))
+            .await;
+        }
+        if args.get(1).is_some_and(|v| v == "desktop-window-target") {
+            ensure!(
+                args.len() == 4,
+                "desktop-window-target requires PID and window ID"
+            );
+            let pid = args[2].to_str().context("process ID")?.parse()?;
+            let window = args[3].to_str().context("window ID")?.parse()?;
+            println!(
+                "{}",
+                remote_hosts_code::computer_use::macos_worker::window_target(pid, window)?
+            );
+            return Ok(());
+        }
+    }
     #[cfg(windows)]
     {
         let args: Vec<_> = std::env::args_os().skip(1).collect();
