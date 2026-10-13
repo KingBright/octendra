@@ -36,7 +36,7 @@ def digest(path):
 def inputs(root):
     # Include path dependencies and fixtures, not only the primary crate. Added
     # and deleted files are part of identity, as are compiler/Cargo settings.
-    paths = {root/n for n in ('AGENTS.md', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml', 'build.rs',
+    paths = {root/n for n in ('AGENTS.md', '.gitattributes', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml', 'build.rs',
                              'rustfmt.toml', '.rustfmt.toml', 'clippy.toml', '.clippy.toml', 'desktop-worker/src/lifecycle.rs') if (root/n).is_file()}
     # sqlx::migrate!("../../migrations") and root fixtures are compiled/tested
     # inputs too. Include their membership, not only .rs files inside crates.
@@ -60,7 +60,8 @@ def inputs(root):
         path = root/'scripts'/name
         if path.is_file():
             paths.add(path)
-    paths.update((root/'scripts/tests').rglob('*.py'))
+    for pattern in ('*.py', '*.rs', '*.mjs'):
+        paths.update((root/'scripts/tests').rglob(pattern))
     # Android is part of mainline input identity. Keep generated SDK/build state,
     # signing material and the debug-only generated CA outside source snapshots.
     android = root/'android'
