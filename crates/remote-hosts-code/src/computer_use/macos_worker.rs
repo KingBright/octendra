@@ -14,6 +14,9 @@ use foreign_types::ForeignType;
 #[cfg(test)]
 use input_gate::INPUT_FRESHNESS;
 use input_gate::{InputBackend, InputValidity, dispatch_input_batch, freshness_budget};
+#[path = "../../../remote-hosts-desktop-protocol/src/hold.rs"]
+pub mod hold;
+use hold::{Control, HoldError, HoldGuard};
 use screencapturekit::{cm::CMSampleBuffer, prelude::*};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -394,6 +397,7 @@ struct Session {
     last: Option<FrameRef>,
     observed: Option<Instant>,
     last_input: Option<Instant>,
+    holds: HoldGuard,
     frame_sequence: u64,
     sequence: u64,
     keys: BTreeSet<u16>,
@@ -540,6 +544,7 @@ impl Session {
         Ok(())
     }
     fn close(mut self) -> std::result::Result<(), ErrorCode> {
+        self.holds.stop();
         let mut released = true;
         if (!self.keys.is_empty() || !self.buttons.is_empty())
             && (platform_status() != "screencapturekit" || !self.lifetime.live(self.target))
@@ -596,7 +601,10 @@ impl InputBackend for MacInput<'_> {
         InputValidity {
             live,
             captured: s.observed,
-            deadline: s.deadline,
+            deadline: s
+                .holds
+                .expires_at()
+                .map_or(s.deadline, |at| at.min(s.deadline)),
             now: Instant::now(),
         }
     }
@@ -673,15 +681,19 @@ impl InputBackend for MacInput<'_> {
             Action::PointerMove { .. } => self.session.pointer = pending.pointer,
             Action::KeyDown { usage } => {
                 self.session.keys.insert(usage);
+                self.session.holds.posted(Control::Key(usage));
             }
             Action::KeyUp { usage } => {
                 self.session.keys.remove(&usage);
+                self.session.holds.released(Control::Key(usage));
             }
             Action::ButtonDown { button } => {
                 self.session.buttons.insert(button);
+                self.session.holds.posted(Control::Button(button as u8));
             }
             Action::ButtonUp { button } => {
                 self.session.buttons.remove(&button);
+                self.session.holds.released(Control::Button(button as u8));
             }
             Action::Wheel { .. } => {}
         }
@@ -760,7 +772,7 @@ impl Worker {
         if self
             .session
             .as_ref()
-            .is_some_and(|s| Instant::now() >= s.deadline)
+            .is_some_and(|s| s.holds.budget(s.deadline, Instant::now()).is_zero())
         {
             self.close()?;
             return Err(ErrorCode::SessionClosed);
@@ -853,6 +865,7 @@ impl Worker {
                     last: None,
                     observed: None,
                     last_input: None,
+                    holds: HoldGuard::default(),
                     frame_sequence: 0,
                     sequence: 0,
                     keys: BTreeSet::new(),
@@ -940,33 +953,40 @@ impl Worker {
                 if actions.is_empty() || actions.len() > MAX_ACTIONS {
                     return Err(ErrorCode::InvalidActions);
                 }
-                // Validate the entire batch and balanced held state before the first OS event.
+                // Validate before consuming a new sequence or extending any owned hold.
                 let mut keys = s.keys.clone();
                 let mut buttons = s.buttons.clone();
+                let mut events = Vec::new();
+                let mut renewals = Vec::new();
                 for a in &actions {
-                    match a {
+                    let emit = match a {
                         Action::PointerMove { x, y } => {
                             frame.mapping.map(*x, *y)?;
+                            renewals.extend(buttons.iter().map(|b| Control::Button(*b as u8)));
+                            true
                         }
                         Action::KeyDown { usage } => {
-                            if mac_key(*usage).is_none() || !keys.insert(*usage) {
+                            if mac_key(*usage).is_none() {
                                 return Err(ErrorCode::InvalidActions);
                             }
+                            renewals.push(Control::Key(*usage));
+                            keys.insert(*usage)
                         }
                         Action::KeyUp { usage } => {
                             if !keys.remove(usage) {
                                 return Err(ErrorCode::InvalidActions);
                             }
+                            true
                         }
                         Action::ButtonDown { button } => {
-                            if !buttons.insert(*button) {
-                                return Err(ErrorCode::InvalidActions);
-                            }
+                            renewals.push(Control::Button(*button as u8));
+                            buttons.insert(*button)
                         }
                         Action::ButtonUp { button } => {
                             if !buttons.remove(button) {
                                 return Err(ErrorCode::InvalidActions);
                             }
+                            true
                         }
                         Action::Wheel {
                             horizontal,
@@ -975,9 +995,29 @@ impl Worker {
                             if horizontal.unsigned_abs() > 1200 || vertical.unsigned_abs() > 1200 {
                                 return Err(ErrorCode::InvalidActions);
                             }
+                            true
                         }
+                    };
+                    if emit {
+                        events.push(a.clone());
                     }
                 }
+                if !(MacInput {
+                    session: s,
+                    approval: &self.approval,
+                    mapping: &frame.mapping,
+                })
+                .validity()
+                .allows()
+                {
+                    return Err(ErrorCode::OutcomeUnknown);
+                }
+                s.holds
+                    .renew(sequence, s.deadline, Instant::now(), &renewals)
+                    .map_err(|e| match e {
+                        HoldError::InvalidSequence => ErrorCode::InvalidSequence,
+                        HoldError::Expired => ErrorCode::SessionClosed,
+                    })?;
                 s.sequence = sequence;
                 s.last_input = Some(Instant::now());
                 dispatch_input_batch(
@@ -986,7 +1026,7 @@ impl Worker {
                         approval: &self.approval,
                         mapping: &frame.mapping,
                     },
-                    &actions,
+                    &events,
                 )?;
                 Ok((
                     Ok(Response::Accepted {
@@ -1078,7 +1118,11 @@ pub async fn run(path: &Path) -> Result<()> {
                 !s.keys.is_empty() || !s.buttons.is_empty(),
                 Instant::now(),
             )
+            .min(s.holds.budget(s.deadline, Instant::now()))
         });
+        if remaining.is_zero() {
+            break;
+        }
         let request = async {
             let mut size = [0; 4];
             read_exact(&input, &mut size).await?;
@@ -1103,6 +1147,7 @@ pub async fn run(path: &Path) -> Result<()> {
                     !s.keys.is_empty() || !s.buttons.is_empty(),
                     Instant::now(),
                 )
+                .min(s.holds.budget(s.deadline, Instant::now()))
             });
         let (result, pixels) = tokio::select! {biased;_=term.recv()=>break,_=tokio::signal::ctrl_c()=>break,
         v=tokio::time::timeout(handling_budget,worker.handle(envelope.request))=>match v{Ok(v)=>v,Err(_)=>{worker.poisoned=true;(Err(ErrorCode::OutcomeUnknown),None)}}};
@@ -1122,7 +1167,14 @@ pub async fn run(path: &Path) -> Result<()> {
             Ok::<(), anyhow::Error>(())
         };
         if !matches!(
-            tokio::time::timeout(Duration::from_secs(2), send).await,
+            tokio::time::timeout(
+                worker.session.as_ref().map_or(Duration::from_secs(2), |s| s
+                    .holds
+                    .budget(s.deadline, Instant::now())
+                    .min(Duration::from_secs(2))),
+                send
+            )
+            .await,
             Ok(Ok(()))
         ) || closing
         {

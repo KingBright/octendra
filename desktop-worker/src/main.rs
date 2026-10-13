@@ -1,4 +1,5 @@
 mod config;
+mod lifecycle;
 mod native;
 use remote_hosts_desktop_protocol::{
     ErrorCode, RawPixels as PixelInfo, WorkerReply as Output, WorkerRequest as Envelope,
@@ -80,6 +81,10 @@ async fn read_request(input: &AsyncFd<std::fs::File>) -> io::Result<Option<Envel
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "--version" {
+        println!("remote-hosts-desktop-worker {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if args.len() == 2 && args[1] == "--capabilities" {
         println!(
             "{}",
@@ -94,7 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             return Err(io::Error::other(
-                "usage: --capabilities | --approval <0600 file> | disabled stdio",
+                "usage: --version | --capabilities | --approval <0600 file> | disabled stdio",
             )
             .into());
         }
@@ -102,9 +107,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut worker = native::Worker::new(approval);
     let input = pipe_fd(0)?;
     let output = pipe_fd(1)?;
+    let stderr_flags = unsafe { nix::libc::fcntl(2, nix::libc::F_GETFL) };
+    if stderr_flags < 0
+        || unsafe { nix::libc::fcntl(2, nix::libc::F_SETFL, stderr_flags | nix::libc::O_NONBLOCK) }
+            < 0
+    {
+        return Err(io::Error::last_os_error().into());
+    }
+    let mut last_request = None;
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut seen = std::collections::BTreeSet::new();
     loop {
+        if worker.wait_budget().is_zero() {
+            break;
+        }
         let envelope = tokio::select! {
             biased;
             _=term.recv()=>break,
@@ -116,12 +132,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if !seen.insert(envelope.request_id) || seen.len() > 128 {
             break;
         }
+        last_request = Some(envelope.request_id);
+        worker.set_request(envelope.request_id);
         // A cancelled/pending operation receives no fabricated success. The Agent's
         // existing journal observes EOF as unknown and never replays the same job.
         let result = tokio::select! {
-            biased; _=term.recv()=>break, _=tokio::signal::ctrl_c()=>break,
-            result=tokio::time::timeout(std::time::Duration::from_secs(25),worker.handle(envelope.request))=>{
-                match result { Ok(r)=>r, Err(_)=>{let _=worker.shutdown().await; Err(ErrorCode::OutcomeUnknown)} }
+            biased; _=term.recv()=>{worker.cancelled();break}, _=tokio::signal::ctrl_c()=>{worker.cancelled();break},
+            result=tokio::time::timeout(worker.handling_budget(),worker.handle(envelope.request))=>{
+                match result { Ok(r)=>r, Err(_)=>{worker.cancelled(); lifecycle::phase(last_request, "operation_timeout"); let _=worker.shutdown().await; Err(ErrorCode::OutcomeUnknown)} }
             }
         };
         let mut frame = None;
@@ -146,28 +164,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 frame = reply.pixels;
                 (Ok(reply.response), info)
             }
-            Err(e) => (Err(e), None),
+            Err(e) => {
+                if e == ErrorCode::OutcomeUnknown {
+                    worker.cancelled();
+                }
+                (Err(e), None)
+            }
         };
         let data = serde_json::to_vec(&Output {
             request_id: envelope.request_id,
             result: response,
             pixels,
         })?;
-        let written = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            write_all(&output, &(data.len() as u32).to_be_bytes()).await?;
-            write_all(&output, &data).await?;
-            if let Some(f) = frame {
-                for plane in &f.planes {
-                    write_all(&output, plane).await?;
+        let written = tokio::time::timeout(
+            worker.wait_budget().min(std::time::Duration::from_secs(2)),
+            async {
+                write_all(&output, &(data.len() as u32).to_be_bytes()).await?;
+                write_all(&output, &data).await?;
+                if let Some(f) = frame {
+                    for plane in &f.planes {
+                        write_all(&output, plane).await?;
+                    }
                 }
-            }
-            Ok::<(), io::Error>(())
-        })
+                Ok::<(), io::Error>(())
+            },
+        )
         .await;
         if !matches!(written, Ok(Ok(()))) {
             break;
         }
+        lifecycle::phase(last_request, "reply_written");
     }
+    lifecycle::phase(last_request, "worker_loop_ended");
     worker
         .shutdown()
         .await

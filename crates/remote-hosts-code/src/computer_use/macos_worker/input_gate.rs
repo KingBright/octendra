@@ -21,7 +21,7 @@ pub(crate) struct InputValidity {
     pub now: Instant,
 }
 impl InputValidity {
-    fn allows(&self) -> bool {
+    pub(crate) fn allows(&self) -> bool {
         self.live
             && self.now < self.deadline
             && !freshness_budget(self.captured, self.now).is_zero()
