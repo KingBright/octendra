@@ -389,12 +389,34 @@ struct Session {
     latest: Arc<Mutex<Option<std::result::Result<Pixels, ErrorCode>>>>,
     last: Option<FrameRef>,
     observed: Option<Instant>,
+    last_input: Option<Instant>,
     frame_sequence: u64,
     sequence: u64,
     keys: BTreeSet<u16>,
     buttons: BTreeSet<Button>,
     source: CGEventSource,
     pointer: CGPoint,
+}
+const INPUT_FRESHNESS: Duration = Duration::from_secs(1);
+fn freshness_budget(at: Option<Instant>, now: Instant) -> Duration {
+    at.and_then(|at| now.checked_duration_since(at))
+        .and_then(|age| INPUT_FRESHNESS.checked_sub(age))
+        .unwrap_or(Duration::ZERO)
+}
+fn request_wait_budget(
+    deadline: Instant,
+    last_input: Option<Instant>,
+    holding: bool,
+    now: Instant,
+) -> Duration {
+    let budget = deadline
+        .saturating_duration_since(now)
+        .min(Duration::from_secs(5));
+    if holding {
+        budget.min(freshness_budget(last_input, now))
+    } else {
+        budget
+    }
 }
 /// Explicit USB HID keyboard-page mapping; unknown usages fail before any action.
 fn mac_key(usage: u16) -> Option<u16> {
@@ -471,13 +493,14 @@ impl Session {
     }
     fn key(&mut self, usage: u16, down: bool) -> std::result::Result<(), ErrorCode> {
         let code = mac_key(usage).ok_or(ErrorCode::InvalidActions)?;
+        let event = CGEvent::new_keyboard_event(self.source.clone(), code, down)
+            .map_err(|_| ErrorCode::OutcomeUnknown)?;
+        // A failed event constructor must not create ownership for a later release.
         if down {
             self.keys.insert(usage);
         } else {
             self.keys.remove(&usage);
         }
-        let event = CGEvent::new_keyboard_event(self.source.clone(), code, down)
-            .map_err(|_| ErrorCode::OutcomeUnknown)?;
         event.set_flags(self.flags());
         ensure_target_event(&event, self.target);
         event.post_to_pid(self.target.pid);
@@ -548,6 +571,14 @@ impl Worker {
         } else {
             clean
         }
+    }
+    fn finish_reply(&mut self, result: &std::result::Result<Response, ErrorCode>) -> bool {
+        if matches!(result, Err(ErrorCode::OutcomeUnknown)) {
+            self.poisoned = true;
+            let _ = self.close();
+            return true;
+        }
+        matches!(result, Ok(Response::Closed {}))
     }
     async fn handle(
         &mut self,
@@ -684,6 +715,7 @@ impl Worker {
                     latest,
                     last: None,
                     observed: None,
+                    last_input: None,
                     frame_sequence: 0,
                     sequence: 0,
                     keys: BTreeSet::new(),
@@ -757,12 +789,15 @@ impl Worker {
             } => {
                 let s = self.session.as_mut().ok_or(ErrorCode::SessionClosed)?;
                 if s.last.as_ref() != Some(&frame)
-                    || s.observed
-                        .is_none_or(|t| t.elapsed() > Duration::from_secs(1))
+                    || freshness_budget(s.observed, Instant::now()).is_zero()
                 {
                     return Err(ErrorCode::StaleFrame);
                 }
-                if sequence != s.sequence + 1 {
+                if sequence
+                    != s.sequence
+                        .checked_add(1)
+                        .ok_or(ErrorCode::InvalidSequence)?
+                {
                     return Err(ErrorCode::InvalidSequence);
                 }
                 if actions.is_empty() || actions.len() > MAX_ACTIONS {
@@ -807,8 +842,10 @@ impl Worker {
                     }
                 }
                 s.sequence = sequence;
+                s.last_input = Some(Instant::now());
                 for a in &actions {
-                    if Instant::now() >= s.deadline
+                    if freshness_budget(s.observed, Instant::now()).is_zero()
+                        || Instant::now() >= s.deadline
                         || !s.lifetime.live(s.target)
                         || !self.approval.geometry_matches()
                         || platform_status() != "screencapturekit"
@@ -945,9 +982,13 @@ pub async fn run(path: &Path) -> Result<()> {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     loop {
         let remaining = worker.session.as_ref().map_or(Duration::from_secs(5), |s| {
-            s.deadline
-                .saturating_duration_since(Instant::now())
-                .min(Duration::from_secs(5))
+            // Observe cannot renew the lifetime of an owned held key/button.
+            request_wait_budget(
+                s.deadline,
+                s.last_input,
+                !s.keys.is_empty() || !s.buttons.is_empty(),
+                Instant::now(),
+            )
         });
         let request = async {
             let mut size = [0; 4];
@@ -963,12 +1004,20 @@ pub async fn run(path: &Path) -> Result<()> {
         if !seen.insert(envelope.request_id) || seen.len() > 128 {
             break;
         }
+        let handling_budget = worker
+            .session
+            .as_ref()
+            .map_or(Duration::from_secs(25), |s| {
+                request_wait_budget(
+                    s.deadline,
+                    s.last_input,
+                    !s.keys.is_empty() || !s.buttons.is_empty(),
+                    Instant::now(),
+                )
+            });
         let (result, pixels) = tokio::select! {biased;_=term.recv()=>break,_=tokio::signal::ctrl_c()=>break,
-        v=tokio::time::timeout(Duration::from_secs(25),worker.handle(envelope.request))=>match v{Ok(v)=>v,Err(_)=>{worker.poisoned=true;(Err(ErrorCode::OutcomeUnknown),None)}}};
-        let closing = matches!(result, Ok(Response::Closed {}));
-        if matches!(result, Err(ErrorCode::OutcomeUnknown)) {
-            worker.poisoned = true;
-        }
+        v=tokio::time::timeout(handling_budget,worker.handle(envelope.request))=>match v{Ok(v)=>v,Err(_)=>{worker.poisoned=true;(Err(ErrorCode::OutcomeUnknown),None)}}};
+        let closing = worker.finish_reply(&result);
         let reply = WorkerReply {
             request_id: envelope.request_id,
             result,
@@ -1008,6 +1057,123 @@ mod tests {
         for usage in [0, 1, 2, 3, 50, 255, u16::MAX] {
             assert_eq!(mac_key(usage), None);
         }
+    }
+    #[test]
+    fn input_safety_freshness_rejects_missing_future_and_expired_capture() {
+        let start = Instant::now();
+        assert_eq!(freshness_budget(None, start), Duration::ZERO);
+        assert_eq!(
+            freshness_budget(Some(start + Duration::from_nanos(1)), start),
+            Duration::ZERO
+        );
+        assert_eq!(freshness_budget(Some(start), start), INPUT_FRESHNESS);
+        assert_eq!(
+            freshness_budget(Some(start), start + Duration::from_millis(999)),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            freshness_budget(Some(start), start + INPUT_FRESHNESS),
+            Duration::ZERO
+        );
+        assert_eq!(
+            freshness_budget(
+                Some(start),
+                start + INPUT_FRESHNESS + Duration::from_nanos(1)
+            ),
+            Duration::ZERO
+        );
+    }
+    #[test]
+    fn input_safety_batch_drops_events_after_capture_expiry() {
+        let captured = Instant::now();
+        let mut posted = Vec::new();
+        for (event, age_ms) in [("down", 900), ("wheel", 1000), ("another_down", 1001)] {
+            if freshness_budget(Some(captured), captured + Duration::from_millis(age_ms)).is_zero()
+            {
+                break;
+            }
+            posted.push(event);
+        }
+        assert_eq!(posted, vec!["down"]);
+    }
+    #[test]
+    fn input_safety_observe_cannot_extend_held_input_idle_budget() {
+        let input = Instant::now();
+        let deadline = input + Duration::from_secs(10);
+        let refreshed_capture = input + Duration::from_millis(850);
+        assert_eq!(
+            freshness_budget(Some(refreshed_capture), refreshed_capture),
+            INPUT_FRESHNESS
+        );
+        assert_eq!(
+            request_wait_budget(deadline, Some(input), true, refreshed_capture),
+            Duration::from_millis(150)
+        );
+        assert_eq!(
+            request_wait_budget(deadline, Some(input), true, input + INPUT_FRESHNESS),
+            Duration::ZERO
+        );
+        assert_eq!(
+            request_wait_budget(deadline, None, true, input),
+            Duration::ZERO
+        );
+    }
+    #[test]
+    fn input_safety_session_deadline_caps_wait_without_owned_input() {
+        let start = Instant::now();
+        assert_eq!(
+            request_wait_budget(start + Duration::from_secs(10), None, false, start),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            request_wait_budget(
+                start + Duration::from_millis(100),
+                Some(start),
+                false,
+                start
+            ),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            request_wait_budget(start, Some(start), false, start),
+            Duration::ZERO
+        );
+    }
+    #[tokio::test]
+    async fn input_safety_unknown_reply_closes_and_keeps_replay_fenced() {
+        let mut worker = Worker {
+            approval: Approval {
+                enabled: false,
+                app_id: APP_ID.into(),
+                desktop_uid: 0,
+                desktop_session: String::new(),
+                identity: Identity {
+                    owner: "offline-test".into(),
+                    task_id: Uuid::nil(),
+                    device_id: Uuid::nil(),
+                    desktop_id: String::new(),
+                },
+                worker_sha256: String::new(),
+                agent_sha256: String::new(),
+                expires_at_ms: 0,
+                logical_size: [0, 0],
+                logical_position: [0, 0],
+                max_frame_bytes: 0,
+                allow_input: false,
+            },
+            session: None,
+            spent: false,
+            poisoned: false,
+        };
+        assert!(!worker.finish_reply(&Err(ErrorCode::InvalidSequence)));
+        assert!(!worker.spent);
+        assert!(worker.finish_reply(&Err(ErrorCode::OutcomeUnknown)));
+        assert!(worker.spent && worker.poisoned && worker.session.is_none());
+        let (reply, pixels) = worker.handle(Request::Capabilities {}).await;
+        assert!(matches!(reply, Err(ErrorCode::OutcomeUnknown)));
+        assert!(pixels.is_none());
+        assert!(worker.finish_reply(&Err(ErrorCode::OutcomeUnknown)));
+        assert!(worker.spent && worker.poisoned);
     }
     #[test]
     fn pixel_budget_covers_4k_nv12_without_rgba_conversion() {

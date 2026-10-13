@@ -8,9 +8,10 @@ parser.add_argument('--version',required=True)
 parser.add_argument('--apply',action='store_true')
 parser.add_argument('--platform',choices=['linux','macos'],default='linux')
 parser.add_argument('--verify-only',action='store_true',help='run fixed checks without packaging or deployment')
-parser.add_argument('--verification-scope',choices=['all','capability'],default='all')
+parser.add_argument('--verification-scope',choices=['all','capability','input'],default='all')
 args=parser.parse_args()
 if args.verification_scope!='all' and not args.verify_only:parser.error('focused verification cannot package a release')
+if args.verification_scope=='input' and args.platform!='macos':parser.error('input verification requires the native macOS target')
 assert re.fullmatch(r'[0-9]+[.][0-9]+[.][0-9]+',args.version)
 source=Path(args.snapshot).resolve();base=source.parent;sys.path.insert(0,str(source/'scripts'));import source_snapshot,build_slot,build_process
 m=source_snapshot.check(source);assert m['snapshot_id']==args.snapshot_id
@@ -43,6 +44,7 @@ try:
   prefix=['/Users/jinliang/.cargo/bin/rustup','run','1.94.1','cargo']
   checks=([('clippy',None,0),('macos_worker','macos_worker',2),('desktop_protocol_and_transport','computer_use',29),('delivery','delivery',19),('job_receipts','job_receipts',8)] if args.platform=='macos' else [('clippy',None,0),('desktop_lifecycle_and_transport','computer_use',39),('payload_regressions','payload',23),('submission_fence','submission_fence',2),('job_receipts','job_receipts',8),('job_dispatch','job_dispatch',9)])
   if args.verification_scope=='capability':checks=[('clippy',None,0),('capability_current_authority','computer_use::transport::tests::capability_reports_',6)]
+  if args.verification_scope=='input':checks=[('clippy',None,0),('macos_input_and_protocol_regression','computer_use',57)]
   state['verification_scope']=args.verification_scope
   for label,selection,minimum in checks:
    state.update(state='verifying',stage=label);build_slot.atomic_json(report,state)
