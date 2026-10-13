@@ -2,6 +2,7 @@
 //! No global event posting, activation, clipboard replacement or focus restoration.
 //! PID/window targeting still requires live noninterference acceptance.
 use super::*;
+mod input_gate;
 mod window;
 use anyhow::{Context, Result, ensure};
 use core_graphics::{
@@ -10,6 +11,9 @@ use core_graphics::{
     geometry::CGPoint,
 };
 use foreign_types::ForeignType;
+#[cfg(test)]
+use input_gate::INPUT_FRESHNESS;
+use input_gate::{InputBackend, InputValidity, dispatch_input_batch, freshness_budget};
 use screencapturekit::{cm::CMSampleBuffer, prelude::*};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -397,12 +401,6 @@ struct Session {
     source: CGEventSource,
     pointer: CGPoint,
 }
-const INPUT_FRESHNESS: Duration = Duration::from_secs(1);
-fn freshness_budget(at: Option<Instant>, now: Instant) -> Duration {
-    at.and_then(|at| now.checked_duration_since(at))
-        .and_then(|age| INPUT_FRESHNESS.checked_sub(age))
-        .unwrap_or(Duration::ZERO)
-}
 fn request_wait_budget(
     deadline: Instant,
     last_input: Option<Instant>,
@@ -477,41 +475,62 @@ fn mouse(button: Button, down: bool) -> (CGMouseButton, CGEventType) {
     }
 }
 impl Session {
-    fn flags(&self) -> CGEventFlags {
+    fn flags_for(keys: &BTreeSet<u16>) -> CGEventFlags {
         let mut flags = CGEventFlags::empty();
-        for (keys, flag) in [
-            ([225, 229], CGEventFlags::CGEventFlagShift),
-            ([224, 228], CGEventFlags::CGEventFlagControl),
-            ([226, 230], CGEventFlags::CGEventFlagAlternate),
-            ([227, 231], CGEventFlags::CGEventFlagCommand),
-        ] {
-            if keys.iter().any(|k| self.keys.contains(k)) {
+        for (held, flag) in input_gate::held_modifier_groups(keys).into_iter().zip([
+            CGEventFlags::CGEventFlagShift,
+            CGEventFlags::CGEventFlagControl,
+            CGEventFlags::CGEventFlagAlternate,
+            CGEventFlags::CGEventFlagCommand,
+        ]) {
+            if held {
                 flags.insert(flag);
             }
         }
         flags
     }
+    fn flags(&self) -> CGEventFlags {
+        Self::flags_for(&self.keys)
+    }
+    fn cleanup_target_live(&self) -> bool {
+        self.lifetime.live(self.target) && platform_status() == "screencapturekit"
+    }
     fn key(&mut self, usage: u16, down: bool) -> std::result::Result<(), ErrorCode> {
+        if !down && !self.keys.contains(&usage) {
+            return Err(ErrorCode::InvalidActions);
+        }
         let code = mac_key(usage).ok_or(ErrorCode::InvalidActions)?;
         let event = CGEvent::new_keyboard_event(self.source.clone(), code, down)
             .map_err(|_| ErrorCode::OutcomeUnknown)?;
-        // A failed event constructor must not create ownership for a later release.
+        let mut keys = self.keys.clone();
         if down {
-            self.keys.insert(usage);
+            keys.insert(usage);
         } else {
-            self.keys.remove(&usage);
+            keys.remove(&usage);
         }
-        event.set_flags(self.flags());
+        event.set_flags(Self::flags_for(&keys));
         ensure_target_event(&event, self.target);
+        // Cleanup intentionally outlives the frame/deadline, but only this
+        // session's held input and original live target can be released.
+        if !self.cleanup_target_live() {
+            return Err(ErrorCode::OutcomeUnknown);
+        }
         event.post_to_pid(self.target.pid);
+        self.keys = keys;
         Ok(())
     }
     fn button(&mut self, button: Button, down: bool) -> std::result::Result<(), ErrorCode> {
+        if !down && !self.buttons.contains(&button) {
+            return Err(ErrorCode::InvalidActions);
+        }
         let (native, kind) = mouse(button, down);
         let event = CGEvent::new_mouse_event(self.source.clone(), kind, self.pointer, native)
             .map_err(|_| ErrorCode::OutcomeUnknown)?;
         event.set_flags(self.flags());
         ensure_target_event(&event, self.target);
+        if !self.cleanup_target_live() {
+            return Err(ErrorCode::OutcomeUnknown);
+        }
         event.post_to_pid(self.target.pid);
         if down {
             self.buttons.insert(button);
@@ -551,6 +570,124 @@ impl Session {
         } else {
             Err(ErrorCode::OutcomeUnknown)
         }
+    }
+}
+struct PreparedInput {
+    event: CGEvent,
+    action: Action,
+    pointer: CGPoint,
+}
+struct MacInput<'a> {
+    session: &'a mut Session,
+    approval: &'a Approval,
+    mapping: &'a FrameMapping,
+}
+impl InputBackend for MacInput<'_> {
+    type Action = Action;
+    type Event = PreparedInput;
+    type Error = ErrorCode;
+    fn validity(&self) -> InputValidity {
+        let s = &self.session;
+        // Potentially blocking OS/AX probes happen before the final clock read.
+        let live = s.lifetime.live(s.target)
+            && self.approval.geometry_matches()
+            && platform_status() == "screencapturekit"
+            && self.approval.expires_at_ms > now_ms();
+        InputValidity {
+            live,
+            captured: s.observed,
+            deadline: s.deadline,
+            now: Instant::now(),
+        }
+    }
+    fn prepare(&mut self, action: &Action) -> std::result::Result<PreparedInput, ErrorCode> {
+        let s = &self.session;
+        let mut pointer = s.pointer;
+        let mut flags = s.flags();
+        let event = match *action {
+            Action::PointerMove { x, y } => {
+                let p = self.mapping.map(x, y)?;
+                pointer = CGPoint::new(
+                    p.x + f64::from(self.approval.logical_position[0]),
+                    p.y + f64::from(self.approval.logical_position[1]),
+                );
+                let (button, kind) = if s.buttons.contains(&Button::Left) {
+                    (CGMouseButton::Left, CGEventType::LeftMouseDragged)
+                } else if s.buttons.contains(&Button::Right) {
+                    (CGMouseButton::Right, CGEventType::RightMouseDragged)
+                } else if s.buttons.contains(&Button::Middle) {
+                    (CGMouseButton::Center, CGEventType::OtherMouseDragged)
+                } else {
+                    (CGMouseButton::Left, CGEventType::MouseMoved)
+                };
+                CGEvent::new_mouse_event(s.source.clone(), kind, pointer, button)
+            }
+            Action::KeyDown { usage } | Action::KeyUp { usage } => {
+                let down = matches!(action, Action::KeyDown { .. });
+                let code = mac_key(usage).ok_or(ErrorCode::InvalidActions)?;
+                let mut keys = s.keys.clone();
+                if down {
+                    keys.insert(usage);
+                } else {
+                    keys.remove(&usage);
+                }
+                flags = Session::flags_for(&keys);
+                CGEvent::new_keyboard_event(s.source.clone(), code, down)
+            }
+            Action::ButtonDown { button } | Action::ButtonUp { button } => {
+                let (native, kind) = mouse(button, matches!(action, Action::ButtonDown { .. }));
+                CGEvent::new_mouse_event(s.source.clone(), kind, pointer, native)
+            }
+            Action::Wheel {
+                horizontal,
+                vertical,
+            } => {
+                let event = CGEvent::new_scroll_event(
+                    s.source.clone(),
+                    ScrollEventUnit::PIXEL,
+                    2,
+                    i32::from(vertical),
+                    i32::from(horizontal),
+                    0,
+                )
+                .map_err(|_| ErrorCode::OutcomeUnknown)?;
+                unsafe { CGEventSetLocation(event.as_ptr().cast(), pointer) };
+                Ok(event)
+            }
+        }
+        .map_err(|_| ErrorCode::OutcomeUnknown)?;
+        event.set_flags(flags);
+        ensure_target_event(&event, s.target);
+        Ok(PreparedInput {
+            event,
+            action: action.clone(),
+            pointer,
+        })
+    }
+    fn post(&mut self, pending: PreparedInput) {
+        // First operation after the final gate: no await, task handoff, metadata
+        // probe or allocation precedes this syscall. OS delivery is still queued;
+        // we cannot fence later physical input or prove application consumption.
+        pending.event.post_to_pid(self.session.target.pid);
+        match pending.action {
+            Action::PointerMove { .. } => self.session.pointer = pending.pointer,
+            Action::KeyDown { usage } => {
+                self.session.keys.insert(usage);
+            }
+            Action::KeyUp { usage } => {
+                self.session.keys.remove(&usage);
+            }
+            Action::ButtonDown { button } => {
+                self.session.buttons.insert(button);
+            }
+            Action::ButtonUp { button } => {
+                self.session.buttons.remove(&button);
+            }
+            Action::Wheel { .. } => {}
+        }
+    }
+    fn invalidated() -> ErrorCode {
+        ErrorCode::OutcomeUnknown
     }
 }
 struct Worker {
@@ -843,62 +980,14 @@ impl Worker {
                 }
                 s.sequence = sequence;
                 s.last_input = Some(Instant::now());
-                for a in &actions {
-                    if freshness_budget(s.observed, Instant::now()).is_zero()
-                        || Instant::now() >= s.deadline
-                        || !s.lifetime.live(s.target)
-                        || !self.approval.geometry_matches()
-                        || platform_status() != "screencapturekit"
-                    {
-                        return Err(ErrorCode::OutcomeUnknown);
-                    }
-                    match *a {
-                        Action::PointerMove { x, y } => {
-                            let p = frame.mapping.map(x, y)?;
-                            s.pointer = CGPoint::new(
-                                p.x + f64::from(self.approval.logical_position[0]),
-                                p.y + f64::from(self.approval.logical_position[1]),
-                            );
-                            let (button, kind) = if s.buttons.contains(&Button::Left) {
-                                (CGMouseButton::Left, CGEventType::LeftMouseDragged)
-                            } else if s.buttons.contains(&Button::Right) {
-                                (CGMouseButton::Right, CGEventType::RightMouseDragged)
-                            } else if s.buttons.contains(&Button::Middle) {
-                                (CGMouseButton::Center, CGEventType::OtherMouseDragged)
-                            } else {
-                                (CGMouseButton::Left, CGEventType::MouseMoved)
-                            };
-                            let event =
-                                CGEvent::new_mouse_event(s.source.clone(), kind, s.pointer, button)
-                                    .map_err(|_| ErrorCode::OutcomeUnknown)?;
-                            event.set_flags(s.flags());
-                            ensure_target_event(&event, s.target);
-                            event.post_to_pid(s.target.pid);
-                        }
-                        Action::KeyDown { usage } => s.key(usage, true)?,
-                        Action::KeyUp { usage } => s.key(usage, false)?,
-                        Action::ButtonDown { button } => s.button(button, true)?,
-                        Action::ButtonUp { button } => s.button(button, false)?,
-                        Action::Wheel {
-                            horizontal,
-                            vertical,
-                        } => {
-                            let event = CGEvent::new_scroll_event(
-                                s.source.clone(),
-                                ScrollEventUnit::PIXEL,
-                                2,
-                                i32::from(vertical),
-                                i32::from(horizontal),
-                                0,
-                            )
-                            .map_err(|_| ErrorCode::OutcomeUnknown)?;
-                            event.set_flags(s.flags());
-                            unsafe { CGEventSetLocation(event.as_ptr().cast(), s.pointer) };
-                            ensure_target_event(&event, s.target);
-                            event.post_to_pid(s.target.pid);
-                        }
-                    }
-                }
+                dispatch_input_batch(
+                    &mut MacInput {
+                        session: s,
+                        approval: &self.approval,
+                        mapping: &frame.mapping,
+                    },
+                    &actions,
+                )?;
                 Ok((
                     Ok(Response::Accepted {
                         sequence,
