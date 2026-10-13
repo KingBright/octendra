@@ -106,7 +106,12 @@ impl Terminals {
     /// A grace window prevents racing a freshly inserted `starting` row before its
     /// child handle reaches `live`. This never kills an OS process; unknown prior-
     /// runtime descendants are reported as ownership loss rather than guessed dead.
-    pub async fn reconcile_orphans(&self, grace_seconds: i64) -> Result<usize> {
+    /// An active job also owns its pre-spawn terminal while local OS authentication waits.
+    pub async fn reconcile_orphans(
+        &self,
+        grace_seconds: i64,
+        active_operations: &[String],
+    ) -> Result<usize> {
         ensure!(
             (5..=3600).contains(&grace_seconds),
             "invalid terminal reconcile grace"
@@ -117,6 +122,7 @@ impl Terminals {
             .lock()
             .map_err(|_| anyhow::anyhow!("terminal lock poisoned"))?
             .keys()
+            .chain(active_operations.iter())
             .cloned()
             .collect();
         let rows: Vec<(String, String)> = sqlx::query_as(
@@ -1310,6 +1316,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn active_sudo_preflight_is_not_reconciled_as_orphan() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path()).await.unwrap();
+        let terminals = Terminals::new(
+            store.clone(),
+            temp.path().join("terminals"),
+            "fixture-unused".into(),
+        )
+        .await
+        .unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut waiting = status(&id, now() - 120);
+        waiting.state = "starting".into();
+        store
+            .put("terminal", &id, &waiting, i64::MAX)
+            .await
+            .unwrap();
+        store
+            .put(
+                "local_operation",
+                &id,
+                &json!({"state":"running","tool":"terminal_exec","updated_at":now()-120}),
+                i64::MAX,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            terminals
+                .reconcile_orphans(30, std::slice::from_ref(&id))
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .get::<Status>("terminal", &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "starting"
+        );
+        assert_eq!(
+            store
+                .get::<Value>("local_operation", &id)
+                .await
+                .unwrap()
+                .unwrap()["state"],
+            "running"
+        );
+        // The same stale row is recoverable only after the authoritative job lease ends.
+        assert_eq!(terminals.reconcile_orphans(30, &[]).await.unwrap(), 1);
+        assert_eq!(
+            store
+                .get::<Status>("terminal", &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "runtime_lost"
+        );
+    }
+
+    #[tokio::test]
     async fn reconciliation_closes_only_old_unowned_terminal_state() {
         let d = tempfile::tempdir().unwrap();
         let store = Store::open(d.path()).await.unwrap();
@@ -1340,7 +1410,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(terminals.reconcile_orphans(30).await.unwrap(), 1);
+        assert_eq!(terminals.reconcile_orphans(30, &[]).await.unwrap(), 1);
         let old_status = store
             .get::<Status>("terminal", &old)
             .await

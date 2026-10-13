@@ -184,6 +184,45 @@ async fn ordinary_mcp_access_reuses_existing_authority_and_automatic_audit() {
     }
 }
 #[tokio::test]
+async fn explicit_default_sudo_preserves_legacy_agent_compatibility() {
+    let f = fixture().await;
+    let workspace = format!("{}:{}", f.device, uuid::Uuid::new_v4());
+    let pending = call(
+        &f,
+        "terminal_exec",
+        json!({
+            "workspace_id":workspace,"idempotency_key":"legacy-default-sudo",
+            "command":"printf ordinary","sudo":false
+        }),
+    )
+    .await;
+    let id = pending["operation_id"].as_str().unwrap();
+    let (claimed, raw) = crate::job_dispatch::claim(&f.g.store, &selection(&f), now())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed, id);
+    let job: Job = serde_json::from_str(&raw).unwrap();
+    assert!(job.arguments.get("sudo").is_none());
+    let denied =
+        f.g.dispatch(
+            &f.p,
+            "terminal_exec",
+            json!({
+                "workspace_id":workspace,"idempotency_key":"legacy-explicit-sudo",
+                "command":"printf privileged","sudo":true
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        denied.to_string().contains("device_feature_unavailable"),
+        "{denied}"
+    );
+    assert_eq!(count(&f).await, 1);
+}
+
+#[tokio::test]
 async fn ordinary_mcp_status_is_read_only_and_browser_identity_is_not_execution_scope() {
     let f = fixture().await;
     let before = count(&f).await;

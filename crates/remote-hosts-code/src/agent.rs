@@ -935,8 +935,9 @@ impl Agent {
                     "readiness snapshot unavailable; original poll facts retained, work continues"
                 );
             }
+            let active = self.active.list()?;
             if last_reconcile.elapsed() >= Duration::from_secs(15) {
-                match self.terminals.reconcile_orphans(30).await {
+                match self.terminals.reconcile_orphans(30, &active).await {
                     Ok(count) if count > 0 => {
                         tracing::warn!(count, "reconciled orphaned terminal state")
                     }
@@ -945,7 +946,6 @@ impl Agent {
                 }
                 last_reconcile = tokio::time::Instant::now();
             }
-            let active = self.active.list()?;
             if terminal_snapshot
                 .refresh(
                     &self.store,

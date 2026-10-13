@@ -336,7 +336,7 @@ pub(crate) fn gateway_manifest(known: Option<&str>) -> Value {
         json!({
             "all_tools": ["response_mode"],
             "operation_get": ["request_id", "operation_ids", "wait_ms", "cursor", "terminal_cursor", "max_bytes"],
-            "terminal_exec": ["wait_ms"],
+            "terminal_exec": ["wait_ms", "sudo"],
             "terminal_read": ["output_mode"],
             "code_read": ["allow_partial", "requests[].line_byte_offset"],
             "devices_list": ["known_tools_sha256"],
@@ -388,6 +388,10 @@ mod release_manifest_tests {
         assert_eq!(manifest["terminal_observation_protocol"], 2);
         assert_eq!(manifest["request_receipt_protocol"], 2);
         assert_eq!(manifest["machine_contract_protocol"], 1);
+        assert_eq!(
+            manifest["optional_inputs"]["terminal_exec"],
+            json!(["wait_ms", "sudo"])
+        );
         assert!(manifest.get("host_schema_status").is_none());
         assert!(manifest.get("client_schema_comparison").is_none());
         assert!(manifest.get("refresh_required").is_none());

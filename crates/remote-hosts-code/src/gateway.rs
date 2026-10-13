@@ -389,6 +389,10 @@ impl Gateway {
         tools::validate(name, &args)?;
         if let Some(object) = args.as_object_mut() {
             object.remove("response_mode");
+            // Legacy Agents reject unknown fields; the default needs no new capability.
+            if name == "terminal_exec" && object.get("sudo") == Some(&json!(false)) {
+                object.remove("sudo");
+            }
         }
         if name == "task_resume" {
             return crate::task_authorization::resume(self, p, &args).await;

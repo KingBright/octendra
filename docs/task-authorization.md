@@ -8,7 +8,8 @@ There is no TaskGrant creation, expiry, renewal or command-business approval.
 OAuth token-family revocation, owner/device checks, local allow flags, code path
 boundaries, schema validation and unknown-operation/idempotency guards remain.
 Terminal commands have local-user authority outside code roots; cwd is not a
-filesystem sandbox.
+filesystem sandbox. Token expiry/revocation blocks later authenticated requests;
+it does not cancel already accepted queued or running operations.
 
 task_id is a correlation label. authorization_version is accepted only for
 compatibility and grants no authority. The retired owner form returns 410 after
@@ -28,7 +29,14 @@ On macOS/Linux, an Agent advertises local_sudo_v1. terminal_exec accepts
 sudo=true for a noninteractive shell; the default remains ordinary local-user
 execution. The Gateway rejects it when the selected Agent has not advertised
 support. Interactive PTYs and the legacy maintenance adapter cannot use this
-field. Windows has no provider in this implementation.
+field. Windows has no provider in this implementation. Explicit sudo=false is
+normalized away before dispatch so an older Agent can still accept an ordinary
+command. Upgrading the Gateway alone does not add a provider to an old Agent.
+
+No separate local enable flag is implemented. Before credential registration,
+an explicit sudo=true request may already succeed using an OS timestamp or
+NOPASSWD policy. Deployment of this provider is therefore a root-execution
+capability change even when no credential has been stored.
 
 The Agent first invokes the system /usr/bin/sudo with -n -v. If authentication is
 needed, it retrieves a credential registered locally by the user, invokes sudo
@@ -53,12 +61,34 @@ interfaces. No MCP tool accepts the password or selects another credential.
 Keychain access may still need direct OS consent. This does not import an SSH
 connector vault or create a credential silently.
 
+For macOS, register the exact verified device UUID and effective UID in the
+user's own local Terminal. The last -w option prompts for the password; never
+put its value in a command, environment variable, chat or MCP request:
+
+```sh
+/usr/bin/security add-generic-password \
+  -a '<canonical-device-uuid>:<effective-uid>' \
+  -s 'fun.hackerlife.remote-hosts.sudo' -T '' -w
+```
+
+-T '' removes implicit creator trust; never use the allow-all -A flag. The OS
+may ask separately for access by the signed Agent. Any persistent consent is
+the user's local choice. Delete/rotate the matching item through the local OS
+interface. Deletion does not invalidate an already valid OS sudo timestamp.
+The credential pipe prevents accidental forwarding to the submitted command;
+it does not isolate secrets from a compromised local account or an explicitly
+authorized arbitrary privileged command.
+
 Authentication failures return command_started=false, a safe error code and
 validation exit status. Command execution uses the existing Agent-owned terminal
 capture, process identity, combined stdout/stderr, cursor and real exit status.
 A privileged command writing a separate root-only file does not make that file
 readable; callers should use captured output where required. Cancellation follows
 OS signalling permissions and does not promise to kill every root descendant.
+Cancellation while authentication is still starting does not stop the pending
+preflight; inspect the returned state. A timed-out macOS Keychain lookup can
+leave its OS prompt outstanding, but its late result cannot start the command.
+Observe the original terminal after timeout/cancellation; do not resubmit it.
 
 ## Client confirmations and rollout
 
