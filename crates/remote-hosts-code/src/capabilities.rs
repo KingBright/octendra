@@ -198,6 +198,8 @@ impl RuntimeFeatures {
             protocol: 1,
             names: [
                 "terminal_wait_v1",
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                "local_sudo_v1",
                 "line_fragments_v1",
                 "partial_reads_v1",
                 "request_snapshot_v1",
@@ -276,6 +278,11 @@ pub(crate) fn gateway_manifest(known: Option<&str>) -> Value {
         ("outcome_guard_protocol", json!(1)),
         ("observation_protocol", json!(2)),
         ("capabilities_protocol", json!(2)),
+        (
+            "authorization_mode",
+            json!("connection_account_device_local_policy"),
+        ),
+        ("task_grants", json!("retired_legacy_queued_bindings_held")),
         ("schema_diagnostics_protocol", json!(2)),
         ("admin_status_protocol", json!(1)),
         (

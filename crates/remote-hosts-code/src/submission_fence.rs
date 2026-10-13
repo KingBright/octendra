@@ -48,12 +48,7 @@ pub(crate) async fn close(g: &Gateway, p: &Principal, args: &Value) -> Result<Va
             .any(|d| d.id == device && d.scopes.iter().any(|s| s == "code:write")),
         "device_scope_denied: code:write"
     );
-    let binding =
-        crate::task_authorization::requested(g, p, "code_apply_edits", args, device).await?;
     let mut tx = g.store.pool.begin_with("BEGIN IMMEDIATE").await?;
-    if let Some(binding) = &binding {
-        crate::task_authorization::check_in_transaction(&mut tx, binding).await?;
-    }
     let saved: Option<String> =
         sqlx::query_scalar("SELECT value FROM kv WHERE kind='submission_close_dedup' AND key=?")
             .bind(&resolution_id)

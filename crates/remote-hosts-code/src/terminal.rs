@@ -169,7 +169,12 @@ impl Terminals {
     ) -> Result<Value> {
         let command = files::text(v, "command")?;
         crate::payload_budget::command(command)?;
-        self.start_process(config, ws, v, id, command, None).await
+        ensure!(
+            v["sudo"] != true || v["pty"] != true,
+            "sudo_requires_noninteractive_pipes"
+        );
+        let launch = (v["sudo"] == true).then(|| sudo_launch(config, command));
+        self.start_process(config, ws, v, id, command, launch).await
     }
     pub(crate) async fn start_maintenance(
         &self,
@@ -199,7 +204,7 @@ impl Terminals {
         let interactive = v.get("pty").and_then(Value::as_bool).unwrap_or(false);
         ensure!(
             fixed.is_none() || !interactive,
-            "maintenance_requires_real_pipes"
+            "fixed_launch_requires_real_pipes"
         );
         let rows = files::number(v, "rows", 40, 5, 200)? as u16;
         let cols = files::number(v, "cols", 120, 20, 500)? as u16;
@@ -227,6 +232,11 @@ impl Terminals {
             output_profile: token_output::classify(command, interactive),
         };
         self.store.put("terminal", id, &status, i64::MAX).await?;
+        if v["sudo"] == true
+            && let Err(failure) = crate::local_sudo::authorize(config).await
+        {
+            return self.sudo_failed_before_spawn(status, failure).await;
+        }
         // Prepare private output and all fallible I/O handles before spawning.
         let setup = (|| -> Result<_> {
             let capture = Arc::new(Mutex::new(Capture::new(
@@ -235,7 +245,7 @@ impl Terminals {
             )?));
             let process = if let Some(launch) = fixed {
                 let mut cmd = std::process::Command::new(launch.executable);
-                cmd.args(launch.args);
+                cmd.args(launch.args).env_remove("SUDO_ASKPASS");
                 spawn_pipes(ws, cmd)?
             } else {
                 spawn(config, ws, command, interactive, rows, cols)?
@@ -480,6 +490,34 @@ impl Terminals {
             }
         }
         Ok(result)
+    }
+    async fn sudo_failed_before_spawn(
+        &self,
+        mut status: Status,
+        failure: crate::local_sudo::Failure,
+    ) -> Result<Value> {
+        let output = format!("{}: command was not started\n", failure.code);
+        let mut capture = Capture::new(
+            &self.dir.join(format!("{}.log", status.id)),
+            self.secret.clone(),
+        )?;
+        capture.push(output.as_bytes());
+        capture.finish();
+        status.state = "failed".into();
+        status.updated_at = now();
+        status.output_complete = capture.complete;
+        status.output_error = capture.error.map(str::to_owned);
+        status.output_truncated = capture.truncated;
+        self.store
+            .put("terminal", &status.id, &status, i64::MAX)
+            .await?;
+        self.publish_change();
+        Ok(
+            json!({"state":"failed", "terminal_id":status.id, "terminal":status,
+            "output":output, "cursor":capture.written, "has_more":false,
+            "next_action":null, "sudo":{"command_started":false,
+            "error_code":failure.code,"validation_exit_code":failure.exit_code}}),
+        )
     }
     fn kill(&self, id: &str) -> Result<()> {
         let mut live = self
@@ -837,6 +875,24 @@ fn shell_args(shell: &Path, command: &str, interactive: bool) -> Vec<String> {
         },
     ]
 }
+fn sudo_launch(config: &AgentConfig, command: &str) -> crate::maintenance_tasks::FixedLaunch {
+    // Authentication was performed by a separate validation-only child. The
+    // command receives EOF, never credential bytes, even with NOPASSWD rules.
+    let mut args = vec![
+        "-n".into(),
+        "--".into(),
+        config.shell.as_os_str().to_owned(),
+    ];
+    args.extend(
+        shell_args(&config.shell, command, false)
+            .into_iter()
+            .map(Into::into),
+    );
+    crate::maintenance_tasks::FixedLaunch {
+        executable: "/usr/bin/sudo".into(),
+        args,
+    }
+}
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -916,6 +972,119 @@ mod tests {
             );
             assert_eq!(value["output"], "out\nerr\n");
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sudo_launch_preserves_command_arguments_eof_and_exit_output() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let config = AgentConfig {
+            gateway_url: "https://fixture.invalid".into(),
+            device_id: uuid::Uuid::new_v4().to_string(),
+            device_token: "fixture-unused".into(),
+            state_dir: temp.path().join("state"),
+            roots: vec![temp.path().into()],
+            allow_write: false,
+            allow_exec: true,
+            shell: "/bin/sh".into(),
+        };
+        let ws = Workspace {
+            id: "workspace".into(),
+            device_id: config.device_id.clone(),
+            root: temp.path().into(),
+        };
+        let store = Store::open(&config.state_dir).await.unwrap();
+        let terminals = Terminals::new(
+            store,
+            config.state_dir.join("terminals"),
+            config.device_token.clone(),
+        )
+        .await
+        .unwrap();
+        let fake = temp.path().join("sudo-fixture");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\ntest \"$1\" = -n && test \"$2\" = -- || exit 90\nshift 2\nexec \"$@\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let command = "if IFS= read -r line; then exit 91; fi; printf 'ordinary output\\n'; printf 'ordinary error\\n' >&2; exit 23";
+        let mut launch = sudo_launch(&config, command);
+        assert_eq!(launch.executable, Path::new("/usr/bin/sudo"));
+        assert_eq!(launch.args.last().unwrap(), command);
+        launch.executable = fake;
+        let id = uuid::Uuid::new_v4().to_string();
+        // The fake replaces only the executable in this fixture. No OS sudo or store access.
+        terminals
+            .start_process(
+                &config,
+                &ws,
+                &json!({"wait_ms":2000}),
+                &id,
+                command,
+                Some(launch),
+            )
+            .await
+            .unwrap();
+        let value = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let value = terminals
+                    .read(&ws, &json!({"terminal_id":id}))
+                    .await
+                    .unwrap();
+                if value["terminal"]["output_complete"] == true {
+                    break value;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(value["terminal"]["exit_code"], 23);
+        assert_eq!(value["output"], "ordinary output\nordinary error\n");
+    }
+
+    #[tokio::test]
+    async fn sudo_preflight_failure_is_durable_and_does_not_claim_command_execution() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path()).await.unwrap();
+        let terminals = Terminals::new(
+            store,
+            temp.path().join("terminals"),
+            "fixture-unused".into(),
+        )
+        .await
+        .unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let pending = status(&id, now());
+        let ws = Workspace {
+            id: pending.workspace_id.clone(),
+            device_id: "fixture".into(),
+            root: temp.path().into(),
+        };
+        let result = terminals
+            .sudo_failed_before_spawn(
+                pending,
+                crate::local_sudo::Failure {
+                    code: "sudo_authentication_failed",
+                    exit_code: Some(1),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["sudo"]["command_started"], false);
+        assert_eq!(result["sudo"]["validation_exit_code"], 1);
+        assert_eq!(result["terminal"]["exit_code"], Value::Null);
+        assert_eq!(result["terminal"]["process_id"], Value::Null);
+        let observed = terminals
+            .read(&ws, &json!({"terminal_id":id}))
+            .await
+            .unwrap();
+        assert_eq!(observed["terminal"]["state"], "failed");
+        assert_eq!(observed["terminal"]["output_complete"], true);
+        assert_eq!(observed["output"], result["output"]);
+        assert!(!terminals.has_live().unwrap());
     }
 
     #[test]

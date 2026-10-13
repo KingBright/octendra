@@ -100,14 +100,6 @@ async fn serve(State(g): State<Gateway>, Path(id): Path<String>, headers: Header
             job.tool == "code_apply_edits" && job.owner == g.config.owner,
             "payload scope mismatch"
         );
-        let principal = crate::auth::Principal {
-            owner: job.owner.clone(),
-            scopes: vec!["code:write".into()],
-        };
-        ensure!(
-            !crate::task_authorization::blocked(&g, &principal, &id).await?,
-            "task authorization revoked"
-        );
         let bytes = serde_json::to_vec(&job.arguments)?;
         ensure!(
             !bytes.is_empty() && bytes.len() <= MAX,

@@ -3071,7 +3071,7 @@ dependencies = [
  "clap",
  "core-graphics",
  "diffy",
- "foreign-types 0.5.0",
+ "foreign-types",
  "fs2",
  "futures-util",
  "globset",
@@ -3085,6 +3085,7 @@ dependencies = [
  "reqwest",
  "rmcp",
  "screencapturekit",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3105,6 +3106,7 @@ dependencies = [
  "url",
  "uuid",
  "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]

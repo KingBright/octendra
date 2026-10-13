@@ -217,7 +217,7 @@ pub(crate) fn render(view: &Value) -> String {
             html.push_str("</p></section>");
         }
     }
-    html.push_str("<section id='advanced-authorization'><h3>可选的限时任务限制</h3><p>仅在你主动增加任务限制时使用。已有绑定继续按版本、到期和撤销状态检查；不要换任务 ID 绕过原限制。</p><a href='/status/task-authorization'>设置限时任务限制</a></section></details></section>");
+    html.push_str("<p>工具操作复用当前连接权限。宿主应用可能仍要求确认写操作；服务端不能替宿主批准。</p></details></section>");
     html
 }
 #[cfg(test)]

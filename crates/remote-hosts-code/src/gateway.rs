@@ -544,8 +544,6 @@ impl Gateway {
             registration.scopes.iter().any(|s| s == scope),
             "device_scope_denied: {scope}"
         );
-        let task_binding =
-            crate::task_authorization::requested(self, p, name, &args, device).await?;
         if let Some(object) = args.as_object_mut() {
             if !matches!(name, "desktop_worker" | "desktop_frame") {
                 object.remove("task_id");
@@ -673,6 +671,15 @@ impl Gateway {
                     .and_then(|o| o.hello.maintenance_tasks.as_ref()),
                 online.as_ref().is_some_and(|o| o.hello.allow_exec),
             )?;
+            if name == "terminal_exec" && args["sudo"] == true {
+                ensure!(
+                    online
+                        .as_ref()
+                        .and_then(|o| o.runtime_features.as_ref())
+                        .is_some_and(|f| f.names.iter().any(|n| n == "local_sudo_v1")),
+                    "device_feature_unavailable: selected agent has no local sudo provider"
+                );
+            }
             for (tool, feature) in [
                 ("files_sync", "files_sync_v1"),
                 ("change_resume", "change_set_resume_v1"),
@@ -716,9 +723,6 @@ impl Gateway {
             let mut transaction = self.store.pool.begin_with("BEGIN IMMEDIATE").await?;
             if name == "code_apply_edits" {
                 crate::submission_fence::require_open(&mut transaction, &idem).await?;
-            }
-            if let Some(binding) = &task_binding {
-                crate::task_authorization::check_in_transaction(&mut transaction, binding).await?;
             }
             if let Some(semantic) = &semantic {
                 let inserted =
@@ -775,9 +779,6 @@ impl Gateway {
                 transaction.commit().await?;
                 (selected_id, false)
             } else {
-                if let Some(binding) = &task_binding {
-                    crate::task_authorization::bind(&mut transaction, &id, binding).await?;
-                }
                 // All dispatch prerequisites share the job's commit. A failure
                 // cannot publish a job without timing, recovery or source data.
                 if let Some(semantic) = &semantic {
