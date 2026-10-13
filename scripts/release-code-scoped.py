@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 from pathlib import Path
 import os,sys,json,shutil,threading,signal,resource,re,argparse
+def updater_helpers(platform):
+ helpers=['upgrade-code-agent.py' if platform=='macos' else 'upgrade-code-agent-linux.py','agent_upgrade_support.py','maintenance_client.py','macos_code_identity.py']
+ if platform=='macos':helpers+=['launch-code-upgrade.py','code_upgrade_runner.py']
+ return helpers
+
 parser=argparse.ArgumentParser()
 parser.add_argument('--snapshot',required=True)
 parser.add_argument('--snapshot-id',required=True)
@@ -67,7 +72,7 @@ try:
    assert data[:4]==b'\x7fELF' and data[4]==2 and int.from_bytes(data[18:20],'little')==62
    offset=int.from_bytes(data[32:40],'little');size=int.from_bytes(data[54:56],'little');count=int.from_bytes(data[56:58],'little');assert all(int.from_bytes(data[offset+n*size:offset+n*size+4],'little')!=3 for n in range(count))
   out=base/('artifacts-'+args.version+('-macos' if args.platform=='macos' else ''));out.mkdir(exist_ok=False);candidate=out/('remote-hosts-code-'+args.version+('-macos-arm64' if args.platform=='macos' else '-linux-x86_64'));shutil.copy2(binary,candidate);candidate.chmod(0o755)
-  for helper in ['upgrade-code-agent.py' if args.platform=='macos' else 'upgrade-code-agent-linux.py','agent_upgrade_support.py','maintenance_client.py','macos_code_identity.py']:
+  for helper in updater_helpers(args.platform):
    shutil.copy2(source/'scripts'/helper,out/helper)
   if args.platform=='linux':shutil.copy2(source/'scripts/upgrade-code-gateway.py',out/'upgrade-code-gateway.py')
   source_snapshot.check(source);source_snapshot.check(checkout)

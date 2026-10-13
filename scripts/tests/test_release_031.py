@@ -185,6 +185,102 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(launcher.start_once(record, require_identity=False)['state'], 'already_requested')
             run.assert_called_once()
 
+    def test_shared_preparation_lock_blocks_a_second_dispatch(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            candidate = root/'candidate'; candidate.write_bytes(b'fixture')
+            record = launcher.prepare(argparse.Namespace(candidate=candidate, sha256=launcher.sha(candidate), version='0.3.1'), root)
+            with (pathlib.Path(record['directory']).parent/'.prepare.lock').open('a+b') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                with mock.patch.object(launcher, 'service_state') as state, mock.patch.object(launcher.subprocess, 'run') as run:
+                    self.assertEqual(launcher.start_once(record, require_identity=False)['state'], 'updater_busy')
+                state.assert_not_called(); run.assert_not_called()
+            self.assertFalse((pathlib.Path(record['directory'])/'start-requested.json').exists())
+
+    def test_scheduled_dispatcher_blocks_replacement_without_a_pid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            candidate = root/'candidate'; candidate.write_bytes(b'fixture')
+            record = launcher.prepare(argparse.Namespace(candidate=candidate, sha256=launcher.sha(candidate), version='0.3.1'), root)
+            scheduled = {'loaded': True, 'running': False, 'state': 'spawn scheduled', 'pid': None}
+            with mock.patch.object(launcher, 'service_state', return_value=scheduled), mock.patch.object(launcher.subprocess, 'run') as run:
+                self.assertEqual(launcher.start_once(record, require_identity=False)['state'], 'updater_busy')
+            run.assert_not_called()
+            self.assertFalse((pathlib.Path(record['directory'])/'start-requested.json').exists())
+
+    def test_unknown_previous_dispatch_cannot_be_replaced_by_a_new_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            candidate = root/'candidate'; candidate.write_bytes(b'fixture')
+            first = launcher.prepare(argparse.Namespace(candidate=candidate, sha256=launcher.sha(candidate), version='0.3.1'), root)
+            second = launcher.prepare(argparse.Namespace(candidate=candidate, sha256=launcher.sha(candidate), version='0.3.2'), root)
+            paths = launcher.stable_paths(root); paths['directory'].mkdir()
+            original = json.dumps({'directory': first['directory'], 'prepared_sha256': launcher.sha(pathlib.Path(first['directory'])/'prepared.json')}).encode()
+            paths['request'].write_bytes(original)
+            (pathlib.Path(first['directory'])/'start-requested.json').write_text('{"state":"kickstart_requested"}')
+            idle = {'loaded': True, 'running': False, 'state': 'not running', 'pid': None}
+            with mock.patch.object(launcher, 'service_state', return_value=idle), mock.patch.object(launcher.subprocess, 'run') as run:
+                self.assertEqual(launcher.start_once(second, require_identity=False)['state'], 'updater_busy')
+            self.assertEqual(paths['request'].read_bytes(), original)
+            self.assertFalse((pathlib.Path(second['directory'])/'start-requested.json').exists())
+            run.assert_not_called()
+
+    def test_service_identity_uses_arguments_and_ignores_environment_text(self):
+        argv = '\n'.join('\t\t'+a for a in ['/python', '/fixture/upgrade-code-agent.py', '--candidate', '/candidate', '--sha256', 'a'*64, '--version', '0.3.1', '--result', '/result'])
+        output = '\tstate = spawn scheduled\n\targuments = {\n'+argv+'\n\t}\n'
+        with mock.patch.object(launcher.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, stdout=output)):
+            self.assertTrue(launcher.service_state('gui/501', 'legacy')['updater_job'])
+        fake = '\tstate = spawn scheduled\n\tenvironment = {\n\t\tFAKE = upgrade-code-agent.py --candidate --sha256 --version --result\n\t}\n'
+        with mock.patch.object(launcher.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, stdout=fake)):
+            self.assertFalse(launcher.service_state('gui/501', 'legacy')['updater_job'])
+
+    def test_cleanup_recognizes_both_legacy_names_without_touching_unknown_jobs(self):
+        old = 'com.remote-hosts.code-agent-upgrade.0.10.35.v7.20261012'
+        previous = 'com.remote-hosts.code-upgrade.abcdef'
+        unknown = 'com.remote-hosts.code-agent-upgrade.unrelated'
+        listing = '\n'.join([old, previous, unknown, launcher.STABLE_LABEL, 'com.remote-hosts.code-agent'])
+        def state(domain, label):
+            return {'loaded': True, 'running': False, 'pid': None, 'state': 'spawn scheduled',
+                    'service': domain+'/'+label, 'updater_job': label != unknown}
+        with mock.patch.object(launcher, 'service_state', side_effect=state), \
+             mock.patch.object(launcher.subprocess, 'run', side_effect=[subprocess.CompletedProcess([], 0, stdout=listing), subprocess.CompletedProcess([], 0), subprocess.CompletedProcess([], 0)]) as run:
+            self.assertEqual(launcher.cleanup_legacy_jobs('gui/501'), 2)
+        removed = {call.args[0][2] for call in run.call_args_list if call.args[0][1] == 'bootout'}
+        self.assertEqual(removed, {'gui/501/'+old, 'gui/501/'+previous})
+
+    def test_live_or_exiting_legacy_updater_and_failed_cleanup_block_launch(self):
+        label = 'com.remote-hosts.code-agent-upgrade.0.10.35.v7'
+        for running, pid, boot_exit in [(True, 42, 0), (False, 42, 0), (False, None, 5)]:
+            with self.subTest(running=running, pid=pid, exit=boot_exit):
+                state = {'loaded': True, 'running': running, 'pid': pid, 'updater_job': True, 'service': 'gui/501/'+label}
+                outputs = [subprocess.CompletedProcess([], 0, stdout=label), subprocess.CompletedProcess([], boot_exit)]
+                with mock.patch.object(launcher, 'service_state', return_value=state), mock.patch.object(launcher.subprocess, 'run', side_effect=outputs) as run:
+                    self.assertIsNone(launcher.cleanup_legacy_jobs('gui/501'))
+                self.assertEqual(run.call_count, 1 if pid else 2)
+
+    def test_failed_domain_observation_does_not_claim_legacy_cleanup(self):
+        with mock.patch.object(launcher.subprocess, 'run', return_value=subprocess.CompletedProcess([], 5)):
+            self.assertIsNone(launcher.cleanup_legacy_jobs('gui/501'))
+
+    def test_scoped_bundle_can_prepare_the_canonical_launcher(self):
+        import ast
+        import shutil
+        tree = ast.parse((SCRIPTS/'release-code-scoped.py').read_text())
+        definition = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'updater_helpers')
+        namespace = {}
+        exec(compile(ast.Module(body=[definition], type_ignores=[]), 'release-code-scoped.py', 'exec'), namespace)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp); package = root/'package'; package.mkdir()
+            for name in namespace['updater_helpers']('macos'):
+                shutil.copy2(SCRIPTS/name, package/name)
+            spec = importlib.util.spec_from_file_location('packaged_oneshot_fixture', package/'launch-code-upgrade.py')
+            packaged = importlib.util.module_from_spec(spec); spec.loader.exec_module(packaged)
+            candidate = package/'candidate'; candidate.write_bytes(b'fixture')
+            record = packaged.prepare(argparse.Namespace(candidate=candidate, sha256=packaged.sha(candidate), version='0.3.1'), root/'owner')
+            self.assertEqual(packaged.validate_prepared(record), record)
+            self.assertTrue((package/'code_upgrade_runner.py').is_file())
+
 
 if __name__ == '__main__':
     unittest.main()
