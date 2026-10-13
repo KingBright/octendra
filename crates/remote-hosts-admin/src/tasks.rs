@@ -203,11 +203,11 @@ fn metadata(path: &Path, uid: u32) -> Result<Option<Metadata>> {
         Err(e) => Err(e),
     }
 }
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_pointer_width = "64"))]
 fn nanoseconds(s: &nix::libc::stat) -> (i64, i64) {
     (s.st_mtime_nsec, s.st_ctime_nsec)
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), target_pointer_width = "32"))]
 fn nanoseconds(s: &nix::libc::stat) -> (i64, i64) {
     (s.st_mtime_nsec as i64, s.st_ctime_nsec as i64)
 }
