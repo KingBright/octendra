@@ -10,7 +10,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-const MAX_FILE: u64 = 8 * 1024 * 1024;
+const MAX_FILE: u64 = 64 * 1024 * 1024;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Workspace {
     pub id: String,
@@ -110,8 +110,8 @@ fn paths(ws: &Workspace, v: &Value) -> Result<Vec<String>> {
     let start = std::time::Instant::now();
     for entry in builder.build() {
         ensure!(
-            start.elapsed().as_secs() < 15,
-            "file enumeration exceeded 15 seconds; narrow the glob"
+            start.elapsed().as_secs() < 120,
+            "file enumeration exceeded 120 seconds; narrow the glob"
         );
         let entry = entry?;
         if entry.file_type().is_some_and(|t| t.is_file()) {
@@ -126,7 +126,7 @@ fn paths(ws: &Workspace, v: &Value) -> Result<Vec<String>> {
             if matcher.is_match(&p) {
                 out.push(p);
             }
-            ensure!(out.len() <= 100000, "too many files; narrow the glob");
+            ensure!(out.len() <= 1000000, "too many files; narrow the glob");
         }
     }
     out.sort();
@@ -251,7 +251,7 @@ pub fn search(ws: &Workspace, v: &Value) -> Result<Value> {
     let offset = page_offset(v, &fp)?;
     let limit = number(v, "limit", 40, 1, 200)?;
     let context = number(v, "context_lines", 2, 0, 5)?;
-    let mut remaining = number(v, "max_bytes", 16000, 1024, 65536)?;
+    let mut remaining = number(v, "max_bytes", 16000, 1024, 1048576)?;
     let dir = directory(ws)?;
     let mut results = vec![];
     let mut count = 0;
@@ -259,8 +259,8 @@ pub fn search(ws: &Workspace, v: &Value) -> Result<Value> {
     let start = std::time::Instant::now();
     for path in &paths {
         ensure!(
-            start.elapsed().as_secs() < 15,
-            "search exceeded 15 seconds; narrow the glob"
+            start.elapsed().as_secs() < 120,
+            "search exceeded 120 seconds; narrow the glob"
         );
         let content = match read_text(&dir, path) {
             Ok(s) => s,
@@ -382,7 +382,8 @@ struct Replacement {
 #[serde(deny_unknown_fields)]
 struct FileEdit {
     path: String,
-    expected_version: String,
+    #[serde(default)]
+    expected_version: Option<String>,
     action: Option<String>,
     edits: Option<Vec<Replacement>>,
     patch: Option<String>,
@@ -394,10 +395,13 @@ struct Prepared {
     new: Option<String>,
 }
 fn transformed(old: &str, edit: &FileEdit) -> Result<String> {
-    ensure!(
-        edit.content.is_none(),
-        "content only supported when creating a new file"
-    );
+    if let Some(content) = &edit.content {
+        ensure!(
+            edit.edits.is_none() && edit.patch.is_none(),
+            "content only supported when creating a new file"
+        );
+        return Ok(content.clone());
+    }
     if let Some(patch) = &edit.patch {
         ensure!(edit.edits.is_none(), "choose edits or patch, not both");
         return Ok(diffy::apply(old, &diffy::Patch::from_str(patch)?)?);
@@ -643,10 +647,6 @@ pub fn apply(ws: &Workspace, v: &Value, journal: &Path) -> Result<Value> {
     for edit in edits {
         relative(&edit.path)?;
         ensure!(paths.insert(edit.path.clone()), "duplicate file");
-        // Refuse symlink replacement; capability opens also prevent escaping the workspace.
-        if let Ok(meta) = dir.symlink_metadata(&edit.path) {
-            ensure!(!meta.is_symlink(), "cannot edit a symlink");
-        }
         let old = match read_text(&dir, &edit.path) {
             Ok(s) => Some(s),
             Err(e) => {
@@ -657,15 +657,19 @@ pub fn apply(ws: &Workspace, v: &Value, journal: &Path) -> Result<Value> {
             }
         };
         let version = old.as_ref().map(hash).unwrap_or_else(|| "absent".into());
-        ensure!(
-            edit.expected_version == version,
-            "version_conflict: {} current_version={version}",
-            edit.path
-        );
+        if let Some(expected) = edit.expected_version.as_deref() {
+            ensure!(
+                expected == version,
+                "version_conflict: {} current_version={version}",
+                edit.path
+            );
+        }
         let new = match edit.action.as_deref().unwrap_or("edit") {
             "create" => {
                 ensure!(
-                    old.is_none() && edit.edits.is_none() && edit.patch.is_none(),
+                    (edit.expected_version.is_none() || old.is_none())
+                        && edit.edits.is_none()
+                        && edit.patch.is_none(),
                     "create requires absent file and content only"
                 );
                 Some(edit.content.context("missing content")?)
@@ -680,10 +684,14 @@ pub fn apply(ws: &Workspace, v: &Value, journal: &Path) -> Result<Value> {
                 );
                 None
             }
-            "edit" => Some(transformed(
-                old.as_deref().context("file does not exist")?,
-                &edit,
-            )?),
+            "edit" => {
+                let base = if edit.content.is_some() && edit.expected_version.is_none() {
+                    old.as_deref().unwrap_or("")
+                } else {
+                    old.as_deref().context("file does not exist")?
+                };
+                Some(transformed(base, &edit)?)
+            }
             _ => bail!("unsupported edit action"),
         };
         ensure!(

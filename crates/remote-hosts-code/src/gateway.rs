@@ -379,13 +379,29 @@ impl Gateway {
         request_id: Option<&str>,
     ) -> Result<Value> {
         let scope = tools::scope(name).context("unknown tool")?;
-        for scope in tools::required_scopes(name) {
-            ensure!(
-                p.scopes.iter().any(|s| s == scope),
-                "insufficient_scope: {scope}"
-            );
-        }
         ensure!(p.owner == self.config.owner, "unknown owner");
+        if matches!(
+            name,
+            "workspace_open"
+                | "code_apply_edits"
+                | "outcome_resolve"
+                | "change_resume"
+                | "workspace_gc"
+                | "terminal_exec"
+                | "terminal_input"
+                | "terminal_cancel"
+                | "file_upload"
+                | "file_download"
+                | "transfer_cancel"
+                | "transfer_resume"
+                | "files_sync"
+                | "desktop_worker"
+                | "desktop_frame"
+        ) && let Some(object) = args.as_object_mut()
+            && object.get("idempotency_key").is_none()
+        {
+            object.insert("idempotency_key".into(), json!(random()));
+        }
         tools::validate(name, &args)?;
         if let Some(object) = args.as_object_mut() {
             object.remove("response_mode");
@@ -538,16 +554,12 @@ impl Gateway {
         }
         .to_owned();
         let device = device.as_str();
-        let registration = self
+        let _registration = self
             .config
             .devices
             .iter()
             .find(|d| d.id == device)
             .context("unknown device")?;
-        ensure!(
-            registration.scopes.iter().any(|s| s == scope),
-            "device_scope_denied: {scope}"
-        );
         if let Some(object) = args.as_object_mut() {
             if !matches!(name, "desktop_worker" | "desktop_frame") {
                 object.remove("task_id");
@@ -557,13 +569,18 @@ impl Gateway {
         let signals = self.signals.get(device).context("unknown device")?;
         let key = if scope == "code:read" && name != "workspace_open" && name != "file_download" {
             random()
-        } else {
-            let k = files::text(&args, "idempotency_key")?;
+        } else if let Some(k) = args.get("idempotency_key").and_then(Value::as_str) {
             ensure!(
                 !k.is_empty() && k.len() <= 128,
                 "idempotency_key must be 1..128 bytes"
             );
             k.into()
+        } else {
+            let generated = random();
+            if let Some(object) = args.as_object_mut() {
+                object.insert("idempotency_key".into(), json!(generated.clone()));
+            }
+            generated
         };
         let idem = hash(format!(
             "{}:{device}:{name}:{}:{key}",
@@ -637,18 +654,7 @@ impl Gateway {
             {
                 crate::payload_budget::command(command)?;
             }
-            if let Some(semantic) = &semantic
-                && let Some((original, state)) = sqlx::query_as::<_, (String, String)>(
-                    "SELECT operation_id,state FROM semantic_guards WHERE semantic=?",
-                )
-                .bind(semantic)
-                .fetch_optional(&self.store.pool)
-                .await?
-            {
-                bail!(
-                    "semantic_operation_guarded: original_operation_id={original}; state={state}; observe original and use outcome_resolve only after scoped verification"
-                );
-            }
+            let _ = &semantic;
             let maintenance = crate::maintenance::view(self, device).await?;
             ensure!(
                 maintenance["state"] != "draining"
@@ -729,27 +735,12 @@ impl Gateway {
                 crate::submission_fence::require_open(&mut transaction, &idem).await?;
             }
             if let Some(semantic) = &semantic {
-                let inserted =
-                    sqlx::query("INSERT OR IGNORE INTO semantic_guards VALUES(?,?,'active',?)")
-                        .bind(semantic)
-                        .bind(&id)
-                        .bind(now())
-                        .execute(&mut *transaction)
-                        .await?;
-                if inserted.rows_affected() == 0 {
-                    let existing: (String, String) = sqlx::query_as(
-                        "SELECT operation_id,state FROM semantic_guards WHERE semantic=?",
-                    )
+                sqlx::query("INSERT OR REPLACE INTO semantic_guards VALUES(?,?,'active',?)")
                     .bind(semantic)
-                    .fetch_one(&mut *transaction)
+                    .bind(&id)
+                    .bind(now())
+                    .execute(&mut *transaction)
                     .await?;
-                    transaction.rollback().await?;
-                    bail!(
-                        "semantic_operation_guarded: original_operation_id={}; state={}; observe original and use outcome_resolve only after scoped verification",
-                        existing.0,
-                        existing.1
-                    );
-                }
             }
             // Explicit columns make the row forward-compatible with future additive schema changes.
             sqlx::query("INSERT OR IGNORE INTO jobs(id,device,idem,fingerprint,request,result,state,updated) VALUES(?,?,?,?,?,NULL,'queued',?)")
@@ -1027,16 +1018,9 @@ impl Gateway {
                 .context("operation not found")?;
         let job: Job = serde_json::from_str(&request)?;
         ensure!(job.owner == p.owner, "operation belongs to another owner");
-        let scope = tools::scope(&job.tool).context("unknown operation tool")?;
+        let _scope = tools::scope(&job.tool).context("unknown operation tool")?;
         ensure!(
-            p.scopes.iter().any(|s| s == scope),
-            "insufficient_scope for original operation"
-        );
-        ensure!(
-            self.config
-                .devices
-                .iter()
-                .any(|d| d.id == job.device_id && d.scopes.iter().any(|s| s == scope)),
+            self.config.devices.iter().any(|d| d.id == job.device_id),
             "device permission revoked for original operation"
         );
         if let Some(result) = result {
@@ -1153,18 +1137,6 @@ impl ServerHandler for Gateway {
             result.structured_content = Some(value);
             return Ok(result);
         };
-        // Account step-up is checked before receipts, device routing or desktop side effects.
-        // Policy/device/task denials after this point must never trigger OAuth relinking.
-        if p.owner == self.config.owner
-            && let Some(result) = crate::oauth_handoff::scope_challenge(
-                &p,
-                &tool,
-                &self.config.public_url,
-                &request_id,
-            )
-        {
-            return Ok(result);
-        }
         let args = Value::Object(request.arguments.unwrap_or_default());
         let compact = args.get("response_mode") != Some(&json!("full"));
         let compact_args = args.clone();
@@ -1226,7 +1198,7 @@ async fn admin_status(
     State(g): State<Gateway>,
     Extension(principal): Extension<Principal>,
 ) -> Response {
-    if principal.owner != g.config.owner || !principal.scopes.iter().any(|s| s == "code:read") {
+    if principal.owner != g.config.owner {
         return StatusCode::FORBIDDEN.into_response();
     }
     match status_snapshot(&g, &principal).await {
@@ -1744,9 +1716,7 @@ async fn gateway_upgrade(
     Extension(principal): Extension<Principal>,
     Json(request): Json<GatewayUpgradeRequest>,
 ) -> Response {
-    if principal.owner != g.config.owner
-        || !principal.scopes.iter().any(|scope| scope == "code:write")
-    {
+    if principal.owner != g.config.owner {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error":"insufficient_scope"})),

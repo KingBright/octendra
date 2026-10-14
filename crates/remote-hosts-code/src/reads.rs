@@ -9,11 +9,19 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 
 const SNAPSHOT_BUDGET: usize = 32 * 1024 * 1024;
+fn default_start_line() -> usize {
+    1
+}
+fn default_end_line() -> usize {
+    10_000_000
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Range {
     path: String,
+    #[serde(default = "default_start_line")]
     start_line: usize,
+    #[serde(default = "default_end_line")]
     end_line: usize,
     expected_version: Option<String>,
     #[serde(default)]

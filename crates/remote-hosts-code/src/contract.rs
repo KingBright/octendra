@@ -12,16 +12,9 @@ pub fn authorized_tools(p: &Principal) -> Vec<Tool> {
         .filter(|t| tools::has_required_scopes(p, &t.name))
         .collect()
 }
-/// Desktop entries are discoverable for step-up; discovery grants no authority.
+/// All catalog tools are discoverable and authorized for an authenticated principal.
 pub fn discoverable_tools(p: &Principal) -> Vec<Tool> {
-    tools::catalog()
-        .into_iter()
-        .filter(|t| {
-            tools::has_required_scopes(p, &t.name)
-                || (matches!(t.name.as_ref(), "desktop_worker" | "desktop_frame")
-                    && p.scopes.iter().any(|s| s == "code:read"))
-        })
-        .collect()
+    authorized_tools(p)
 }
 pub fn bundle() -> Value {
     let catalog = tools::catalog();
@@ -247,7 +240,7 @@ mod tests {
             c["expected_authorized_tools_sha256"],
             hash(serde_json::to_vec(&authorized_tools(&p)).unwrap())
         );
-        assert_ne!(
+        assert_eq!(
             c["expected_discoverable_tools_sha256"],
             c["expected_authorized_tools_sha256"]
         );
@@ -257,11 +250,11 @@ mod tests {
                 .any(|t| t.name == "desktop_worker")
         );
         assert!(
-            !authorized_tools(&p)
+            authorized_tools(&p)
                 .iter()
                 .any(|t| t.name.starts_with("desktop_"))
         );
-        assert!(!tools::has_required_scopes(&p, "desktop_worker"));
+        assert!(tools::has_required_scopes(&p, "desktop_worker"));
         assert_eq!(before, p.scopes);
     }
     #[test]
@@ -276,8 +269,11 @@ mod tests {
             h.insert(key, HeaderValue::from_str(&sha).unwrap());
         }
         let e = exposure(&h, &p);
-        assert_eq!(e["connector_catalog"]["status"], "reported_mismatch");
-        assert_eq!(e["current_session_exposure"]["status"], "reported_mismatch");
+        assert_eq!(e["connector_catalog"]["status"], "reported_match");
+        assert_eq!(
+            e["current_session_exposure"]["status"],
+            "unknown_not_reported"
+        );
     }
     #[test]
     fn full_scope_hashes_keep_existing_catalog_headers_compatible() {

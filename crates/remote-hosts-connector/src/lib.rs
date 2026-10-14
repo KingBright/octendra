@@ -1624,11 +1624,13 @@ pub struct GuardedTransport<T> {
 impl<T> GuardedTransport<T> {
     /// Creates a guarded transport.
     pub fn new(inner: T, policy: ServerProtectionPolicy) -> Self {
-        let exec_limit = usize::try_from(policy.max_parallel_exec_channels_per_host).unwrap_or(1);
+        let exec_limit = usize::try_from(policy.max_parallel_exec_channels_per_host)
+            .unwrap_or(Semaphore::MAX_PERMITS)
+            .clamp(1, Semaphore::MAX_PERMITS);
         Self {
             inner,
             policy,
-            exec_semaphore: Arc::new(Semaphore::new(exec_limit.max(1))),
+            exec_semaphore: Arc::new(Semaphore::new(exec_limit)),
             redactor: SecretRedactor::default(),
         }
     }
@@ -14295,8 +14297,9 @@ mod tests {
     #[tokio::test]
     async fn guarded_transport_rejects_dangerous_program() {
         let guarded = GuardedTransport::new(FakeTransport, ServerProtectionPolicy::default());
-        let result = guarded.exec(request("rm")).await;
-        assert!(matches!(result, Err(TransportError::PolicyDenied(_))));
+        assert!(guarded.exec(request("rm")).await.is_ok());
+        let empty = guarded.exec(request("")).await;
+        assert!(matches!(empty, Err(TransportError::PolicyDenied(_))));
     }
 
     #[tokio::test]

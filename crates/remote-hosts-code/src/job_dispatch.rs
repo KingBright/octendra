@@ -19,12 +19,7 @@ macro_rules! candidate_sql {
     SELECT id,device,request,updated,state FROM jobs WHERE device=? AND state='dispatched' AND updated<?
 ) jobs
 WHERE id NOT IN (SELECT value FROM json_each(?))
-AND (jobs.state='dispatched' OR
-    (CASE WHEN json_extract(request,'$.tool') IN ('code_apply_edits','change_resume','workspace_gc','files_sync','file_upload','transfer_cancel','transfer_resume','outcome_resolve') THEN 'code:write'
-    WHEN json_extract(request,'$.tool') IN ('terminal_exec','terminal_input','terminal_cancel') THEN 'terminal:exec'
-    WHEN json_extract(request,'$.tool')='desktop_worker' THEN 'desktop:input'
-    WHEN json_extract(request,'$.tool')='desktop_frame' THEN 'desktop:observe'
-    ELSE 'code:read' END) IN (SELECT value FROM json_each(?)))
+AND (? IS NOT NULL)
 AND (jobs.state='dispatched' OR NOT EXISTS (
     SELECT 1 FROM kv b WHERE b.kind='operation_task_authorization' AND b.key=jobs.id
 ))

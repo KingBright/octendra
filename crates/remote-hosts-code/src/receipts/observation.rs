@@ -49,8 +49,7 @@ pub(super) async fn invoke(
             old["owner"] == p.owner && old["fingerprint"] == fingerprint,
             "request_identity_conflict"
         );
-        let scope = tools::scope(tool).context("unknown tool")?;
-        ensure!(p.scopes.iter().any(|s| s == scope), "insufficient_scope");
+        let _scope = tools::scope(tool).context("unknown tool")?;
         return super::invoke_durable(g, p, tool, args, request_id).await;
     }
     let invalid_task = tool != "task_context"

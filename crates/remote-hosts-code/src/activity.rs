@@ -35,15 +35,11 @@ async fn load(g: &Gateway, ids: &[String]) -> Result<HashMap<String, ActivityRow
 fn operation(g: &Gateway, p: &Principal, row: &ActivityRow) -> Result<Value> {
     let id = &row.id;
     let job: Job = serde_json::from_str(&row.request)?;
-    let scope = tools::scope(&job.tool).context("unknown original tool")?;
+    let _scope = tools::scope(&job.tool).context("unknown original tool")?;
     ensure!(
         job.owner == p.owner
             && p.owner == g.config.owner
-            && p.scopes.iter().any(|s| s == scope)
-            && g.config
-                .devices
-                .iter()
-                .any(|d| d.id == job.device_id && d.scopes.iter().any(|s| s == scope)),
+            && g.config.devices.iter().any(|d| d.id == job.device_id),
         "operation_unavailable: original operation access is required"
     );
     // Do not decorate results with download URLs or refreshable credentials.

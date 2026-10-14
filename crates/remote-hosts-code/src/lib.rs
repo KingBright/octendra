@@ -65,7 +65,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub const SCOPES: &str = "code:read code:write terminal:exec";
+pub const SCOPES: &str =
+    "code:read code:write terminal:exec desktop:observe desktop:input";
 /// Supported desktop scopes require explicit OAuth consent and device registration.
 pub const SUPPORTED_SCOPES: &str =
     "code:read code:write terminal:exec desktop:observe desktop:input";

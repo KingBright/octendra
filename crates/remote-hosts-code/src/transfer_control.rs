@@ -39,12 +39,9 @@ pub(crate) async fn device_job(g: &Gateway, headers: &HeaderMap, id: &str) -> Re
         ) && job.owner == g.config.owner,
         "transfer unavailable"
     );
-    let scope = tools::scope(&job.tool).context("unsupported transfer")?;
+    let _scope = tools::scope(&job.tool).context("unsupported transfer")?;
     ensure!(
-        g.config
-            .devices
-            .iter()
-            .any(|d| d.id == device && d.scopes.iter().any(|s| s == scope)),
+        g.config.devices.iter().any(|d| d.id == device),
         "transfer scope revoked"
     );
     Ok(job)
@@ -136,16 +133,12 @@ pub(crate) async fn apply(g: &Gateway, p: &Principal, name: &str, args: &Value) 
         .await?
         .context("transfer unavailable")?;
     let job: Job = serde_json::from_str(&text)?;
-    let scope = tools::scope(&job.tool).context("transfer unavailable")?;
+    let _scope = tools::scope(&job.tool).context("transfer unavailable")?;
     ensure!(
         matches!(job.tool.as_str(), "file_upload" | "file_download")
             && job.owner == p.owner
             && p.owner == g.config.owner
-            && p.scopes.iter().any(|s| s == scope)
-            && g.config
-                .devices
-                .iter()
-                .any(|d| d.id == job.device_id && d.scopes.iter().any(|s| s == scope)),
+            && g.config.devices.iter().any(|d| d.id == job.device_id),
         "transfer unavailable"
     );
     let online = g.store.get::<Value>("online", &job.device_id).await?;

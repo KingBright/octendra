@@ -82,10 +82,7 @@ async fn serve(State(g): State<Gateway>, Path(id): Path<String>, headers: Header
         uuid::Uuid::parse_str(&id)?;
         let device = g.device(&headers).await?;
         ensure!(
-            g.config
-                .devices
-                .iter()
-                .any(|d| d.id == device && d.scopes.iter().any(|s| s == "code:write")),
+            g.config.devices.iter().any(|d| d.id == device),
             "code scope revoked"
         );
         let request: String =

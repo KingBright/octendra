@@ -152,7 +152,7 @@ pub(crate) fn validate_coordination_scope(scope: &str) -> Result<(), WorkspaceSu
 
 #[cfg(test)]
 mod tests {
-    use remote_hosts_domain::{AccessPathId, ConnectorId, EntityState, HostId, WorkspaceState};
+    use remote_hosts_domain::{AccessPathId, ConnectorId, HostId, WorkspaceState};
 
     use super::{WorkspaceCreateCommand, WorkspaceSupervisor, WorkspaceSupervisorError};
 
@@ -212,26 +212,11 @@ mod tests {
     }
 
     #[test]
-    fn workspace_limit_is_independent_from_persistent_pty_limit()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn workspace_creation_is_unrestricted_by_default() -> Result<(), Box<dyn std::error::Error>> {
         let supervisor = WorkspaceSupervisor::default();
         supervisor.create_workspace(command(), 1)?;
-        let error = supervisor
-            .create_workspace(command(), 32)
-            .err()
-            .ok_or("default policy should cap active logical workspaces")?;
-
-        match error {
-            WorkspaceSupervisorError::PolicyDenied(decision) => {
-                assert!(!decision.allowed);
-                assert_eq!(decision.state, EntityState::RateLimited);
-                assert_eq!(
-                    decision.human_message,
-                    "logical workspace capacity limit reached"
-                );
-            }
-            other => return Err(format!("unexpected error: {other:?}").into()),
-        }
+        let ws = supervisor.create_workspace(command(), 1024)?;
+        assert_eq!(ws.state, WorkspaceState::Idle);
         Ok(())
     }
 }

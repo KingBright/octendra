@@ -1,8 +1,8 @@
 {
-  "adapter_tools_sha256": "2e200e4a94a9b387f5b3434183f71ceb74c7bdde5c916a61f7282a0066cb9ea0",
+  "adapter_tools_sha256": "a3010f9f607f92f41f536d8ded0a2f02acec7b354c76c27935ed35cfd0922f73",
   "boundary": "Adapter-sent catalog is not proof of final host exposure. No final host report means unknown.",
   "protocol": 1,
-  "server_tools_sha256": "2e200e4a94a9b387f5b3434183f71ceb74c7bdde5c916a61f7282a0066cb9ea0",
+  "server_tools_sha256": "a3010f9f607f92f41f536d8ded0a2f02acec7b354c76c27935ed35cfd0922f73",
   "skill_revision": "6aa3bdbdd86135c9db72bcf2ab8bb8f9017af48fc5c701de898866a7ed1afdc1",
   "tools": [
     {
@@ -28,7 +28,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -175,7 +175,6 @@
           "device_id",
           "task_id",
           "capability_version",
-          "idempotency_key",
           "request"
         ],
         "type": "object"
@@ -208,7 +207,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -245,8 +244,7 @@
           "device_id",
           "task_id",
           "capability_version",
-          "observed_operation_id",
-          "idempotency_key"
+          "observed_operation_id"
         ],
         "type": "object"
       },
@@ -334,7 +332,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -393,7 +391,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -446,7 +444,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -499,7 +497,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -529,8 +527,7 @@
         },
         "required": [
           "device_id",
-          "root",
-          "idempotency_key"
+          "root"
         ],
         "type": "object"
       },
@@ -562,7 +559,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -631,7 +628,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -720,7 +717,7 @@
             "type": "boolean"
           },
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -757,9 +754,7 @@
                 }
               },
               "required": [
-                "path",
-                "start_line",
-                "end_line"
+                "path"
               ],
               "type": "object"
             },
@@ -818,7 +813,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -882,12 +877,12 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Apply version-checked precise replacements or a unified patch. For action=create, use expected_version=\"absent\" and full content only; an empty version is a conflict. For edit/delete, use the current file SHA-256. All files preflight before changes; each file is atomic, and every batch returns a durable change_set_id with before/after versions. Partial or uncertain batches can be inspected and continued with change_resume. Never guess when a version or unique match conflicts. Reuse the same idempotency_key only for an uncertain identical submission. Return compact diffs.",
+      "description": "Apply precise replacements, a unified patch, or full content. expected_version is optional: when omitted, edits/creates/deletes apply directly without CAS; when supplied, literal absent is required for create and the current file SHA-256 for edit/delete. Return compact diffs.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -928,7 +923,7 @@
                   "type": "array"
                 },
                 "expected_version": {
-                  "description": "Required CAS version: literal absent for create; current file SHA-256 for edit/delete. An empty string is not a missing-file marker.",
+                  "description": "Optional CAS version: literal absent for create; current file SHA-256 for edit/delete. Omit to apply without CAS check.",
                   "type": "string"
                 },
                 "patch": {
@@ -939,8 +934,7 @@
                 }
               },
               "required": [
-                "path",
-                "expected_version"
+                "path"
               ],
               "type": "object"
             },
@@ -970,7 +964,6 @@
         },
         "required": [
           "workspace_id",
-          "idempotency_key",
           "files"
         ],
         "type": "object"
@@ -1003,7 +996,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -1036,9 +1029,7 @@
           }
         },
         "required": [
-          "operation_id",
-          "resolution",
-          "idempotency_key"
+          "resolution"
         ],
         "type": "object"
       },
@@ -1070,7 +1061,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -1100,7 +1091,6 @@
         },
         "required": [
           "workspace_id",
-          "idempotency_key",
           "change_set_id"
         ],
         "type": "object"
@@ -1140,7 +1130,7 @@
             "type": "string"
           },
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -1180,7 +1170,6 @@
         },
         "required": [
           "workspace_id",
-          "idempotency_key",
           "action"
         ],
         "type": "object"
@@ -1213,7 +1202,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -1302,7 +1291,7 @@
             "type": "string"
           },
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -1378,8 +1367,7 @@
           }
         },
         "required": [
-          "workspace_id",
-          "idempotency_key"
+          "workspace_id"
         ],
         "type": "object"
       },
@@ -1411,7 +1399,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -1487,7 +1475,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -1521,8 +1509,7 @@
         "required": [
           "workspace_id",
           "terminal_id",
-          "text",
-          "idempotency_key"
+          "text"
         ],
         "type": "object"
       },
@@ -1554,7 +1541,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -1584,8 +1571,7 @@
         },
         "required": [
           "workspace_id",
-          "terminal_id",
-          "idempotency_key"
+          "terminal_id"
         ],
         "type": "object"
       },
@@ -1617,7 +1603,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -1695,7 +1681,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -1758,7 +1744,6 @@
         },
         "required": [
           "workspace_id",
-          "idempotency_key",
           "path",
           "file"
         ],
@@ -1792,7 +1777,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -1830,7 +1815,6 @@
         },
         "required": [
           "workspace_id",
-          "idempotency_key",
           "path"
         ],
         "type": "object"
@@ -1878,7 +1862,7 @@
             "type": "string"
           },
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -1957,7 +1941,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -1983,8 +1967,7 @@
           }
         },
         "required": [
-          "operation_id",
-          "idempotency_key"
+          "operation_id"
         ],
         "type": "object"
       },
@@ -2011,7 +1994,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -2059,8 +2042,7 @@
           }
         },
         "required": [
-          "operation_id",
-          "idempotency_key"
+          "operation_id"
         ],
         "type": "object"
       },
@@ -2092,7 +2074,7 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -2168,7 +2150,6 @@
         },
         "required": [
           "workspace_id",
-          "idempotency_key",
           "mode",
           "files"
         ],

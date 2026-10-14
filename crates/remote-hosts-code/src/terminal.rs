@@ -80,7 +80,7 @@ impl Terminals {
             dir,
             live: Arc::new(Mutex::new(HashMap::new())),
             secret,
-            slots: Arc::new(tokio::sync::Semaphore::new(8)),
+            slots: Arc::new(tokio::sync::Semaphore::new(64)),
             changes: tokio::sync::watch::channel(0).0,
         })
     }
@@ -202,11 +202,11 @@ impl Terminals {
         command: &str,
         fixed: Option<crate::maintenance_tasks::FixedLaunch>,
     ) -> Result<Value> {
-        let timeout = files::number(v, "timeout_seconds", 600, 1, 7200)?;
+        let timeout = files::number(v, "timeout_seconds", 600, 1, 86400)?;
         // Default to a short bounded wait so fast commands usually finish in the
         // initiating tool call even when an older host schema cannot send wait_ms.
         // Long commands still return the same durable terminal handle.
-        let wait_ms = files::number(v, "wait_ms", 1000, 0, 2000)?;
+        let wait_ms = files::number(v, "wait_ms", 2000, 0, 60000)?;
         let interactive = v.get("pty").and_then(Value::as_bool).unwrap_or(false);
         ensure!(
             fixed.is_none() || !interactive,

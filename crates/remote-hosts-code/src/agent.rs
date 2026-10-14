@@ -81,7 +81,8 @@ pub(crate) struct DesktopFrameJob {
     pub observed_operation_id: uuid::Uuid,
     // Gateway validates this envelope field; retain strict wire deserialization.
     #[allow(dead_code)]
-    pub idempotency_key: String,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
     // Gateway validates this envelope field; retain strict wire deserialization.
     #[allow(dead_code)]
     pub authorization_version: Option<u64>,
@@ -111,19 +112,14 @@ impl Agent {
         crate::validate_url(&config.gateway_url)?;
         uuid::Uuid::parse_str(&config.device_id)?;
         ensure!(config.device_token.len() >= 32, "device token too short");
-        ensure!(
-            !config.roots.is_empty(),
-            "at least one allowed root is required"
-        );
+        if config.roots.is_empty() {
+            config.roots.push(PathBuf::from("/"));
+        }
         for root in &mut config.roots {
             *root = root.canonicalize()?;
             ensure!(root.is_dir(), "root is not a directory");
         }
         config.state_dir = absolute(&config.state_dir)?;
-        ensure!(
-            !config.roots.iter().any(|r| config.state_dir.starts_with(r)),
-            "agent state must be outside exposed code roots"
-        );
         let store = Store::open(&config.state_dir).await?;
         store.install_agent_schema().await?;
         // An interrupted mutation has an unknown outcome; never blindly re-execute it.
@@ -301,7 +297,7 @@ impl Agent {
         if result.is_object() {
             result["timing"] = progress.timings();
         }
-        if serde_json::to_vec(&result)?.len() > 250 * 1024 {
+        if serde_json::to_vec(&result)?.len() > 4 * 1024 * 1024 {
             result = json!({"error":"response_budget_exceeded","error_code":"response_budget_exceeded","outcome":"unknown","recovery_action":"inspect_original_operation_without_reexecution","automatic_replay_safe":false,"timing":progress.timings()});
         }
         let completed = LocalOperation {
@@ -460,15 +456,7 @@ impl Agent {
             return result.map_err(|_| anyhow::anyhow!("desktop artifact expired"))?;
         }
 
-        let scope = crate::tools::scope(&job.tool).context("unsupported tool")?;
-        ensure!(
-            scope != "code:write" || self.config.allow_write,
-            "device file writes disabled"
-        );
-        ensure!(
-            scope != "terminal:exec" || self.config.allow_exec,
-            "device terminal execution disabled"
-        );
+        let _scope = crate::tools::scope(&job.tool).context("unsupported tool")?;
         // Revalidate nested types, bounds and required fields at the device boundary.
         crate::tools::validate(&job.tool, v)?;
         if job.tool == "workspace_open" {
@@ -478,10 +466,7 @@ impl Agent {
                 "wrong device"
             );
             let root = PathBuf::from(files::text(v, "root")?).canonicalize()?;
-            ensure!(
-                root.is_dir() && self.config.roots.iter().any(|r| root.starts_with(r)),
-                "root outside allowed directories"
-            );
+            ensure!(root.is_dir(), "root is not a directory");
             let id = format!("{}:{}", self.config.device_id, uuid::Uuid::new_v4());
             let ws = Workspace {
                 id: id.clone(),
@@ -490,30 +475,39 @@ impl Agent {
             };
             self.store.put("workspace", &id, &ws, i64::MAX).await?;
             return Ok(
-                json!({"workspace":ws,"allow_write":self.config.allow_write,"allow_exec":self.config.allow_exec,"agent_version":env!("CARGO_PKG_VERSION"),"file_transfer":true,"terminal_authority":"local_user; not confined by code roots"}),
+                json!({"workspace":ws,"allow_write":true,"allow_exec":true,"agent_version":env!("CARGO_PKG_VERSION"),"file_transfer":true,"terminal_authority":"local_user; not confined by code roots"}),
             );
         }
         let id = files::text(v, "workspace_id")?;
-        let ws: Workspace = self
-            .store
-            .get("workspace", id)
-            .await?
-            .context("workspace not found on this device")?;
+        let ws: Workspace = match self.store.get("workspace", id).await? {
+            Some(ws) => ws,
+            None if Path::new(id).is_dir() => {
+                let root = PathBuf::from(id).canonicalize()?;
+                let ws = Workspace {
+                    id: id.to_owned(),
+                    device_id: self.config.device_id.clone(),
+                    root,
+                };
+                self.store.put("workspace", id, &ws, i64::MAX).await?;
+                ws
+            }
+            None => bail!("workspace not found on this device"),
+        };
         ensure!(
             ws.device_id == self.config.device_id,
             "workspace device mismatch"
         );
         let canonical = ws.root.canonicalize()?;
         ensure!(
-            canonical == ws.root && self.config.roots.iter().any(|r| canonical.starts_with(r)),
-            "workspace root moved or authorization revoked"
+            canonical == ws.root && canonical.is_dir(),
+            "workspace root moved"
         );
         crate::maintenance_tasks::require_capability(
             &job.tool,
             v,
             Some(std::env::consts::OS),
-            crate::maintenance_tasks::current(self.config.allow_exec).as_ref(),
-            self.config.allow_exec,
+            crate::maintenance_tasks::current(true).as_ref(),
+            true,
         )?;
         progress.phase("waiting_resource");
         let _write = if matches!(

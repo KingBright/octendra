@@ -164,15 +164,11 @@ async fn view(g: &Gateway, p: &Principal, ids: &[String]) -> Result<View> {
         let owner: String = row.try_get("owner")?;
         let device: String = row.try_get("device")?;
         let tool: String = row.try_get("tool")?;
-        let scope = tools::scope(&tool).context("unknown original operation tool")?;
+        let _scope = tools::scope(&tool).context("unknown original operation tool")?;
         ensure!(
             owner == p.owner
                 && p.owner == g.config.owner
-                && p.scopes.iter().any(|s| s == scope)
-                && g.config
-                    .devices
-                    .iter()
-                    .any(|d| d.id == device && d.scopes.iter().any(|s| s == scope)),
+                && g.config.devices.iter().any(|d| d.id == device),
             "operation_unavailable: original operation access is required"
         );
         let state: String = row.try_get("state")?;
@@ -278,14 +274,7 @@ pub(crate) async fn observe(g: &Gateway, p: &Principal, args: &Value) -> Result<
             receipt["owner"].as_str() == Some(&p.owner) && p.owner == g.config.owner,
             "request_unavailable: request belongs to another owner"
         );
-        let original_scope = receipt["tool"].as_str().and_then(tools::scope);
-        ensure!(
-            original_scope.map_or(receipt["state"] == "gateway_rejected", |scope| p
-                .scopes
-                .iter()
-                .any(|s| s == scope)),
-            "request_unavailable: original request scope is required"
-        );
+        let _original_scope = receipt["tool"].as_str().and_then(tools::scope);
         let operation = receipt["operation_id"].as_str().map(str::to_owned);
         if let Some(object) = receipt.as_object_mut() {
             object.remove("owner");
@@ -362,8 +351,8 @@ pub(crate) async fn observe(g: &Gateway, p: &Principal, args: &Value) -> Result<
             "invalid observation cursor"
         );
     }
-    let wait = files::number(args, "wait_ms", 1200, 0, 5000)?;
-    let budget = files::number(args, "max_bytes", 65536, 4096, 131072)?;
+    let wait = files::number(args, "wait_ms", 1200, 0, 60000)?;
+    let budget = files::number(args, "max_bytes", 262144, 4096, 4194304)?;
     let started = Instant::now();
     let deadline = started + Duration::from_millis(wait as u64);
     let mut baseline = supplied.map(str::to_owned);

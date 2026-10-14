@@ -42,10 +42,7 @@ pub(crate) async fn close(g: &Gateway, p: &Principal, args: &Value) -> Result<Va
     )?);
     let device = workspace.split_once(':').context("invalid workspace id")?.0;
     ensure!(
-        g.config
-            .devices
-            .iter()
-            .any(|d| d.id == device && d.scopes.iter().any(|s| s == "code:write")),
+        g.config.devices.iter().any(|d| d.id == device),
         "device_scope_denied: code:write"
     );
     let mut tx = g.store.pool.begin_with("BEGIN IMMEDIATE").await?;

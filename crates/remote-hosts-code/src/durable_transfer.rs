@@ -403,7 +403,7 @@ async fn suspended(
     }
     Ok(value)
 }
-fn clean_publication(config: &AgentConfig, j: &Journal) -> Result<()> {
+fn clean_publication(_config: &AgentConfig, j: &Journal) -> Result<()> {
     let Some(name) = &j.publication_temp else {
         return Ok(());
     };
@@ -418,7 +418,7 @@ fn clean_publication(config: &AgentConfig, j: &Journal) -> Result<()> {
     );
     let canonical = j.root.canonicalize()?;
     ensure!(
-        canonical == j.root && config.roots.iter().any(|r| canonical.starts_with(r)),
+        canonical == j.root && canonical.is_dir(),
         "workspace authorization changed"
     );
     let ws = Workspace {
@@ -827,7 +827,7 @@ async fn publish(
         transfers::classify_destination_error(error.into(), "destination_staging", Some(false))
     })?;
     ensure!(
-        canonical == ws.root && config.roots.iter().any(|r| canonical.starts_with(r)),
+        canonical == ws.root && canonical.is_dir(),
         "workspace authorization changed"
     );
     clean_publication(config, j)?;

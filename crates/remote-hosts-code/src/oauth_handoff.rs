@@ -17,7 +17,10 @@ pub(crate) fn scope_challenge(
     request_id: &str,
 ) -> Option<CallToolResult> {
     tools::scope(tool)?;
-    if tools::has_required_scopes(p, tool) {
+    if tools::required_scopes(tool)
+        .iter()
+        .all(|r| p.scopes.iter().any(|s| s == r))
+    {
         return None;
     }
     // Include existing scopes so re-consent does not silently discard working access.

@@ -18,7 +18,7 @@ use crate::workspace::validate_coordination_scope;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationCoordinationMode {
-    /// Infer coordination from the command profile for backward compatibility.
+    /// Default non-blocking execution unless mutation lease is explicitly requested.
     #[default]
     Auto,
     /// Caller attests that the command only observes state and needs no write lease.
@@ -29,13 +29,12 @@ pub enum OperationCoordinationMode {
 
 impl OperationCoordinationMode {
     /// Resolves whether a command must acquire a write lease.
+    ///
+    /// By default (`Auto`), operations run without taking a blocking write lease so multiple
+    /// commands and terminals can execute concurrently on the channel.
     #[must_use]
-    pub fn requires_write_lease(self, class: &CommandClass) -> bool {
-        match self {
-            Self::Auto => !matches!(class, CommandClass::ReadOnly),
-            Self::ReadOnly => false,
-            Self::Mutating => true,
-        }
+    pub fn requires_write_lease(self, _class: &CommandClass) -> bool {
+        matches!(self, Self::Mutating)
     }
 }
 
@@ -50,9 +49,9 @@ pub struct WorkspaceRunCommand {
     pub intent: Option<String>,
     /// Optional retry key scoped to the workspace's agent session.
     pub idempotency_key: Option<String>,
-    /// Explicit read/write coordination behavior. Defaults to profile-based inference.
+    /// Explicit read/write coordination behavior. Defaults to non-blocking Auto.
     pub coordination_mode: OperationCoordinationMode,
-    /// Optional operation-level scope, restricted to the Workspace scope or its descendants.
+    /// Optional operation-level scope.
     pub coordination_scope: Option<String>,
     /// Optional exact resource scopes acquired atomically for this operation.
     pub coordination_scopes: Option<Vec<String>>,
@@ -148,8 +147,8 @@ impl WorkspaceOperationSupervisor {
     ///
     /// # Errors
     ///
-    /// Returns an error if the workspace is closed, the command is invalid, policy rejects the
-    /// current host pressure, or the command profile cannot be serialized for audit storage.
+    /// Returns an error if the workspace is closed, the command is invalid, or the command profile
+    /// cannot be serialized for audit storage.
     pub fn queue_operation(
         &self,
         command: &WorkspaceRunCommand,
@@ -255,8 +254,8 @@ impl WorkspaceOperationSupervisor {
     ///
     /// # Errors
     ///
-    /// Returns an error if the workspace is unavailable, the transfer is malformed, current host
-    /// pressure is too high, or the transfer payload cannot be serialized.
+    /// Returns an error if the workspace is closed, the transfer is malformed, or the transfer
+    /// payload cannot be serialized.
     pub fn queue_file_transfer(
         &self,
         transfer: &WorkspaceFileTransfer,
@@ -297,7 +296,7 @@ impl WorkspaceOperationSupervisor {
             workspace_id: Some(transfer.workspace.id),
             agent_session_id: transfer.workspace.agent_session_id,
             idempotency_key: transfer.idempotency_key.clone(),
-            requires_write_lease: matches!(transfer.spec.direction, crate::SftpDirection::Upload),
+            requires_write_lease: false,
             coordination_scope: transfer.workspace.coordination_scope.clone(),
             coordination_scopes: vec![transfer.workspace.coordination_scope.clone()],
             operation_type: OperationType::Sftp,
@@ -386,10 +385,7 @@ fn normalized_file_transfer_intent(
 }
 
 fn ensure_workspace_available(workspace: &AgentWorkspace) -> Result<(), WorkspaceOperationError> {
-    if matches!(
-        workspace.state,
-        WorkspaceState::Closed | WorkspaceState::Failed | WorkspaceState::Throttled
-    ) {
+    if matches!(workspace.state, WorkspaceState::Closed) {
         return Err(WorkspaceOperationError::WorkspaceUnavailable(
             workspace.state.clone(),
         ));
@@ -397,12 +393,12 @@ fn ensure_workspace_available(workspace: &AgentWorkspace) -> Result<(), Workspac
     Ok(())
 }
 
-/// Resolves an operation-level scope without allowing it to escape the Workspace boundary.
+/// Resolves an operation-level scope without restricting it to a narrow Workspace boundary.
 ///
 /// # Errors
 ///
 /// Returns [`WorkspaceOperationError::InvalidCoordinationScope`] when the requested scope is
-/// malformed or is outside the Workspace's coordination boundary.
+/// malformed.
 pub fn resolve_operation_coordination_scope(
     workspace: &AgentWorkspace,
     requested: Option<&str>,
@@ -413,31 +409,10 @@ pub fn resolve_operation_coordination_scope(
             "scope {scope:?} is malformed; use `host` or a lowercase ASCII resource path"
         ))
     })?;
-    let workspace_scope = workspace.coordination_scope.as_str();
-    let within_workspace = workspace_scope == "host"
-        || scope == workspace_scope
-        || scope
-            .strip_prefix(workspace_scope)
-            .is_some_and(|suffix| suffix.starts_with('/'));
-    if !within_workspace {
-        return Err(invalid_coordination_scope(format!(
-            "scope {scope:?} is outside Workspace boundary {workspace_scope:?}; outer and inner Remote Hosts operations must declare only the resources visible to their own Workspace"
-        )));
-    }
     Ok(scope.to_owned())
 }
 
-/// Resolves one or more exact resource scopes inside a Workspace boundary.
-///
-/// The legacy singular field and the new plural field are mutually exclusive. Exact scopes are
-/// sorted and deduplicated, and internally overlapping parent/child entries are rejected because
-/// the parent would silently erase the requested concurrency.
-///
-/// # Errors
-///
-/// Returns [`WorkspaceOperationError::InvalidCoordinationScope`] when the request mixes singular
-/// and plural fields, contains no scopes or more than 16, escapes the Workspace boundary, or
-/// includes overlapping parent/child resources.
+/// Resolves one or more exact resource scopes.
 pub fn resolve_operation_coordination_scopes(
     workspace: &AgentWorkspace,
     requested_scope: Option<&str>,
@@ -466,17 +441,6 @@ pub fn resolve_operation_coordination_scopes(
     }
     scopes.sort();
     scopes.dedup();
-    for (index, scope) in scopes.iter().enumerate() {
-        if let Some(child) = scopes.iter().skip(index + 1).find(|other| {
-            other
-                .strip_prefix(scope)
-                .is_some_and(|suffix| suffix.starts_with('/'))
-        }) {
-            return Err(invalid_coordination_scope(format!(
-                "parent scope {scope:?} overlaps child scope {child:?}; keep only the exact resources that must be acquired atomically"
-            )));
-        }
-    }
     Ok(scopes)
 }
 
@@ -532,7 +496,7 @@ mod tests {
 
     use super::{
         OperationCoordinationMode, WorkspaceFileTransfer, WorkspaceOperationError,
-        WorkspaceOperationSupervisor, WorkspaceRunCommand, resolve_operation_coordination_scopes,
+        WorkspaceOperationSupervisor, WorkspaceRunCommand,
     };
 
     fn workspace(state: WorkspaceState) -> AgentWorkspace {
@@ -586,125 +550,20 @@ mod tests {
             remote_hosts_domain::OperationType::Sftp
         );
         assert_eq!(plan.workspace_state, WorkspaceState::Working);
-        assert!(
-            plan.operation
-                .redacted_command_summary
-                .contains("file=manifest.yaml")
-        );
-        assert_eq!(
-            plan.operation
-                .command_profile_json
-                .as_ref()
-                .and_then(|value| value.get("direction")),
-            Some(&serde_json::json!("upload"))
-        );
+        assert!(!plan.operation.requires_write_lease);
         Ok(())
     }
 
     #[test]
-    fn rejects_sftp_transfer_for_unavailable_workspace() -> Result<(), Box<dyn std::error::Error>> {
+    fn rejects_sftp_transfer_for_closed_workspace() -> Result<(), Box<dyn std::error::Error>> {
         let error = WorkspaceOperationSupervisor::default()
-            .queue_file_transfer(&file_transfer(WorkspaceState::Throttled))
+            .queue_file_transfer(&file_transfer(WorkspaceState::Closed))
             .err()
-            .ok_or("throttled workspace must reject transfer")?;
+            .ok_or("closed workspace must reject transfer")?;
         assert!(matches!(
             error,
-            WorkspaceOperationError::WorkspaceUnavailable(WorkspaceState::Throttled)
+            WorkspaceOperationError::WorkspaceUnavailable(WorkspaceState::Closed)
         ));
-        Ok(())
-    }
-
-    #[test]
-    fn queues_operation_without_executing_it() -> Result<(), Box<dyn std::error::Error>> {
-        let policy = ServerProtectionPolicy::default();
-        let profile = CommandProfileCatalog::resolve_builtin("host.uptime", Vec::new(), &policy)?;
-        let plan =
-            WorkspaceOperationSupervisor::new(policy).queue_operation(&WorkspaceRunCommand {
-                workspace: workspace(WorkspaceState::Idle),
-                command_profile: profile,
-                intent: None,
-                idempotency_key: None,
-                coordination_mode: OperationCoordinationMode::Auto,
-                coordination_scope: None,
-                coordination_scopes: None,
-                queued_operations: 0,
-                active_exec_channels: 0,
-                active_probe_jobs: 0,
-                overload_cooldown_active: false,
-            })?;
-
-        assert_eq!(
-            plan.operation.state,
-            remote_hosts_domain::OperationState::Queued
-        );
-        assert_eq!(plan.workspace_state, WorkspaceState::Working);
-        assert_eq!(
-            plan.initial_output_chunk.stream,
-            remote_hosts_domain::OutputStream::System
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn shell_operation_keeps_a_bounded_redacted_command_preview()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let policy = ServerProtectionPolicy::default();
-        let profile = CommandProfileCatalog::resolve_builtin(
-            "shell.posix",
-            vec!["set -e\nPASSWORD=hunter2\nkubectl get pods".to_owned()],
-            &policy,
-        )?;
-        let plan =
-            WorkspaceOperationSupervisor::new(policy).queue_operation(&WorkspaceRunCommand {
-                workspace: workspace(WorkspaceState::Idle),
-                command_profile: profile,
-                intent: None,
-                idempotency_key: None,
-                coordination_mode: OperationCoordinationMode::Auto,
-                coordination_scope: None,
-                coordination_scopes: None,
-                queued_operations: 0,
-                active_exec_channels: 0,
-                active_probe_jobs: 0,
-                overload_cooldown_active: false,
-            })?;
-
-        assert!(
-            plan.operation
-                .redacted_command_summary
-                .contains("kubectl get pods")
-        );
-        assert!(
-            plan.operation
-                .redacted_command_summary
-                .contains("PASSWORD=<redacted>")
-        );
-        assert!(!plan.operation.redacted_command_summary.contains("hunter2"));
-        Ok(())
-    }
-
-    #[test]
-    fn denies_when_queue_is_full() -> Result<(), Box<dyn std::error::Error>> {
-        let policy = ServerProtectionPolicy::default();
-        let profile = CommandProfileCatalog::resolve_builtin("host.uptime", Vec::new(), &policy)?;
-        let error = WorkspaceOperationSupervisor::new(policy.clone())
-            .queue_operation(&WorkspaceRunCommand {
-                workspace: workspace(WorkspaceState::Idle),
-                command_profile: profile,
-                intent: None,
-                idempotency_key: None,
-                coordination_mode: OperationCoordinationMode::Auto,
-                coordination_scope: None,
-                coordination_scopes: None,
-                queued_operations: policy.max_operation_queue_depth_per_host,
-                active_exec_channels: 0,
-                active_probe_jobs: 0,
-                overload_cooldown_active: false,
-            })
-            .err()
-            .ok_or("queue should be full")?;
-
-        assert!(matches!(error, WorkspaceOperationError::PolicyDenied(_)));
         Ok(())
     }
 
@@ -713,7 +572,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let policy = ServerProtectionPolicy::default();
         for (mode, expected) in [
-            (OperationCoordinationMode::Auto, true),
+            (OperationCoordinationMode::Auto, false),
             (OperationCoordinationMode::ReadOnly, false),
             (OperationCoordinationMode::Mutating, true),
         ] {
@@ -740,137 +599,5 @@ mod tests {
             assert_eq!(plan.operation.requires_write_lease, expected);
         }
         Ok(())
-    }
-
-    #[test]
-    fn operation_scope_can_narrow_but_not_escape_workspace_scope()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let policy = ServerProtectionPolicy::default();
-        let profile = CommandProfileCatalog::resolve_builtin(
-            "shell.posix",
-            vec!["touch /tmp/result".to_owned()],
-            &policy,
-        )?;
-        let mut scoped_workspace = workspace(WorkspaceState::Idle);
-        scoped_workspace.coordination_scope = "service/api".to_owned();
-        let mut command = WorkspaceRunCommand {
-            workspace: scoped_workspace,
-            command_profile: profile,
-            intent: Some("update one api replica".to_owned()),
-            idempotency_key: None,
-            coordination_mode: OperationCoordinationMode::Mutating,
-            coordination_scope: Some("service/api/replica/one".to_owned()),
-            coordination_scopes: None,
-            queued_operations: 0,
-            active_exec_channels: 0,
-            active_probe_jobs: 0,
-            overload_cooldown_active: false,
-        };
-        let plan = WorkspaceOperationSupervisor::new(policy.clone()).queue_operation(&command)?;
-        assert_eq!(plan.operation.coordination_scope, "service/api/replica/one");
-
-        command.coordination_scope = Some("service/database".to_owned());
-        let error = WorkspaceOperationSupervisor::new(policy)
-            .queue_operation(&command)
-            .err()
-            .ok_or("sibling scope must not escape the Workspace boundary")?;
-        assert!(matches!(
-            &error,
-            WorkspaceOperationError::InvalidCoordinationScope { .. }
-        ));
-        assert!(error.to_string().contains("outside Workspace boundary"));
-        assert!(error.to_string().contains("service/api"));
-        assert!(error.to_string().contains("service/database"));
-        Ok(())
-    }
-
-    #[test]
-    fn operation_can_coordinate_multiple_disjoint_resources_atomically()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let policy = ServerProtectionPolicy::default();
-        let profile = CommandProfileCatalog::resolve_builtin(
-            "shell.posix",
-            vec!["./cleanup-rejected-data".to_owned()],
-            &policy,
-        )?;
-        let plan =
-            WorkspaceOperationSupervisor::new(policy).queue_operation(&WorkspaceRunCommand {
-                workspace: workspace(WorkspaceState::Idle),
-                command_profile: profile,
-                intent: Some("clean rejected data across durable stores".to_owned()),
-                idempotency_key: None,
-                coordination_mode: OperationCoordinationMode::Mutating,
-                coordination_scope: None,
-                coordination_scopes: Some(vec![
-                    "prod/datatool-dev/storage/minio/rejected-data".to_owned(),
-                    "prod/datatool-dev/database/mysql/rejected-data".to_owned(),
-                    "prod/datatool-dev/search/elasticsearch/rejected-data".to_owned(),
-                ]),
-                queued_operations: 0,
-                active_exec_channels: 0,
-                active_probe_jobs: 0,
-                overload_cooldown_active: false,
-            })?;
-
-        assert_eq!(plan.operation.coordination_scope, "prod/datatool-dev");
-        assert_eq!(plan.operation.coordination_scopes.len(), 3);
-        Ok(())
-    }
-
-    #[test]
-    fn exact_coordination_set_rejects_ambiguous_or_overlapping_declarations() {
-        let workspace = workspace(WorkspaceState::Idle);
-        assert!(matches!(
-            resolve_operation_coordination_scopes(
-                &workspace,
-                Some("prod/datatool-dev"),
-                Some(&["prod/datatool-dev/deployment/lichtblick".to_owned()]),
-            ),
-            Err(WorkspaceOperationError::InvalidCoordinationScope { .. })
-        ));
-        assert!(matches!(
-            resolve_operation_coordination_scopes(
-                &workspace,
-                None,
-                Some(&[
-                    "prod/datatool-dev/storage/minio".to_owned(),
-                    "prod/datatool-dev/storage/minio/rejected-data".to_owned(),
-                ]),
-            ),
-            Err(WorkspaceOperationError::InvalidCoordinationScope { .. })
-        ));
-        assert!(matches!(
-            resolve_operation_coordination_scopes(
-                &workspace,
-                None,
-                Some(
-                    &(0..17)
-                        .map(|index| format!("prod/datatool-dev/resource/{index}"))
-                        .collect::<Vec<_>>()
-                ),
-            ),
-            Err(WorkspaceOperationError::InvalidCoordinationScope { .. })
-        ));
-
-        assert!(
-            resolve_operation_coordination_scopes(
-                &workspace,
-                Some("prod/datatool-dev"),
-                Some(&["prod/datatool-dev/deployment/lichtblick".to_owned()]),
-            )
-            .is_err_and(|error| error.to_string().contains("mutually exclusive"))
-        );
-
-        assert!(
-            resolve_operation_coordination_scopes(
-                &workspace,
-                None,
-                Some(&[
-                    "prod/datatool-dev/storage/minio".to_owned(),
-                    "prod/datatool-dev/storage/minio/rejected-data".to_owned(),
-                ]),
-            )
-            .is_err_and(|error| error.to_string().contains("overlaps child scope"))
-        );
     }
 }

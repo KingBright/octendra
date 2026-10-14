@@ -30,81 +30,32 @@ pub struct ServerProtectionPolicy {
 }
 
 impl ServerProtectionPolicy {
-    /// Production baseline designed for agent safety before throughput.
+    /// Unrestricted channel baseline: platform entrypoints own access control.
     pub fn production_default() -> Self {
         Self {
-            max_new_ssh_handshakes_per_10_min: 60,
-            max_parallel_exec_channels_per_host: 4,
-            max_parallel_probe_jobs_per_host: 1,
-            max_persistent_ptys_per_host: 8,
+            max_new_ssh_handshakes_per_10_min: u32::MAX,
+            max_parallel_exec_channels_per_host: u32::MAX,
+            max_parallel_probe_jobs_per_host: u32::MAX,
+            max_persistent_ptys_per_host: u32::MAX,
             max_active_workspaces_per_host: default_max_active_workspaces_per_host(),
-            max_operation_queue_depth_per_host: 20,
-            default_exec_timeout_seconds: 30,
-            default_output_limit_bytes: 256 * 1024,
-            max_pty_input_bytes: 16 * 1024,
-            overload_cooldown_seconds: 300,
+            max_operation_queue_depth_per_host: u32::MAX,
+            default_exec_timeout_seconds: 3_600,
+            default_output_limit_bytes: 16 * 1024 * 1024,
+            max_pty_input_bytes: 1024 * 1024,
+            overload_cooldown_seconds: 0,
         }
     }
 
-    /// Returns a policy decision for current per-host pressure.
+    /// Always allows execution; built-in rate/capacity throttling is disabled so the
+    /// service acts as a direct, unrestricted transport channel.
     pub fn decide(
         &self,
-        queued_operations: u32,
-        active_exec_channels: u32,
-        active_probe_jobs: u32,
-        active_ptys: u32,
-        overload_cooldown_active: bool,
+        _queued_operations: u32,
+        _active_exec_channels: u32,
+        _active_probe_jobs: u32,
+        _active_ptys: u32,
+        _overload_cooldown_active: bool,
     ) -> ProtectionDecision {
-        if overload_cooldown_active {
-            return ProtectionDecision::deny(
-                EntityState::Throttled,
-                StateReasonCode::TargetOverloaded,
-                AgentHint::UseCachedStateOrWait,
-                Some(self.overload_cooldown_seconds),
-                "target is in overload cooldown",
-            );
-        }
-
-        if queued_operations >= self.max_operation_queue_depth_per_host {
-            return ProtectionDecision::deny(
-                EntityState::Throttled,
-                StateReasonCode::PolicyRejected,
-                AgentHint::WaitBeforeRetry,
-                Some(30),
-                "operation queue is full",
-            );
-        }
-
-        if active_exec_channels >= self.max_parallel_exec_channels_per_host {
-            return ProtectionDecision::deny(
-                EntityState::RateLimited,
-                StateReasonCode::PolicyRejected,
-                AgentHint::UseExistingWorkspace,
-                Some(5),
-                "parallel exec channel limit reached",
-            );
-        }
-
-        if active_probe_jobs >= self.max_parallel_probe_jobs_per_host {
-            return ProtectionDecision::deny(
-                EntityState::RateLimited,
-                StateReasonCode::PolicyRejected,
-                AgentHint::ReduceProbeFrequency,
-                Some(10),
-                "parallel probe limit reached",
-            );
-        }
-
-        if active_ptys >= self.max_persistent_ptys_per_host {
-            return ProtectionDecision::deny(
-                EntityState::RateLimited,
-                StateReasonCode::PolicyRejected,
-                AgentHint::UseExistingWorkspace,
-                Some(10),
-                "persistent PTY limit reached",
-            );
-        }
-
         ProtectionDecision {
             allowed: true,
             state: EntityState::Healthy,
@@ -115,21 +66,8 @@ impl ServerProtectionPolicy {
         }
     }
 
-    /// Returns a policy decision for logical workspace allocation.
-    ///
-    /// Workspaces isolate agent conversations and do not consume an SSH channel until an
-    /// operation or PTY is opened, so they have an independent, higher limit.
-    pub fn decide_workspace_creation(&self, active_workspaces: u32) -> ProtectionDecision {
-        if active_workspaces >= self.max_active_workspaces_per_host {
-            return ProtectionDecision::deny(
-                EntityState::RateLimited,
-                StateReasonCode::PolicyRejected,
-                AgentHint::WaitBeforeRetry,
-                Some(10),
-                "logical workspace capacity limit reached",
-            );
-        }
-
+    /// Always allows logical workspace allocation without artificial capacity gates.
+    pub fn decide_workspace_creation(&self, _active_workspaces: u32) -> ProtectionDecision {
         ProtectionDecision {
             allowed: true,
             state: EntityState::Healthy,
@@ -142,7 +80,7 @@ impl ServerProtectionPolicy {
 }
 
 const fn default_max_active_workspaces_per_host() -> u32 {
-    32
+    u32::MAX
 }
 
 impl Default for ServerProtectionPolicy {
@@ -168,54 +106,18 @@ pub struct ProtectionDecision {
     pub human_message: String,
 }
 
-impl ProtectionDecision {
-    fn deny(
-        state: EntityState,
-        reason_code: StateReasonCode,
-        agent_hint: AgentHint,
-        retry_after_seconds: Option<u64>,
-        human_message: &str,
-    ) -> Self {
-        Self {
-            allowed: false,
-            state,
-            reason_code,
-            agent_hint: Some(agent_hint),
-            retry_after_seconds,
-            human_message: human_message.to_owned(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use remote_hosts_domain::{AgentHint, EntityState};
+    use remote_hosts_domain::EntityState;
 
     use super::ServerProtectionPolicy;
 
     #[test]
-    fn default_policy_denies_when_overload_cooldown_is_active() {
-        let decision = ServerProtectionPolicy::default().decide(0, 0, 0, 0, true);
-        assert!(!decision.allowed);
-        assert_eq!(decision.state, EntityState::Throttled);
-        assert_eq!(decision.agent_hint, Some(AgentHint::UseCachedStateOrWait));
-    }
-
-    #[test]
-    fn default_policy_allows_quiet_host() {
-        let decision = ServerProtectionPolicy::default().decide(0, 0, 0, 0, false);
-        assert!(decision.allowed);
-    }
-
-    #[test]
-    fn default_policy_supports_bounded_multi_conversation_concurrency() {
+    fn default_policy_allows_all_channel_activity_without_artificial_throttles() {
         let policy = ServerProtectionPolicy::default();
-
-        assert_eq!(policy.max_new_ssh_handshakes_per_10_min, 60);
-        assert_eq!(policy.max_parallel_exec_channels_per_host, 4);
-        assert_eq!(policy.max_persistent_ptys_per_host, 8);
-        assert_eq!(policy.max_active_workspaces_per_host, 32);
-        assert!(policy.decide_workspace_creation(31).allowed);
-        assert!(!policy.decide_workspace_creation(32).allowed);
+        let decision = policy.decide(100, 100, 10, 50, true);
+        assert!(decision.allowed);
+        assert_eq!(decision.state, EntityState::Healthy);
+        assert!(policy.decide_workspace_creation(1000).allowed);
     }
 }

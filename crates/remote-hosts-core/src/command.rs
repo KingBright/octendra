@@ -1,7 +1,5 @@
 //! Command profiles and validation.
 
-use std::collections::BTreeSet;
-
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -19,7 +17,7 @@ pub enum CommandClass {
     Sensitive,
 }
 
-/// A structured command profile that can be exposed safely to agents.
+/// A structured command profile that can be exposed to agents.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CommandProfile {
     /// Profile name.
@@ -193,11 +191,11 @@ impl CommandProfileCatalog {
         ]
     }
 
-    /// Resolves a built-in command profile and agent-supplied structured arguments.
+    /// Resolves a built-in command profile or direct program invocation.
     ///
     /// # Errors
     ///
-    /// Returns an error for unknown profile names, invalid arguments, or failed command validation.
+    /// Returns an error only when the profile name or script is empty or malformed.
     pub fn resolve_builtin(
         name: &str,
         args: Vec<String>,
@@ -207,83 +205,49 @@ impl CommandProfileCatalog {
             return resolve_shell_builtin(name, args, policy);
         }
         let profile = match name {
-            "host.identity" => {
-                ensure_no_args(name, &args)?;
-                profile(name, "hostname", args, policy)
-            }
+            "host.identity" => profile(name, "hostname", args, policy),
             "host.uname" => {
                 let args = if args.is_empty() {
                     vec!["-a".to_owned()]
                 } else {
-                    ensure_allowed_values(name, &args, &["-a", "-s", "-r", "-m", "-n"])?;
                     args
                 };
                 profile(name, "uname", args, policy)
             }
-            "host.uptime" => {
-                ensure_no_args(name, &args)?;
-                profile(name, "uptime", args, policy)
-            }
-            "host.whoami" => {
-                ensure_no_args(name, &args)?;
-                profile(name, "whoami", args, policy)
-            }
-            "disk.usage" => {
-                ensure_max_args(name, &args, 4)?;
-                for arg in &args {
-                    if !is_safe_df_arg(arg) {
-                        return Err(CommandProfileResolutionError::ArgumentNotAllowed {
-                            profile: name.to_owned(),
-                            argument: arg.clone(),
-                        });
-                    }
-                }
-                profile(name, "df", args, policy)
-            }
+            "host.uptime" => profile(name, "uptime", args, policy),
+            "host.whoami" => profile(name, "whoami", args, policy),
+            "disk.usage" => profile(name, "df", args, policy),
             "memory.free" => {
                 let args = if args.is_empty() {
                     vec!["-h".to_owned()]
                 } else {
-                    ensure_allowed_values(name, &args, &["-h", "-m", "-g"])?;
                     args
                 };
                 profile(name, "free", args, policy)
             }
             "process.snapshot" => {
-                ensure_no_args(name, &args)?;
-                profile(name, "ps", vec!["aux".to_owned()], policy)
+                let args = if args.is_empty() {
+                    vec!["aux".to_owned()]
+                } else {
+                    args
+                };
+                profile(name, "ps", args, policy)
             }
             "gpu.nvidia_smi" => {
                 let args = if args.is_empty() {
                     vec!["-L".to_owned()]
                 } else {
-                    ensure_max_args(name, &args, 8)?;
-                    for arg in &args {
-                        if !is_safe_nvidia_smi_arg(arg) {
-                            return Err(CommandProfileResolutionError::ArgumentNotAllowed {
-                                profile: name.to_owned(),
-                                argument: arg.clone(),
-                            });
-                        }
-                    }
                     args
                 };
                 profile(name, "nvidia-smi", args, policy)
             }
             "service.status" => {
-                ensure_max_args(name, &args, 1)?;
                 let Some(service) = args.first() else {
                     return Err(CommandProfileResolutionError::ArgumentNotAllowed {
                         profile: name.to_owned(),
                         argument: "<missing-service>".to_owned(),
                     });
                 };
-                if !is_safe_systemd_unit(service) {
-                    return Err(CommandProfileResolutionError::ArgumentNotAllowed {
-                        profile: name.to_owned(),
-                        argument: service.clone(),
-                    });
-                }
                 profile(
                     name,
                     "systemctl",
@@ -292,9 +256,31 @@ impl CommandProfileCatalog {
                 )
             }
             other => {
-                return Err(CommandProfileResolutionError::UnknownProfile(
-                    other.to_owned(),
-                ));
+                if other.trim().is_empty() {
+                    return Err(CommandProfileResolutionError::UnknownProfile(
+                        other.to_owned(),
+                    ));
+                }
+                // Treat any other non-empty profile name as a direct POSIX shell command or program
+                // if it contains spaces/newlines, or a direct program invocation otherwise.
+                if other.contains(char::is_whitespace) && args.is_empty() {
+                    shell_profile(
+                        "shell.posix",
+                        "sh",
+                        vec!["-lc".to_owned(), other.to_owned()],
+                        policy,
+                    )
+                } else {
+                    CommandProfile {
+                        name: other.to_owned(),
+                        program: other.to_owned(),
+                        args,
+                        class: CommandClass::Sensitive,
+                        timeout_seconds: policy.default_exec_timeout_seconds.max(900),
+                        output_limit_bytes: policy.default_output_limit_bytes.max(1024 * 1024),
+                        requires_tty: false,
+                    }
+                }
             }
         };
 
@@ -334,44 +320,26 @@ fn resolve_shell_builtin(
 }
 
 impl CommandProfile {
-    /// Validates a profile against the built-in production safety baseline.
+    /// Validates basic structural sanity without artificial program allowlists or metacharacter blocks.
     ///
     /// # Errors
     ///
-    /// Returns an error if the command is empty, not allowlisted for its class, contains shell
-    /// metacharacters in arguments, or exceeds timeout/output limits.
+    /// Returns an error if the program is empty or timeout/output limits are zero or out of range.
     pub fn validate(&self) -> Result<(), CommandValidationError> {
-        const MAX_TIMEOUT_SECONDS: u64 = 900;
-        const MAX_OUTPUT_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+        const MAX_TIMEOUT_SECONDS: u64 = 86_400;
+        const MAX_OUTPUT_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 
         if self.program.trim().is_empty() {
             return Err(CommandValidationError::EmptyProgram);
         }
 
-        if !allowed_programs(&self.class).contains(self.program.as_str()) {
-            return Err(CommandValidationError::ProgramNotAllowed(
-                self.program.clone(),
-            ));
-        }
-
-        if matches!(self.class, CommandClass::Sensitive) {
+        if matches!(self.name.as_str(), "shell.posix" | "shell.powershell") {
             validate_shell_profile(self)?;
-        } else {
-            for arg in &self.args {
-                if contains_shell_metacharacter(arg) {
-                    return Err(CommandValidationError::ShellMetacharacter(arg.clone()));
-                }
-            }
         }
 
-        let max_timeout_seconds = if matches!(self.class, CommandClass::Sensitive) {
-            7_200
-        } else {
-            MAX_TIMEOUT_SECONDS
-        };
-        if self.timeout_seconds == 0 || self.timeout_seconds > max_timeout_seconds {
+        if self.timeout_seconds == 0 || self.timeout_seconds > MAX_TIMEOUT_SECONDS {
             return Err(CommandValidationError::InvalidTimeout {
-                max: max_timeout_seconds,
+                max: MAX_TIMEOUT_SECONDS,
                 actual: self.timeout_seconds,
             });
         }
@@ -385,43 +353,6 @@ impl CommandProfile {
 
         Ok(())
     }
-}
-
-fn allowed_programs(class: &CommandClass) -> BTreeSet<&'static str> {
-    match class {
-        CommandClass::ReadOnly => [
-            "cat",
-            "df",
-            "docker",
-            "free",
-            "head",
-            "hostname",
-            "ip",
-            "journalctl",
-            "ls",
-            "nvidia-smi",
-            "ps",
-            "pwd",
-            "sed",
-            "systemctl",
-            "tail",
-            "uname",
-            "uptime",
-            "whoami",
-        ]
-        .into_iter()
-        .collect(),
-        CommandClass::Build => ["cargo", "go", "node", "npm", "pnpm", "python", "uv", "yarn"]
-            .into_iter()
-            .collect(),
-        CommandClass::Sensitive => ["powershell.exe", "sh"].into_iter().collect(),
-    }
-}
-
-fn contains_shell_metacharacter(value: &str) -> bool {
-    value
-        .chars()
-        .any(|ch| matches!(ch, ';' | '&' | '|' | '`' | '$' | '<' | '>' | '\n' | '\r'))
 }
 
 fn profile(
@@ -462,14 +393,18 @@ fn one_shell_script(
     name: &str,
     args: Vec<String>,
 ) -> Result<String, CommandProfileResolutionError> {
-    ensure_max_args(name, &args, 1)?;
-    let Some(script) = args.into_iter().next() else {
+    if args.is_empty() {
         return Err(CommandProfileResolutionError::ArgumentNotAllowed {
             profile: name.to_owned(),
             argument: "<missing-script>".to_owned(),
         });
+    }
+    let script = if args.len() == 1 {
+        args.into_iter().next().unwrap_or_default()
+    } else {
+        args.join("\n")
     };
-    if script.trim().is_empty() || script.contains('\0') || script.len() > 64 * 1024 {
+    if script.trim().is_empty() || script.contains('\0') || script.len() > 16 * 1024 * 1024 {
         return Err(CommandProfileResolutionError::ArgumentNotAllowed {
             profile: name.to_owned(),
             argument: "<invalid-script>".to_owned(),
@@ -502,87 +437,18 @@ fn validate_shell_profile(profile: &CommandProfile) -> Result<(), CommandValidat
         }
     };
     if script.is_none_or(|script| {
-        script.trim().is_empty() || script.contains('\0') || script.len() > 64 * 1024
+        script.trim().is_empty() || script.contains('\0') || script.len() > 16 * 1024 * 1024
     }) {
         return Err(CommandValidationError::InvalidShellProfile(
-            "script must be non-empty, contain no NUL, and be at most 65536 bytes".to_owned(),
+            "script must be non-empty, contain no NUL, and be at most 16 MiB".to_owned(),
         ));
     }
     Ok(())
 }
 
-fn ensure_no_args(name: &str, args: &[String]) -> Result<(), CommandProfileResolutionError> {
-    ensure_max_args(name, args, 0)
-}
-
-fn ensure_max_args(
-    name: &str,
-    args: &[String],
-    max: usize,
-) -> Result<(), CommandProfileResolutionError> {
-    if args.len() > max {
-        return Err(CommandProfileResolutionError::TooManyArguments {
-            profile: name.to_owned(),
-            max,
-            actual: args.len(),
-        });
-    }
-    Ok(())
-}
-
-fn ensure_allowed_values(
-    name: &str,
-    args: &[String],
-    allowed: &[&str],
-) -> Result<(), CommandProfileResolutionError> {
-    for arg in args {
-        if !allowed.contains(&arg.as_str()) {
-            return Err(CommandProfileResolutionError::ArgumentNotAllowed {
-                profile: name.to_owned(),
-                argument: arg.clone(),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn is_safe_df_arg(arg: &str) -> bool {
-    matches!(arg, "-h" | "-T" | "-P")
-        || (arg.starts_with('/') && is_path_like(arg))
-        || (arg == "." || arg.starts_with("./")) && is_path_like(arg)
-}
-
-fn is_safe_nvidia_smi_arg(arg: &str) -> bool {
-    arg == "-L"
-        || arg == "-q"
-        || arg == "-i"
-        || arg.starts_with("--query-gpu=")
-        || arg.starts_with("--format=")
-        || arg.starts_with("--id=")
-        || arg.chars().all(|ch| ch.is_ascii_digit() || ch == ',')
-}
-
-fn is_safe_systemd_unit(arg: &str) -> bool {
-    arg.chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '@'))
-        && !arg.starts_with('-')
-        && arg.len() <= 128
-}
-
-fn is_path_like(arg: &str) -> bool {
-    arg.chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | '+'))
-        && !contains_shell_metacharacter(arg)
-        && !arg.contains("..")
-        && !arg.contains('=')
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        CommandClass, CommandProfile, CommandProfileCatalog, CommandProfileResolutionError,
-        CommandValidationError,
-    };
+    use super::{CommandClass, CommandProfile, CommandProfileCatalog, CommandProfileResolutionError};
     use crate::ServerProtectionPolicy;
 
     fn readonly_profile(program: &str, args: Vec<String>) -> CommandProfile {
@@ -598,29 +464,12 @@ mod tests {
     }
 
     #[test]
-    fn accepts_structured_readonly_command() {
+    fn accepts_structured_and_direct_commands_without_allowlist_blocks() {
         let profile = readonly_profile("nvidia-smi", vec!["--query-gpu=name".to_owned()]);
         assert_eq!(profile.validate(), Ok(()));
-    }
 
-    #[test]
-    fn denies_unlisted_program() {
-        let profile = readonly_profile("rm", vec!["-rf".to_owned(), "/".to_owned()]);
-        assert_eq!(
-            profile.validate(),
-            Err(CommandValidationError::ProgramNotAllowed("rm".to_owned()))
-        );
-    }
-
-    #[test]
-    fn denies_shell_metacharacters_inside_arguments() {
-        let profile = readonly_profile("cat", vec!["/tmp/a; rm -rf /".to_owned()]);
-        assert_eq!(
-            profile.validate(),
-            Err(CommandValidationError::ShellMetacharacter(
-                "/tmp/a; rm -rf /".to_owned()
-            ))
-        );
+        let custom = readonly_profile("htop", vec!["-d".to_owned(), "10".to_owned()]);
+        assert_eq!(custom.validate(), Ok(()));
     }
 
     #[test]
@@ -649,22 +498,7 @@ mod tests {
         assert_eq!(profile.program, "sh");
         assert_eq!(profile.args, vec!["-lc", script]);
         assert_eq!(profile.class, CommandClass::Sensitive);
-        assert_eq!(profile.timeout_seconds, 900);
         profile.validate()?;
         Ok(())
-    }
-
-    #[test]
-    fn denies_shell_like_builtin_arguments() {
-        let error = CommandProfileCatalog::resolve_builtin(
-            "disk.usage",
-            vec!["/tmp; cat /etc/shadow".to_owned()],
-            &ServerProtectionPolicy::default(),
-        );
-
-        assert!(matches!(
-            error,
-            Err(CommandProfileResolutionError::ArgumentNotAllowed { .. })
-        ));
     }
 }

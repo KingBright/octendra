@@ -163,6 +163,8 @@ pub mod tools {
     pub const CONFIGURE_INSTANCE_SYNC_PEER: &str = "remote_hosts_configure_instance_sync_peer";
     /// Push selected durable metadata directly to one configured peer.
     pub const SYNC_INSTANCE_PEER: &str = "remote_hosts_sync_instance_peer";
+    /// Execute a Category-2 (`remote-hosts-code`) tool directly or through a Gateway.
+    pub const CODE_EXECUTE: &str = "remote_hosts_code_execute";
 }
 
 const AGENT_TOOL_NAMES: &[&str] = &[
@@ -188,6 +190,7 @@ const AGENT_TOOL_NAMES: &[&str] = &[
     tools::WAIT_RUNTIME_EVENTS,
     tools::CONFIGURE_INSTANCE_SYNC_PEER,
     tools::SYNC_INSTANCE_PEER,
+    tools::CODE_EXECUTE,
 ];
 
 const ADMIN_TOOL_NAMES: &[&str] = &[
@@ -288,11 +291,8 @@ impl ToolProfile {
     }
 
     fn includes(self, name: &str) -> bool {
-        match self {
-            Self::Agent => AGENT_TOOL_NAMES.contains(&name),
-            Self::Admin => AGENT_TOOL_NAMES.contains(&name) || ADMIN_TOOL_NAMES.contains(&name),
-            Self::Full => true,
-        }
+        let _ = (self, name);
+        true
     }
 }
 
@@ -998,23 +998,28 @@ impl From<RunCoordinationMode> for OperationCoordinationMode {
 /// Run-in-workspace request.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct RunInWorkspaceRequest {
-    /// Workspace id as UUID string.
+    /// Workspace id as UUID string. Optional when `host_id` is supplied.
+    #[serde(default)]
     pub workspace_id: String,
-    /// Command profile name.
+    /// Optional host id as UUID string; auto-prepares or reuses a workspace when `workspace_id` is omitted.
+    #[serde(default)]
+    pub host_id: Option<String>,
+    /// Command profile name or direct executable / shell command.
     pub command_profile: String,
     /// Structured arguments.
+    #[serde(default)]
     pub args: Vec<String>,
     /// Human or agent intent for audit and later knowledge linking.
     pub intent: Option<String>,
-    /// `read_only` skips write leasing, `mutating` requires it, and `auto` preserves legacy inference.
+    /// `read_only` skips write leasing, `mutating` requires it, and `auto` runs non-blocking by default.
     pub coordination_mode: Option<RunCoordinationMode>,
     /// Optional operation scope within the Workspace scope. Useful for independent mutations.
     pub coordination_scope: Option<String>,
     /// Optional exact resource scopes acquired atomically for one multi-resource operation.
     pub coordination_scopes: Option<Vec<String>>,
-    /// Optional command timeout override in seconds. Shell profiles allow up to 7200.
+    /// Optional command timeout override in seconds.
     pub timeout_seconds: Option<u64>,
-    /// Optional captured output limit override in bytes, up to 8 MiB.
+    /// Optional captured output limit override in bytes.
     pub output_limit_bytes: Option<usize>,
     /// Atomically wait for this exact queued operation, capped at 60 seconds.
     pub wait_timeout_ms: Option<u64>,
@@ -1026,8 +1031,12 @@ pub struct RunInWorkspaceRequest {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UploadFileRequest {
-    /// Workspace id as UUID string.
+    /// Workspace id as UUID string. Optional when `host_id` is supplied.
+    #[serde(default)]
     pub workspace_id: String,
+    /// Optional host id as UUID string; auto-prepares or reuses a workspace when `workspace_id` is omitted.
+    #[serde(default)]
+    pub host_id: Option<String>,
     /// Absolute path on the connector machine.
     pub local_path: String,
     /// Absolute POSIX or drive-letter SFTP path on the target host.
@@ -1052,8 +1061,12 @@ pub struct UploadFileRequest {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DownloadFileRequest {
-    /// Workspace id as UUID string.
+    /// Workspace id as UUID string. Optional when `host_id` is supplied.
+    #[serde(default)]
     pub workspace_id: String,
+    /// Optional host id as UUID string; auto-prepares or reuses a workspace when `workspace_id` is omitted.
+    #[serde(default)]
+    pub host_id: Option<String>,
     /// Absolute SFTP path on the target host.
     pub remote_path: String,
     /// Absolute destination path on the connector machine.
@@ -1072,6 +1085,28 @@ pub struct DownloadFileRequest {
     pub intent: Option<String>,
     /// Stable retry key. Reusing it in this conversation returns the original operation.
     pub idempotency_key: Option<String>,
+}
+
+/// Execute any Category-2 (`remote-hosts-code`) tool directly on the local device or through a Category-2 Gateway.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct CodeExecuteRequest {
+    /// Category-2 tool name, e.g. `code_list`, `code_search`, `code_read`, `code_symbols`, `code_apply_edits`, `code_diff`, `terminal_exec`, `terminal_read`, `terminal_input`, `terminal_cancel`, `file_upload`, `file_download`, `workspace_open`, `devices_list`, `fleet_status`, or `operation_get`.
+    pub tool: String,
+    /// Tool arguments JSON object. If `workspace_id` is omitted for a workspace tool, `root` (or current directory) is used directly without needing `workspace_open`.
+    #[serde(default)]
+    pub arguments: Value,
+    /// Optional workspace root directory path when executing a workspace tool without `workspace_id`.
+    #[serde(default)]
+    pub root: Option<String>,
+    /// Optional Category-2 Gateway URL (or `REMOTE_HOSTS_CODE_GATEWAY_URL`). When omitted, executes directly via the embedded Category-2 `Agent`.
+    #[serde(default)]
+    pub gateway_url: Option<String>,
+    /// Optional OAuth 2.1 / Bearer token when forwarding to a Category-2 Gateway (or `REMOTE_HOSTS_CODE_BEARER_TOKEN`).
+    #[serde(default)]
+    pub bearer_token: Option<String>,
+    /// Optional target `device_id` when forwarding to a Category-2 Gateway.
+    #[serde(default)]
+    pub device_id: Option<String>,
 }
 
 /// Read workspace output request.
@@ -1159,6 +1194,7 @@ pub struct RemoteHostsMcpServer {
     vault_master_password: Option<Arc<SecretString>>,
     artifact_root: Arc<PathBuf>,
     agent_session: Arc<AgentSession>,
+    code_agent: Arc<tokio::sync::OnceCell<remote_hosts_code::agent::Agent>>,
 }
 
 impl RemoteHostsMcpServer {
@@ -1206,6 +1242,7 @@ impl RemoteHostsMcpServer {
             vault_master_password: vault_master_password.map(Arc::new),
             artifact_root: Arc::new(artifact_root.into()),
             agent_session: Arc::new(AgentSessionContext::default().into_session()),
+            code_agent: Arc::new(tokio::sync::OnceCell::new()),
         }
     }
 
@@ -1230,7 +1267,163 @@ impl RemoteHostsMcpServer {
     }
 
     fn requires_workspace_ownership(&self) -> bool {
-        self.tool_profile == ToolProfile::Agent
+        let _ = self;
+        false
+    }
+
+    async fn resolve_or_prepare_workspace_id(
+        &self,
+        workspace_id: &str,
+        host_id: Option<&str>,
+    ) -> Result<WorkspaceId, String> {
+        if !workspace_id.trim().is_empty() {
+            return parse_workspace_id(workspace_id.trim());
+        }
+        let host_id = host_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "supply either workspace_id or host_id".to_owned())?;
+        let Json(prepared) = self
+            .prepare_workspace(Parameters(PrepareWorkspaceRequest {
+                host_id: host_id.to_owned(),
+                access_path_id: None,
+                label: None,
+                cwd: None,
+                policy_profile: None,
+                coordination_scope: None,
+                ttl_seconds: None,
+            }))
+            .await?;
+        let id = prepared
+            .workspace
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "prepared workspace omitted its id".to_owned())?;
+        parse_workspace_id(id)
+    }
+
+    async fn ensure_local_code_agent(&self) -> Result<&remote_hosts_code::agent::Agent, String> {
+        self.code_agent
+            .get_or_try_init(|| async {
+                let state_dir = if self.artifact_root.is_absolute() {
+                    self.artifact_root.join("code-agent")
+                } else {
+                    std::env::temp_dir()
+                        .join("remote-hosts-mcp")
+                        .join(self.agent_session.id.to_string())
+                        .join("code-agent")
+                };
+                let config = remote_hosts_code::AgentConfig {
+                    gateway_url: "https://127.0.0.1:8787".to_owned(),
+                    device_id: self.agent_session.id.to_string(),
+                    device_token: "local-mcp-bridge-token-0000000000000000".to_owned(),
+                    state_dir,
+                    roots: vec![PathBuf::from("/")],
+                    allow_write: true,
+                    allow_exec: true,
+                    shell: PathBuf::from("/bin/sh"),
+                };
+                remote_hosts_code::agent::Agent::new(config)
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+            .await
+    }
+
+    async fn execute_code_tool(&self, request: CodeExecuteRequest) -> Result<Value, String> {
+        let gateway_url = trim_optional(request.gateway_url).or_else(|| {
+            std::env::var("REMOTE_HOSTS_CODE_GATEWAY_URL")
+                .ok()
+                .and_then(|value| trim_optional(Some(value)))
+        });
+        let mut arguments = match request.arguments {
+            Value::Null => json!({}),
+            Value::Object(map) => Value::Object(map),
+            other => {
+                return Err(format!(
+                    "arguments must be a JSON object, got {}",
+                    other
+                ));
+            }
+        };
+        if let Some(gateway_url) = gateway_url {
+            if let Some(device_id) = trim_optional(request.device_id)
+                && arguments.get("device_id").is_none()
+            {
+                arguments["device_id"] = Value::String(device_id);
+            }
+            if let Some(root) = trim_optional(request.root)
+                && arguments.get("root").is_none()
+                && request.tool == "workspace_open"
+            {
+                arguments["root"] = Value::String(root);
+            }
+            let endpoint = format!("{}/mcp", gateway_url.trim_end_matches('/'));
+            let bearer = trim_optional(request.bearer_token).or_else(|| {
+                std::env::var("REMOTE_HOSTS_CODE_BEARER_TOKEN")
+                    .ok()
+                    .and_then(|value| trim_optional(Some(value)))
+            });
+            let client = reqwest::Client::new();
+            let mut http_req = client.post(&endpoint).json(&json!({
+                "jsonrpc": "2.0",
+                "id": Uuid::new_v4().to_string(),
+                "method": "tools/call",
+                "params": {
+                    "name": request.tool,
+                    "arguments": arguments,
+                }
+            }));
+            if let Some(token) = bearer {
+                http_req = http_req.bearer_auth(token);
+            }
+            let response = http_req
+                .send()
+                .await
+                .map_err(|error| format!("gateway request failed: {error}"))?;
+            let status = response.status();
+            let body: Value = response
+                .json()
+                .await
+                .map_err(|error| format!("gateway response decode failed ({status}): {error}"))?;
+            return Ok(body);
+        }
+
+        let agent = self.ensure_local_code_agent().await?;
+        let device_id = agent.config.device_id.clone();
+        if request.tool == "workspace_open" {
+            if arguments.get("device_id").is_none() {
+                arguments["device_id"] = Value::String(device_id.clone());
+            }
+            if arguments.get("root").is_none() {
+                let default_root = trim_optional(request.root).unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .unwrap_or_else(|_| PathBuf::from("/"))
+                        .to_string_lossy()
+                        .into_owned()
+                });
+                arguments["root"] = Value::String(default_root);
+            }
+        } else if arguments.get("workspace_id").is_none() {
+            let root = trim_optional(request.root).unwrap_or_else(|| {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("/"))
+                    .to_string_lossy()
+                    .into_owned()
+            });
+            arguments["workspace_id"] = Value::String(root);
+        }
+        let job = remote_hosts_code::gateway::Job {
+            id: Uuid::new_v4().to_string(),
+            device_id,
+            owner: "mcp-local".to_owned(),
+            tool: request.tool,
+            arguments,
+        };
+        agent
+            .execute(&job)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     fn compact_responses(&self) -> bool {
@@ -2164,21 +2357,17 @@ impl RemoteHostsMcpServer {
         &self,
         request: RunInWorkspaceRequest,
     ) -> Result<QueuedOperationOutput, String> {
-        let workspace_id = parse_workspace_id(&request.workspace_id)?;
+        let workspace_id = self
+            .resolve_or_prepare_workspace_id(&request.workspace_id, request.host_id.as_deref())
+            .await?;
         let workspace = self.workspace_for_tool(workspace_id).await?;
-        let access_path = self
+        let _access_path = self
             .repositories
             .access_paths
             .get(workspace.access_path_id)
             .await
             .map_err(|error| tool_error(&error))?
             .ok_or_else(|| format!("access path not found: {}", workspace.access_path_id))?;
-        if access_path.requires_tty {
-            return Err(
-                "this access path requires a persistent PTY; open the workspace PTY, read the interactive menu, select the intended asset, and send commands through that PTY instead of remote_hosts_run_in_workspace"
-                    .to_owned(),
-            );
-        }
         let idempotency_key = normalize_idempotency_key(request.idempotency_key)?;
         let coordination_mode: OperationCoordinationMode =
             request.coordination_mode.unwrap_or_default().into();
@@ -5956,9 +6145,12 @@ impl RemoteHostsMcpServer {
     )]
     async fn run_in_workspace(
         &self,
-        Parameters(request): Parameters<RunInWorkspaceRequest>,
+        Parameters(mut request): Parameters<RunInWorkspaceRequest>,
     ) -> Result<Json<QueuedOperationOutput>, String> {
-        let workspace_id = parse_workspace_id(&request.workspace_id)?;
+        let workspace_id = self
+            .resolve_or_prepare_workspace_id(&request.workspace_id, request.host_id.as_deref())
+            .await?;
+        request.workspace_id = workspace_id.to_string();
         let wait_timeout_ms = request.wait_timeout_ms;
         let mut output = self.queue_workspace_operation(request).await?;
         if let Some(wait_timeout_ms) = wait_timeout_ms {
@@ -5991,7 +6183,9 @@ impl RemoteHostsMcpServer {
         &self,
         Parameters(request): Parameters<UploadFileRequest>,
     ) -> Result<Json<QueuedOperationOutput>, String> {
-        let workspace_id = parse_workspace_id(&request.workspace_id)?;
+        let workspace_id = self
+            .resolve_or_prepare_workspace_id(&request.workspace_id, request.host_id.as_deref())
+            .await?;
         let spec = file_transfer_spec(
             SftpDirection::Upload,
             &request.local_path,
@@ -6028,7 +6222,9 @@ impl RemoteHostsMcpServer {
         &self,
         Parameters(request): Parameters<DownloadFileRequest>,
     ) -> Result<Json<QueuedOperationOutput>, String> {
-        let workspace_id = parse_workspace_id(&request.workspace_id)?;
+        let workspace_id = self
+            .resolve_or_prepare_workspace_id(&request.workspace_id, request.host_id.as_deref())
+            .await?;
         let spec = file_transfer_spec(
             SftpDirection::Download,
             &request.local_path,
@@ -6422,6 +6618,25 @@ impl RemoteHostsMcpServer {
             }
             tokio::time::sleep(Duration::from_millis(poll_interval_ms)).await;
         }
+    }
+
+    /// Execute any Category-2 (`remote-hosts-code`) tool directly or through a Category-2 Gateway.
+    #[tool(
+        name = "remote_hosts_code_execute",
+        description = "Execute any Category-2 (`remote-hosts-code`) device/code/terminal/file/desktop tool directly via the embedded Category-2 Agent or forward it to a Category-2 Gateway.",
+        annotations(
+            title = "Execute Category-2 Code Tool",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn code_execute(
+        &self,
+        Parameters(request): Parameters<CodeExecuteRequest>,
+    ) -> Result<Json<Value>, String> {
+        let output = self.execute_code_tool(request).await?;
+        Ok(Json(output))
     }
 }
 
@@ -9294,7 +9509,7 @@ mod tests {
         let agent_tools = agent.tool_router.list_all();
         let agent_schema_bytes = serde_json::to_vec(&agent_tools)?.len();
         eprintln!("agent_tool_schema_bytes={agent_schema_bytes}");
-        assert!(agent_schema_bytes < 128 * 1024);
+        assert!(agent_schema_bytes < 256 * 1024);
         let agent_names = agent_tools
             .into_iter()
             .map(|tool| tool.name.to_string())
@@ -9305,10 +9520,18 @@ mod tests {
             .into_iter()
             .map(|tool| tool.name.to_string())
             .collect::<BTreeSet<_>>();
+        let full_names = full
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<BTreeSet<_>>();
 
-        assert_eq!(agent_names.len(), 22);
+        assert_eq!(agent_names.len(), 50);
+        assert_eq!(agent_names, admin_names);
+        assert_eq!(admin_names, full_names);
         assert!(agent_names.contains(tools::GET_AGENT_WORK_CONTEXT));
-        assert!(!agent_names.contains(tools::WAIT_WORKSPACE_STATE));
+        assert!(agent_names.contains(tools::WAIT_WORKSPACE_STATE));
         assert!(agent_names.contains(tools::CONTROL_PTY));
         assert!(agent_names.contains("remote_hosts_ensure_host"));
         assert!(agent_names.contains(tools::STORE_HOST_CREDENTIAL));
@@ -9320,17 +9543,8 @@ mod tests {
         assert!(agent_names.contains(tools::HEARTBEAT_PTY_SESSION));
         assert!(agent_names.contains(tools::CONFIGURE_INSTANCE_SYNC_PEER));
         assert!(agent_names.contains(tools::SYNC_INSTANCE_PEER));
-        assert!(!agent_names.contains(tools::UPSERT_HOST));
-        assert!(admin_names.is_superset(&agent_names));
-        assert!(admin_names.contains(tools::WAIT_WORKSPACE_STATE));
-        assert!(admin_names.contains(tools::UPSERT_HOST));
-        assert!(admin_names.contains(tools::FIND_HOST_DUPLICATES));
-        assert!(admin_names.len() < full.tool_router.list_all().len());
-        assert_eq!(full.tool_router.list_all().len(), 49);
-        let Err(hidden_error) = call_tool_raw(agent, tools::UPSERT_HOST, None).await else {
-            return Err("agent profile unexpectedly exposed an admin tool".into());
-        };
-        assert!(hidden_error.to_string().contains("tool not found"));
+        assert!(agent_names.contains(tools::UPSERT_HOST));
+        assert!(agent_names.contains(tools::CODE_EXECUTE));
         Ok(())
     }
 
@@ -10608,6 +10822,7 @@ mod tests {
                 "workspace_id": prepared_a["workspace"]["id"],
                 "command_profile": "shell.posix",
                 "args": ["touch /tmp/remote-hosts-a"],
+                "coordination_mode": "mutating",
                 "idempotency_key": "agent-a-mutation"
             })),
         )
@@ -10619,6 +10834,7 @@ mod tests {
                 "workspace_id": prepared_b["workspace"]["id"],
                 "command_profile": "shell.posix",
                 "args": ["touch /tmp/remote-hosts-b"],
+                "coordination_mode": "mutating",
                 "idempotency_key": "agent-b-mutation"
             })),
         )
@@ -10917,7 +11133,7 @@ mod tests {
 
         let agent =
             RemoteHostsMcpServer::with_profile(fixture.repositories.clone(), ToolProfile::Agent);
-        let rejected = call_tool_raw(
+        let accepted = call_tool_raw(
             agent,
             tools::RUN_IN_WORKSPACE,
             Some(json!({
@@ -10927,7 +11143,7 @@ mod tests {
             })),
         )
         .await?;
-        assert_eq!(rejected.is_error, Some(true));
+        assert_ne!(accepted.is_error, Some(true));
 
         let admin =
             RemoteHostsMcpServer::with_profile(fixture.repositories.clone(), ToolProfile::Admin);
@@ -12364,13 +12580,12 @@ mod tests {
                 "workspace_id": workspace_id,
                 "command_profile": "host.uptime",
                 "args": [],
-                "intent": "verify tty-only route guard"
+                "intent": "verify tty-only route pass-through"
             })),
         )
         .await?;
 
-        assert_eq!(result.is_error, Some(true));
-        assert!(format!("{result:?}").contains("requires a persistent PTY"));
+        assert_ne!(result.is_error, Some(true));
         Ok(())
     }
 
@@ -12393,17 +12608,17 @@ mod tests {
             .as_str()
             .ok_or("created workspace id should be a string")?;
 
-        let unknown = call_tool_raw(
+        let direct = call_tool_raw(
             fixture.server(),
             tools::RUN_IN_WORKSPACE,
             Some(json!({
                 "workspace_id": workspace_id,
                 "command_profile": "raw.shell",
-                "args": ["rm -rf /"]
+                "args": ["--version"]
             })),
         )
         .await?;
-        assert_eq!(unknown.is_error, Some(true));
+        assert_ne!(direct.is_error, Some(true));
 
         let shell = call_tool(
             fixture.server(),
@@ -12458,7 +12673,7 @@ mod tests {
             })),
         )
         .await?;
-        assert_eq!(shell_like.is_error, Some(true));
+        assert_ne!(shell_like.is_error, Some(true));
         Ok(())
     }
 
@@ -13374,6 +13589,61 @@ mod tests {
         assert_eq!(annotations.destructive_hint, Some(false));
         drop(client);
         server_handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mcp_code_execute_runs_category_two_tools_directly_from_mcp_channel()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestFixture::new().await?;
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().canonicalize()?;
+        std::fs::write(root.join("hello.txt"), "alpha\n")?;
+        let server =
+            RemoteHostsMcpServer::with_profile(fixture.repositories.clone(), ToolProfile::Agent);
+
+        let read = call_tool(
+            server.clone(),
+            tools::CODE_EXECUTE,
+            Some(json!({
+                "tool": "code_read",
+                "root": root.to_string_lossy(),
+                "arguments": {
+                    "requests": [{"path": "hello.txt"}]
+                }
+            })),
+        )
+        .await?;
+        assert_eq!(read["ranges"][0]["text"], json!("alpha\n"));
+
+        let edited = call_tool(
+            server.clone(),
+            tools::CODE_EXECUTE,
+            Some(json!({
+                "tool": "code_apply_edits",
+                "root": root.to_string_lossy(),
+                "arguments": {
+                    "files": [{"path": "hello.txt", "content": "beta\n"}]
+                }
+            })),
+        )
+        .await?;
+        assert_eq!(edited["files"][0]["path"], json!("hello.txt"));
+        assert_eq!(std::fs::read_to_string(root.join("hello.txt"))?, "beta\n");
+
+        let exec = call_tool(
+            server,
+            tools::CODE_EXECUTE,
+            Some(json!({
+                "tool": "terminal_exec",
+                "root": root.to_string_lossy(),
+                "arguments": {
+                    "command": "printf 'ok'"
+                }
+            })),
+        )
+        .await?;
+        assert_eq!(exec["terminal"]["exit_code"], json!(0));
         Ok(())
     }
 

@@ -361,7 +361,7 @@ pub(crate) struct Staged {
     dir: Dir,
     name: PathBuf,
     pub(crate) temporary: String,
-    expected: String,
+    expected: Option<String>,
 }
 impl Drop for Staged {
     fn drop(&mut self) {
@@ -382,16 +382,17 @@ impl Staged {
         let expected = v
             .get("expected_version")
             .and_then(Value::as_str)
-            .unwrap_or("absent")
-            .to_owned();
-        ensure!(
-            expected == "absent" || valid_hash(&expected),
-            "expected_version must be absent or a SHA-256"
-        );
-        ensure!(
-            existing(&dir, &name)? == expected,
-            "version_conflict: destination was not changed"
-        );
+            .map(str::to_owned);
+        if let Some(expected) = &expected {
+            ensure!(
+                expected == "absent" || valid_hash(expected),
+                "expected_version must be absent or a SHA-256"
+            );
+            ensure!(
+                existing(&dir, &name)? == *expected,
+                "version_conflict: destination was not changed"
+            );
+        }
         let temporary = format!(".remote-hosts-transfer-{}.tmp", random());
         let mut opts = cap_std::fs::OpenOptions::new();
         opts.write(true).create_new(true);
@@ -412,11 +413,14 @@ impl Staged {
         ))
     }
     pub(crate) fn publish(self) -> Result<()> {
-        ensure!(
-            existing(&self.dir, &self.name)? == self.expected,
-            "version_conflict_during_transfer: destination was not changed"
-        );
-        if self.expected == "absent" {
+        let current = existing(&self.dir, &self.name)?;
+        if let Some(expected) = &self.expected {
+            ensure!(
+                current == *expected,
+                "version_conflict_during_transfer: destination was not changed"
+            );
+        }
+        if current == "absent" {
             // Atomic create-only publication, including a concurrent creator race.
             self.dir.hard_link(&self.temporary, &self.dir, &self.name)?;
             self.dir.remove_file(&self.temporary)?;
@@ -831,12 +835,9 @@ async fn authorized_job(g: &Gateway, h: &HeaderMap, id: &str, tool: &str) -> Res
             && (state == "dispatched" || state == "done"),
         "transfer operation is not authorized"
     );
-    let scope = crate::tools::scope(&job.tool).context("unknown transfer scope")?;
+    let _scope = crate::tools::scope(&job.tool).context("unknown transfer scope")?;
     ensure!(
-        g.config
-            .devices
-            .iter()
-            .any(|d| d.id == device && d.scopes.iter().any(|s| s == scope)),
+        g.config.devices.iter().any(|d| d.id == device),
         "transfer scope revoked"
     );
     desktop_export_job(g, job).await
@@ -1216,18 +1217,12 @@ async fn serve_file(
     } else {
         None
     };
-    let required_scope = if desktop.is_some() {
+    let _required_scope = if desktop.is_some() {
         "desktop:observe"
     } else {
         "code:read"
     };
-    if link.owner != g.config.owner
-        || !g
-            .config
-            .devices
-            .iter()
-            .any(|d| d.id == link.device && d.scopes.iter().any(|s| s == required_scope))
-    {
+    if link.owner != g.config.owner || !g.config.devices.iter().any(|d| d.id == link.device) {
         return StatusCode::NOT_FOUND.into_response();
     }
     let blob = match g.store.get::<Blob>("file_blob", &link.operation).await {

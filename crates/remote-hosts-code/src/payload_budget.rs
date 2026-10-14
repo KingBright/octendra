@@ -3,8 +3,8 @@ use anyhow::{Result, ensure};
 use serde::Serialize;
 use serde_json::json;
 
-pub(crate) const POLL_BYTES: usize = 512 * 1024;
-pub(crate) const COMMAND_BYTES: usize = 64 * 1024;
+pub(crate) const POLL_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const COMMAND_BYTES: usize = 1024 * 1024;
 
 pub(crate) fn poll_bytes(job: &impl Serialize) -> Result<usize> {
     Ok(serde_json::to_vec(&json!({"job": job}))?.len())
