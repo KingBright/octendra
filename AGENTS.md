@@ -8,6 +8,7 @@
 - Verify one unchanged fingerprint of the primary main inputs (an existing snapshot may be checked as read-only evidence), preserve test and build receipts, then transfer its verified bundle directly through the authorized Remote Hosts or configured management channel. Do not download deployment input from GitHub Releases.
 - Develop only in the actual primary main directory; do not create task checkouts or linked worktrees. Preserve unrelated worktree changes. Stage explicit task files only.
 - Upgrade Gateway first, then Agents using existing maintenance leases, platform signing, exact SHA-256 validation, health observations, and rollback paths. Never bypass local macOS signing or device authorization.
+- For macOS Agent upgrades, use `scripts/launch-code-upgrade.py --start`. Never use `launchctl submit` or a repeating updater: submit jobs can retain KeepAlive and reinstall obsolete candidates. Preserve the prepared request marker and observe its original result before another launch.
 - Do not restart other projects or kill unrelated compiler processes. Cancel only operations whose ownership is confirmed.
 - Run bounded regression tests on the appropriate owned target machine. Investigate hangs locally; disabling cloud CI does not authorize skipping the equivalent tests.
 - Keep existing published version directories and their evidence intact. Only the registered fixed current group may be atomically replaced through the shared lifecycle transaction. A retry preserves its original request/operation and evidence. Ambiguous execution requires observation, not replay.
@@ -19,6 +20,7 @@
 - `scripts/source_snapshot.py`: read-only input identity and legacy evidence checks; new source snapshots and checkout synchronization are retired.
 - `scripts/release-code.py`: local verification and three-platform Cargo cross-builds in primary main under the existing metadata-only lease; no cloud runner and no deployment.
 - `scripts/fleet-upgrade.py`: verified local bundle distribution and per-platform updaters. Use only a verified local package and explicit deployment configuration.
+- `scripts/launch-code-upgrade.py`: macOS immutable request preparation and explicit one-shot launch through the stable dispatcher; KeepAlive and automatic triggers are disabled.
 - `scripts/check-code-gateway.py`: live acceptance, with authoritative results rather than presentation-only compaction.
 
 The current release coordinator still contains transitional Python helpers. Rust produces the executables; do not describe the whole coordinator as Python-free until those helpers are actually replaced and tested.

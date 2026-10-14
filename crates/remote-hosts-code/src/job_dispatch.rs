@@ -27,20 +27,6 @@ AND (jobs.state='dispatched' OR
     ELSE 'code:read' END) IN (SELECT value FROM json_each(?)))
 AND (jobs.state='dispatched' OR NOT EXISTS (
     SELECT 1 FROM kv b WHERE b.kind='operation_task_authorization' AND b.key=jobs.id
-    AND NOT EXISTS (
-        SELECT 1 FROM kv g WHERE g.kind='task_authorization' AND g.key=json_extract(b.value,'$.key')
-        AND g.expires>unixepoch() AND json_extract(g.value,'$.enabled')=1
-        AND json_extract(g.value,'$.protocol')=2 AND json_extract(b.value,'$.protocol')=2
-        AND json_type(g.value,'$.expires_at')='integer'
-        AND json_extract(g.value,'$.expires_at')>unixepoch()
-        AND json_extract(b.value,'$.device_id')=jobs.device
-        AND json_extract(b.value,'$.owner')=json_extract(request,'$.owner')
-        AND json_extract(g.value,'$.owner')=json_extract(b.value,'$.owner')
-        AND json_extract(g.value,'$.task_id')=json_extract(b.value,'$.task_id')
-        AND json_extract(g.value,'$.version')=json_extract(b.value,'$.version')
-        AND EXISTS(SELECT 1 FROM json_each(g.value,'$.devices') WHERE value=jobs.device)
-        AND EXISTS(SELECT 1 FROM json_each(g.value,'$.scopes') WHERE value=json_extract(b.value,'$.scope'))
-    )
 ))
 AND (json_extract(request,'$.tool') IN ('code_read','code_list','code_search','code_symbols','code_diff','workspace_context','terminal_read','terminal_cancel')
     OR EXISTS(SELECT 1 FROM kv c WHERE c.kind='transfer_control' AND c.key=jobs.id AND json_extract(c.value,'$.cancel_requested')=1)

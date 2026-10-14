@@ -1,6 +1,13 @@
 //! Stable recovery guidance. Never serialize raw commands, URLs, or OS error chains.
 use crate::now;
 use serde_json::{Value, json};
+pub(crate) fn outcome_unknown(value: &Value) -> bool {
+    value["error"] == "outcome_unknown"
+        || (value.get("error").is_some()
+            && (value["outcome"] == "unknown"
+                || value["execution_state"] == "unknown"
+                || value["state"] == "outcome_unknown"))
+}
 pub(crate) fn error(tool: &str, message: &str, operation: Option<&str>, stage: &str) -> Value {
     let task_rejection = [
         "task_authorization_missing",
@@ -18,6 +25,15 @@ pub(crate) fn error(tool: &str, message: &str, operation: Option<&str>, stage: &
         (
             code,
             "establish_owner_task_authorization_then_resume_original",
+            "not_executed",
+        )
+    } else if matches!(
+        message,
+        "outcome_not_unknown" | "outcome_evidence_unavailable" | "outcome_resolution_conflict"
+    ) {
+        (
+            message,
+            "inspect_original_operation_without_reexecution",
             "not_executed",
         )
     } else if message.starts_with("insufficient_scope") {
@@ -113,6 +129,12 @@ pub(crate) fn error(tool: &str, message: &str, operation: Option<&str>, stage: &
             "inspect_original_operation_identifiers_without_reexecution",
             "not_executed",
         )
+    } else if message == "submission_closed_not_enqueued" {
+        (
+            "submission_closed_not_enqueued",
+            "inspect_submission_receipt_then_use_a_deliberate_new_key",
+            "not_executed",
+        )
     } else if message.contains("version_conflict") || message.contains("unique match") {
         (
             "version_conflict",
@@ -152,6 +174,12 @@ pub(crate) fn error(tool: &str, message: &str, operation: Option<&str>, stage: &
         (
             "workspace_unavailable",
             "open_original_device_workspace",
+            "not_executed",
+        )
+    } else if message.starts_with("payload_too_large:") || message == "command too large" {
+        (
+            "payload_too_large",
+            "use_automatic_content_transfer_or_shorten_command",
             "not_executed",
         )
     } else if message.contains("budget")
@@ -249,6 +277,30 @@ pub(crate) fn error_with_request(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn oversized_payload_is_rejected_before_execution() {
+        for stage in ["gateway_dispatch", "agent_execute"] {
+            let value = super::error(
+                "terminal_exec",
+                "payload_too_large: terminal command exceeds byte budget",
+                None,
+                stage,
+            );
+            assert_eq!(value["error_code"], "payload_too_large");
+            assert_eq!(value["execution_state"], "not_started");
+            assert_eq!(value["outcome"], "not_executed");
+        }
+        let legacy = super::error(
+            "terminal_exec",
+            "command too large",
+            Some("original"),
+            "agent_execute",
+        );
+        assert_eq!(legacy["error_code"], "payload_too_large");
+        assert_eq!(legacy["execution_state"], "not_started");
+        let capacity = super::error("code_read", "capacity limit", None, "agent_execute");
+        assert_eq!(capacity["execution_state"], "unknown");
+    }
     #[test]
     fn errors_never_expose_input_values() {
         let v = super::error(

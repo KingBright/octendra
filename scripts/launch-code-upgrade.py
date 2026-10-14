@@ -87,22 +87,32 @@ def service_state(domain, label=STABLE_LABEL):
     fields = dict(re.findall(r'^\t(state|pid) = ([^\n]+)$', result.stdout or '', re.MULTILINE))
     pid = fields.get('pid', '')
     running = fields.get('state') == 'running' and pid.isdecimal() and int(pid) > 1
+    arguments = re.search(r'^\targuments = \{\n(.*?)^\t\}', result.stdout or '', re.MULTILINE | re.DOTALL)
+    argv = [line.strip().strip('"') for line in arguments[1].splitlines()] if arguments else []
+    updater_job = (any(pathlib.Path(arg).name == 'upgrade-code-agent.py' for arg in argv)
+                   and all(flag in argv for flag in ('--candidate', '--sha256', '--version', '--result')))
     return {'loaded': True, 'running': running, 'service': service,
-            'state': fields.get('state'), 'pid': int(pid) if pid.isdecimal() else None}
+            'state': fields.get('state'), 'pid': int(pid) if pid.isdecimal() else None,
+            'updater_job': updater_job}
 
 
 def cleanup_legacy_jobs(domain):
     result = subprocess.run(['launchctl', 'print', domain], text=True, capture_output=True, timeout=10)
     if result.returncode != 0:
-        return 0
-    labels = sorted(set(re.findall(r'com\\.remote-hosts\\.code-upgrade\\.[A-Za-z0-9._-]+', result.stdout or '')))
+        return None
+    labels = sorted(set(re.findall(r'com\.remote-hosts\.code(?:-agent)?-upgrade\.[A-Za-z0-9._-]+', result.stdout or '')))
     removed = 0
     for label in labels:
         state = service_state(domain, label)
-        if state['loaded'] and not state['running']:
-            subprocess.run(['launchctl', 'bootout', state['service']], stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=10)
-            removed += 1
+        if not state['loaded'] or not state.get('updater_job'):
+            continue
+        if state['running'] or state.get('pid'):
+            return None  # Existing upgrade must finish before another candidate starts.
+        result = subprocess.run(['launchctl', 'bootout', state['service']], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=10)
+        if result.returncode != 0:
+            return None
+        removed += 1
     return removed
 
 
@@ -188,6 +198,22 @@ def prepare(args, base, python=None):
 
 def start_once(record, require_identity=True):
     directory = pathlib.Path(record['directory'])
+    validate_prepared(record)
+    if (directory/'start-requested.json').exists():
+        return {'state': 'already_requested', 'result': record['result'], 'service_changed': False,
+                'recovery': 'inspect the stable updater and saved result; do not automatically resubmit'}
+    # Reuse the preparation lock to serialize the shared dispatcher request.
+    with (directory.parent/'.prepare.lock').open('a+b') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {'state': 'updater_busy', 'result': record['result'], 'service_changed': False,
+                    'next_action': 'observe the original preparation or launch'}
+        return _start_once_locked(record, require_identity)
+
+
+def _start_once_locked(record, require_identity=True):
+    directory = pathlib.Path(record['directory'])
     base = pathlib.Path(record['base'])
     marker = directory/'start-requested.json'
     validate_prepared(record)
@@ -202,10 +228,20 @@ def start_once(record, require_identity=True):
                     'next_action': 'authorize the Remote Hosts local signing identity once, then retry this same launch'}
     domain = 'gui/%d' % os.getuid()
     current = service_state(domain)
-    if current['running']:
+    if current['running'] or (current['loaded'] and current.get('state') != 'not running'):
         return {'state': 'updater_busy', 'result': record['result'], 'service_changed': False,
-                'next_action': 'observe the running stable updater; do not overwrite its request'}
+                'next_action': 'observe the running or scheduled stable updater; do not overwrite its request'}
+    paths = stable_paths(base)
+    if paths['request'].is_file():
+        previous = json.loads(paths['request'].read_text())
+        previous_directory = pathlib.Path(previous['directory'])
+        if (previous_directory/'start-requested.json').exists() and not (previous_directory/'result.json').exists():
+            return {'state': 'updater_busy', 'result': record['result'], 'service_changed': False,
+                    'next_action': 'observe the original request outcome before replacing it'}
     legacy_removed = cleanup_legacy_jobs(domain)
+    if legacy_removed is None:
+        return {'state': 'updater_busy', 'result': record['result'], 'service_changed': False,
+                'next_action': 'wait for or inspect the original legacy updater; do not start another candidate'}
     paths, dispatcher_changed = install_stable_dispatcher(base)
     current = service_state(domain)
     if dispatcher_changed and current['loaded']:

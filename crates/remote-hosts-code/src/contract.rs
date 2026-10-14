@@ -9,7 +9,18 @@ use std::{collections::BTreeSet, path::Path};
 pub fn authorized_tools(p: &Principal) -> Vec<Tool> {
     tools::catalog()
         .into_iter()
-        .filter(|t| tools::scope(&t.name).is_some_and(|s| p.scopes.iter().any(|v| v == s)))
+        .filter(|t| tools::has_required_scopes(p, &t.name))
+        .collect()
+}
+/// Desktop entries are discoverable for step-up; discovery grants no authority.
+pub fn discoverable_tools(p: &Principal) -> Vec<Tool> {
+    tools::catalog()
+        .into_iter()
+        .filter(|t| {
+            tools::has_required_scopes(p, &t.name)
+                || (matches!(t.name.as_ref(), "desktop_worker" | "desktop_frame")
+                    && p.scopes.iter().any(|s| s == "code:read"))
+        })
         .collect()
 }
 pub fn bundle() -> Value {
@@ -50,8 +61,12 @@ pub fn export(path: &Path, check: bool) -> Result<()> {
 /// Controlled adapters attach this on every upstream request. The final host
 /// report is deliberately not manufactured from the adapter's own catalog.
 pub fn adapter_headers(p: &Principal) -> HeaderMap {
+    catalog_headers(&discoverable_tools(p))
+}
+/// Catalog evidence is computed from discovery, never inferred OAuth grants.
+pub fn catalog_headers(catalog: &[Tool]) -> HeaderMap {
     let mut h = HeaderMap::new();
-    let sha = hash(serde_json::to_vec(&authorized_tools(p)).expect("filtered catalog"));
+    let sha = hash(serde_json::to_vec(catalog).expect("filtered catalog"));
     h.insert(
         "x-rh-adapter-catalog-sha256",
         HeaderValue::from_str(&sha).expect("hash"),
@@ -74,7 +89,8 @@ fn digest_header<'a>(h: &'a HeaderMap, key: &str) -> Option<&'a str> {
     })
 }
 pub fn exposure(h: &HeaderMap, p: &Principal) -> Value {
-    let expected = hash(serde_json::to_vec(&authorized_tools(p)).expect("catalog"));
+    let expected = hash(serde_json::to_vec(&discoverable_tools(p)).expect("catalog"));
+    let authorized = hash(serde_json::to_vec(&authorized_tools(p)).expect("authorized catalog"));
     let adapter = digest_header(h, "x-rh-adapter-catalog-sha256");
     let skill = digest_header(h, "x-rh-adapter-skill-revision");
     let host = digest_header(h, "x-rh-host-catalog-sha256");
@@ -94,7 +110,7 @@ pub fn exposure(h: &HeaderMap, p: &Principal) -> Value {
                 .then_some(names)
         });
     let missing: Option<Vec<_>> = names.as_ref().map(|names| {
-        authorized_tools(p)
+        discoverable_tools(p)
             .into_iter()
             .filter(|t| !names.contains(t.name.as_ref()))
             .map(|t| t.name.to_string())
@@ -115,9 +131,10 @@ pub fn exposure(h: &HeaderMap, p: &Principal) -> Value {
         Some(v) if v == expected => "reported_match",
         Some(_) => "reported_mismatch",
     };
-    json!({"connector_catalog":{"status":adapter_status,"reported_tools_sha256":adapter,"reported_skill_revision":skill,"expected_authorized_tools_sha256":expected,
+    json!({"connector_catalog":{"status":adapter_status,"reported_tools_sha256":adapter,"reported_skill_revision":skill,"expected_discoverable_tools_sha256":expected,"expected_authorized_tools_sha256":authorized,
+        "comparison_basis":"discoverable_tools","authorization_evidence":false,"hash_semantics_revision":2,
         "evidence_source":"authenticated request headers, not the server catalog"},
-        "current_session_exposure":{"status":host_status,"reported_tools_sha256":host,"missing_tools":missing,
+        "current_session_exposure":{"comparison_basis":"discoverable_tools","authorization_evidence":false,"status":host_status,"reported_tools_sha256":host,"missing_tools":missing,
             "host_catalog_hash_supplied":host.is_some(),"reason":if host.is_none(){"final host exposure not reported; do not infer read-only or full capability"}else{"caller-reported final host catalog; does not grant permissions"}},
         "boundary":"Reports are per authenticated request and are never borrowed from another client or session."})
 }
@@ -155,7 +172,7 @@ mod tests {
     fn contradictory_host_hash_and_names_are_not_reported_as_a_match() {
         let p = p();
         let mut h = adapter_headers(&p);
-        let sha = hash(serde_json::to_vec(&authorized_tools(&p)).unwrap());
+        let sha = hash(serde_json::to_vec(&discoverable_tools(&p)).unwrap());
         h.insert(
             "x-rh-host-catalog-sha256",
             HeaderValue::from_str(&sha).unwrap(),
@@ -206,6 +223,85 @@ mod tests {
         );
         assert_eq!(
             exposure(&HeaderMap::new(), &p)["current_session_exposure"]["status"],
+            "unknown_not_reported"
+        );
+    }
+    #[test]
+    fn discoverable_and_authorized_hashes_are_distinct_for_read_only_scopes() {
+        let p = Principal {
+            owner: "fixture".into(),
+            scopes: vec!["code:read".into()],
+        };
+        let before = p.scopes.clone();
+        let e = exposure(&adapter_headers(&p), &p);
+        let c = &e["connector_catalog"];
+        assert_eq!(c["status"], "reported_match");
+        assert_eq!(c["comparison_basis"], "discoverable_tools");
+        assert_eq!(c["hash_semantics_revision"], 2);
+        assert_eq!(c["authorization_evidence"], false);
+        assert_eq!(
+            c["expected_discoverable_tools_sha256"],
+            hash(serde_json::to_vec(&discoverable_tools(&p)).unwrap())
+        );
+        assert_eq!(
+            c["expected_authorized_tools_sha256"],
+            hash(serde_json::to_vec(&authorized_tools(&p)).unwrap())
+        );
+        assert_ne!(
+            c["expected_discoverable_tools_sha256"],
+            c["expected_authorized_tools_sha256"]
+        );
+        assert!(
+            discoverable_tools(&p)
+                .iter()
+                .any(|t| t.name == "desktop_worker")
+        );
+        assert!(
+            !authorized_tools(&p)
+                .iter()
+                .any(|t| t.name.starts_with("desktop_"))
+        );
+        assert!(!tools::has_required_scopes(&p, "desktop_worker"));
+        assert_eq!(before, p.scopes);
+    }
+    #[test]
+    fn authorized_subset_hash_is_not_accepted_as_discovery_evidence() {
+        let p = Principal {
+            owner: "fixture".into(),
+            scopes: vec!["code:read".into()],
+        };
+        let sha = hash(serde_json::to_vec(&authorized_tools(&p)).unwrap());
+        let mut h = adapter_headers(&p);
+        for key in ["x-rh-adapter-catalog-sha256", "x-rh-host-catalog-sha256"] {
+            h.insert(key, HeaderValue::from_str(&sha).unwrap());
+        }
+        let e = exposure(&h, &p);
+        assert_eq!(e["connector_catalog"]["status"], "reported_mismatch");
+        assert_eq!(e["current_session_exposure"]["status"], "reported_mismatch");
+    }
+    #[test]
+    fn full_scope_hashes_keep_existing_catalog_headers_compatible() {
+        let mut p = p();
+        p.scopes
+            .extend(["desktop:observe".into(), "desktop:input".into()]);
+        let h = adapter_headers(&p);
+        let e = exposure(&h, &p);
+        let c = &e["connector_catalog"];
+        assert_eq!(c["status"], "reported_match");
+        assert_eq!(
+            c["reported_tools_sha256"],
+            c["expected_discoverable_tools_sha256"]
+        );
+        assert_eq!(
+            c["expected_authorized_tools_sha256"],
+            c["expected_discoverable_tools_sha256"]
+        );
+        assert_eq!(
+            h["x-rh-adapter-skill-revision"],
+            capabilities::embedded_skill_revision()
+        );
+        assert_eq!(
+            e["current_session_exposure"]["status"],
             "unknown_not_reported"
         );
     }

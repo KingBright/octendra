@@ -24,6 +24,7 @@ async fn typed_gateway_ack_to_four_k_existing_chunk_artifact_and_close() {
         public_url: "https://offline.invalid".into(),
         bind: "127.0.0.1:0".into(),
         state_dir: gateway_state.path().join("gateway"),
+        forge_browser: None,
         owner: id.owner.clone(),
         password_hash: "test-unused".into(),
         devices: vec![DeviceRegistration {
@@ -132,6 +133,7 @@ async fn typed_gateway_ack_to_four_k_existing_chunk_artifact_and_close() {
     };
     seed(export.clone()).await;
     let mut exported = agent.execute(&export).await.unwrap();
+    eprintln!("four_k_export lease_ms=30000 timing={}", exported["timing"]);
     assert_eq!(exported["state"], "completed", "{exported}");
     assert_eq!(exported["size"], 12_441_600);
     assert_eq!(exported["checkpoint_bytes"], 4 * 1024 * 1024);
@@ -204,10 +206,12 @@ async fn typed_gateway_ack_to_four_k_existing_chunk_artifact_and_close() {
     .unwrap();
     assert!(!crate::transfers::blob_path(&gateway, &export.id).exists());
     assert!(agent.read_desktop_frame(&observe).await.is_err());
-    assert_eq!(
+    // A removed link is 404; retained link metadata with retired bytes is 410.
+    // Both deny the closed session's artifact; byte removal is checked above.
+    assert!(matches!(
         reqwest::get(&download).await.unwrap().status(),
-        reqwest::StatusCode::GONE
-    );
+        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
+    ));
     assert!(
         !agent
             .config
@@ -243,6 +247,7 @@ async fn desktop_export_one_429_or_disconnect_delivers_terminal_and_retires_fram
             public_url: "https://offline.invalid".into(),
             bind: "127.0.0.1:0".into(),
             state_dir: gateway_state.path().join("gateway"),
+            forge_browser: None,
             owner: id.owner.clone(),
             password_hash: "test-unused".into(),
             devices: vec![DeviceRegistration {

@@ -15,35 +15,32 @@ and reuse the returned workspace and operation identities. The SSH inventory's
 host IDs are not Code Gateway device IDs. Never silently substitute one for the
 other or fail over an offline device to a different machine.
 
-## Owner-approved continued tasks
+## Connection authority and continued work
 
-A managed task may have a persistent, versioned owner grant. Read its
-task_context authorization and attach task_id plus authorization_version to
-execution calls. The grant only restricts current account/device scopes and
-Agent local flags; it never creates credentials or platform/admin permission.
-A task label alone is correlation, not approval. Keep work within the user's
-already approved scope when the owner is offline; no owner browser login is
-needed again merely to execute an unchanged approved task.
+Code operations reuse the current authenticated connection, account scopes,
+enrolled device scopes and Agent local flags. There is no separate task grant,
+renewal form, command classifier or per-command business approval. A task_id is
+only a correlation label; authorization_version is a deprecated compatibility
+field. Connection revocation and local OS permissions remain authoritative.
 
-Only the owner establishes or changes a grant through the Gateway's
-/status/task-authorization form using the existing owner password. Do not read,
-enter or transmit that password for the owner. Refer to
-[task authorization](../../docs/task-authorization.md) for the exact scope.
+The retired task_resume compatibility tool only observes the original request
+or operation; it never renews or replays it. Pre-upgrade queued task bindings
+stay held, rather than being silently released at upgrade. Unknown outcomes
+must be observed and resolved through the original operation before new work.
 
-After an owner changes a grant version, use task_resume only for a durable
-task-policy rejection with execution_state=not_started and no operation, or a
-queued operation with no dispatch timestamp. Preserve the original request or
-operation, arguments, file versions and idempotency key. Concurrent resume
-attempts do not authorize duplicates. A recovery claim with no confirmed result
-is unknown and must be observed.
+On an Agent advertising local_sudo_v1, terminal_exec with sudo=true uses the
+current device/local user's OS credential and sudo policy for a noninteractive
+shell. The user registers credentials locally; never request a password in
+chat, tool arguments, terminal_input, command text, logs or receipts. The SSH
+connector's access-path stored-sudo flow remains separate. Do not substitute
+a host ID, device or credential source. See
+[connection authorization](../../docs/task-authorization.md).
 
-Never use task_resume for platform prompts, local allow-flag denials, generic
-access_denied, source-address policy rejection, credentials/terminal input,
-running/completed work or unknown outcomes. Do not change task labels, omit a
-managed task's binding, choose another device or route, or acquire broader
-scopes to evade a denial. Continue independent authorized work and report the
-specific blocked boundary. This feature neither creates Codex conversations nor
-keeps an external assistant scheduled; those platform controls remain separate.
+Client confirmations remain client-controlled. Gemini App requires confirmation
+for write actions; CLI policies are separate. Read-only annotations must describe
+actual behavior, and arbitrary terminal execution is never a read-only tool.
+Never evade a platform denial, device/local policy, source-address rejection or
+unknown outcome by changing task labels, command form, device or transport.
 
 ## Core Rules
 

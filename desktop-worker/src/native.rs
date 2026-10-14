@@ -20,6 +20,10 @@ pub struct Reply {
     pub response: Response,
     pub pixels: Option<OwnedFrame>,
 }
+#[path = "../../crates/remote-hosts-desktop-protocol/src/hold.rs"]
+pub mod hold;
+use hold::{Control, HoldError, HoldGuard};
+
 struct Session {
     binding: Binding,
     capture: PreparedPortalCapture,
@@ -29,6 +33,7 @@ struct Session {
     last: Option<FrameRef>,
     observed_at: Option<Instant>,
     sequence: u64,
+    holds: HoldGuard,
     keys: BTreeSet<u16>,
     buttons: BTreeSet<Button>,
 }
@@ -37,6 +42,7 @@ pub struct Worker {
     session: Option<Session>,
     spent: bool,
     unknown: bool,
+    request_id: Option<Uuid>,
 }
 impl Worker {
     pub fn new(approval: Option<Approval>) -> Self {
@@ -45,28 +51,54 @@ impl Worker {
             session: None,
             spent: false,
             unknown: false,
+            request_id: None,
         }
+    }
+    pub fn cancelled(&mut self) {
+        self.unknown = true;
+    }
+    pub fn set_request(&mut self, id: Uuid) {
+        self.request_id = Some(id);
     }
     pub fn wait_budget(&self) -> Duration {
         self.session.as_ref().map_or(Duration::from_secs(5), |s| {
-            s.deadline
-                .saturating_duration_since(Instant::now())
-                .min(Duration::from_secs(5))
+            let deadline = s
+                .holds
+                .expires_at()
+                .map_or(s.deadline, |at| at.min(s.deadline));
+            s.holds.budget(deadline, Instant::now())
         })
     }
-    pub async fn shutdown(&mut self) -> Result<(), ErrorCode> {
-        self.spent = true;
-        if self.unknown {
-            return Err(ErrorCode::OutcomeUnknown);
+    pub fn handling_budget(&self) -> Duration {
+        if self.session.is_none() {
+            Duration::from_secs(25)
+        } else {
+            self.wait_budget()
         }
-        if let Some(session) = self.session.take() {
+    }
+    pub async fn shutdown(&mut self) -> Result<(), ErrorCode> {
+        let result = crate::lifecycle::shutdown(self.request_id, self.shutdown_inner()).await;
+        if result.is_err() {
+            self.unknown = true;
+        }
+        result
+    }
+    async fn shutdown_inner(&mut self) -> Result<(), ErrorCode> {
+        self.spent = true;
+        let unresolved = self.unknown;
+        if let Some(mut session) = self.session.take() {
+            session.holds.stop();
             session.cancel.send_replace(true);
             session.capture.close_owned().await.map_err(|_| {
                 self.unknown = true;
                 ErrorCode::OutcomeUnknown
             })?;
         }
-        Ok(())
+        if unresolved {
+            Err(ErrorCode::OutcomeUnknown)
+        } else {
+            Ok(())
+        }
     }
     pub async fn handle(&mut self, request: Request) -> Result<Reply, ErrorCode> {
         if matches!(request, Request::Capabilities {}) {
@@ -94,11 +126,9 @@ impl Worker {
         if request.identity() != Some(&approval.identity) {
             return Err(ErrorCode::IdentityMismatch);
         }
-        if self
-            .session
-            .as_ref()
-            .is_some_and(|s| Instant::now() >= s.deadline || s.capture.is_revoked())
-        {
+        if self.session.as_ref().is_some_and(|s| {
+            s.holds.budget(s.deadline, Instant::now()).is_zero() || s.capture.is_revoked()
+        }) {
             self.shutdown().await?;
             return Err(ErrorCode::SessionClosed);
         }
@@ -110,11 +140,15 @@ impl Worker {
                 if lease_ms == 0 || lease_ms > MAX_LEASE_MS {
                     return Err(ErrorCode::InvalidRequest);
                 }
+                crate::lifecycle::phase(self.request_id, "approval_verified");
+                crate::lifecycle::phase(self.request_id, "open_received");
                 self.spent = true; // failed/cancelled Open never reopens on this process.
                 let (cancel, rx) = watch::channel(false);
+                crate::lifecycle::phase(self.request_id, "portal_request_started");
                 let mut lease = request_registered_portal_control_capture(APP_ID, "", rx)
                     .await
                     .map_err(|_| ErrorCode::OutcomeUnknown)?;
+                crate::lifecycle::phase(self.request_id, "portal_session_ready");
                 let selected = lease.selected_source();
                 if selected.kind != PortalSourceKind::Monitor
                     || selected.logical_size
@@ -130,9 +164,14 @@ impl Worker {
                     }
                     return Err(ErrorCode::IdentityMismatch);
                 }
-                let capture = prepare_pipewire_capture_bounded(lease, approval.max_frame_bytes, 2 * approval.max_frame_bytes)
-                    .await
-                    .map_err(|_| ErrorCode::OutcomeUnknown)?;
+                let capture = prepare_pipewire_capture_bounded(
+                    lease,
+                    approval.max_frame_bytes,
+                    2 * approval.max_frame_bytes,
+                )
+                .await
+                .map_err(|_| ErrorCode::OutcomeUnknown)?;
+                crate::lifecycle::phase(self.request_id, "capture_attached");
                 if !capture.input_available() {
                     capture.close_owned().await.map_err(|_| {
                         self.unknown = true;
@@ -165,6 +204,7 @@ impl Worker {
                     last: None,
                     observed_at: None,
                     sequence: 0,
+                    holds: HoldGuard::default(),
                     keys: BTreeSet::new(),
                     buttons: BTreeSet::new(),
                 });
@@ -261,9 +301,44 @@ impl Worker {
                 }
                 let (events, keys, buttons) =
                     convert(&frame.mapping, &actions, &session.keys, &session.buttons)?;
-                session.sequence = sequence; // no replay after any side effect/uncertain result.
-                for event in events {
-                    if Instant::now() >= session.deadline
+                let mut renewals = Vec::new();
+                for action in &actions {
+                    match action {
+                        Action::KeyDown { usage } => renewals.push(Control::Key(*usage)),
+                        Action::ButtonDown { button } => {
+                            renewals.push(Control::Button(*button as u8))
+                        }
+                        Action::PointerMove { .. } => renewals
+                            .extend(session.buttons.iter().map(|b| Control::Button(*b as u8))),
+                        _ => {}
+                    }
+                }
+                // A state-only renewal still needs a current, live capture revision.
+                if session.capture.is_revoked()
+                    || session
+                        .capture
+                        .check_input_frame(frame.source_revision, frame.mapping.frame_size)
+                        .is_err()
+                {
+                    self.shutdown().await?;
+                    return Err(ErrorCode::StaleFrame);
+                }
+                session
+                    .holds
+                    .renew(sequence, session.deadline, Instant::now(), &renewals)
+                    .map_err(|e| match e {
+                        HoldError::InvalidSequence => ErrorCode::InvalidSequence,
+                        HoldError::Expired => ErrorCode::SessionClosed,
+                    })?;
+                session.sequence = sequence; // consume before any side effect or uncertainty.
+                for (action, event) in events {
+                    if session
+                        .holds
+                        .budget(session.deadline, Instant::now())
+                        .is_zero()
+                        || session
+                            .observed_at
+                            .is_none_or(|t| t.elapsed() >= Duration::from_secs(1))
                         || session.capture.is_revoked()
                         || session
                             .capture
@@ -271,7 +346,10 @@ impl Worker {
                             .is_err()
                         || !matches!(
                             tokio::time::timeout(
-                                Duration::from_millis(750),
+                                session
+                                    .holds
+                                    .budget(session.deadline, Instant::now())
+                                    .min(Duration::from_millis(750)),
                                 session.capture.inject_input(event)
                             )
                             .await,
@@ -280,6 +358,26 @@ impl Worker {
                     {
                         self.shutdown().await?;
                         return Err(ErrorCode::OutcomeUnknown);
+                    }
+                    // Cleanup follows actual posted state, not the unposted tail of a batch.
+                    match action {
+                        Action::KeyDown { usage } => {
+                            session.keys.insert(usage);
+                            session.holds.posted(Control::Key(usage));
+                        }
+                        Action::KeyUp { usage } => {
+                            session.keys.remove(&usage);
+                            session.holds.released(Control::Key(usage));
+                        }
+                        Action::ButtonDown { button } => {
+                            session.buttons.insert(button);
+                            session.holds.posted(Control::Button(button as u8));
+                        }
+                        Action::ButtonUp { button } => {
+                            session.buttons.remove(&button);
+                            session.holds.released(Control::Button(button as u8));
+                        }
+                        _ => {}
                     }
                 }
                 session.keys = keys;
@@ -325,7 +423,7 @@ pub fn plane_hashes(frame: &OwnedFrame) -> Vec<String> {
         .map(|p| format!("{:x}", Sha256::digest(p)))
         .collect()
 }
-type Converted = (Vec<InputEvent>, BTreeSet<u16>, BTreeSet<Button>);
+type Converted = (Vec<(Action, InputEvent)>, BTreeSet<u16>, BTreeSet<Button>);
 fn convert(
     mapping: &FrameMapping,
     actions: &[Action],
@@ -339,7 +437,7 @@ fn convert(
     let mut buttons = held_buttons.clone();
     let mut events = Vec::new();
     for action in actions {
-        events.push(match *action {
+        let event = match *action {
             Action::PointerMove { x, y } => {
                 let point = mapping.map(x, y)?;
                 let norm = |value: f64, size: u32| {
@@ -357,7 +455,7 @@ fn convert(
             Action::KeyDown { usage } => {
                 let code = hid_to_rp(usage)?;
                 if !keys.insert(usage) {
-                    return Err(ErrorCode::InvalidActions);
+                    continue;
                 }
                 InputEvent::KeyDown(code)
             }
@@ -370,7 +468,7 @@ fn convert(
             }
             Action::ButtonDown { button } => {
                 if !buttons.insert(button) {
-                    return Err(ErrorCode::InvalidActions);
+                    continue;
                 }
                 InputEvent::MouseDown(button_code(button))
             }
@@ -387,7 +485,8 @@ fn convert(
                 delta_x: i32::from(horizontal),
                 delta_y: i32::from(vertical),
             },
-        });
+        };
+        events.push((action.clone(), event));
     }
     Ok((events, keys, buttons))
 }
@@ -459,7 +558,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            events,
+            events
+                .into_iter()
+                .map(|(_, event)| event)
+                .collect::<Vec<_>>(),
             vec![InputEvent::MouseMoveAbsolute { x: 65535, y: 65535 }]
         );
     }
@@ -474,7 +576,10 @@ mod tests {
         let (events, keys, _) =
             convert(&mapping(), &actions, &BTreeSet::new(), &BTreeSet::new()).unwrap();
         assert_eq!(
-            events,
+            events
+                .into_iter()
+                .map(|(_, event)| event)
+                .collect::<Vec<_>>(),
             vec![
                 InputEvent::KeyDown(0x3b),
                 InputEvent::KeyDown(0),

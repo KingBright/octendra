@@ -303,22 +303,6 @@ pub async fn invoke_durable(
             value["next_action"] = json!("observe observed_request_id; never resubmit execution");
         }
     }
-    if task.is_some()
-        && crate::task_authorization::recoverable_tool(tool)
-        && value["error_code"]
-            .as_str()
-            .is_some_and(crate::task_authorization::authorization_rejection)
-        && value["execution_state"] == "not_started"
-    {
-        let deferred = json!({"owner":p.owner,"task_id":task,"tool":tool,"arguments":args,
-            "authorization_version":args["authorization_version"].as_u64().unwrap_or(0)});
-        let available = g
-            .store
-            .put("task_deferred", request_id, &deferred, i64::MAX)
-            .await
-            .is_ok();
-        value["authorization_recovery_available"] = json!(available);
-    }
     finish(g, p, tool, value, request_id, observed_request_id).await
 }
 
@@ -419,105 +403,6 @@ pub(crate) async fn finish(
         value["receipt"]["next_action"] = json!("observe_original_operation; do not replay");
     }
     Ok(value)
-}
-
-/// Reclaim only an owner-bound, task-policy rejection that durably proves no
-/// operation was created. A crash after the claim leaves observation-required
-/// state, never implicit permission to replay.
-pub(crate) async fn resume_authorized(g: &Gateway, p: &Principal, args: &Value) -> Result<Value> {
-    let request = crate::files::text(args, "request_id")?;
-    ensure!(valid_request_id(request), "invalid_arguments: request_id");
-    let task = crate::files::text(args, "task_id")?;
-    let version = args["authorization_version"]
-        .as_u64()
-        .context("invalid_arguments: authorization_version")?;
-    let mut tx = g.store.pool.begin_with("BEGIN IMMEDIATE").await?;
-    let raw: String =
-        sqlx::query_scalar("SELECT value FROM kv WHERE kind='request_receipt' AND key=?")
-            .bind(request)
-            .fetch_optional(&mut *tx)
-            .await?
-            .context("request_unavailable")?;
-    let mut saved: Value = serde_json::from_str(&raw)?;
-    ensure!(
-        saved["owner"] == p.owner && saved["task_id"] == task,
-        "task_resume_owner_conflict"
-    );
-    if let Some(id) = saved["operation_id"].as_str().map(str::to_owned) {
-        tx.rollback().await?;
-        return g.result(p, &id).await;
-    }
-    ensure!(
-        saved["state"] == "gateway_rejected"
-            && saved["execution_state"] == "not_started"
-            && saved["error_code"]
-                .as_str()
-                .is_some_and(crate::task_authorization::authorization_rejection),
-        "task_resume_not_eligible"
-    );
-    let raw: String =
-        sqlx::query_scalar("SELECT value FROM kv WHERE kind='task_deferred' AND key=?")
-            .bind(request)
-            .fetch_optional(&mut *tx)
-            .await?
-            .context("task_resume_payload_unavailable")?;
-    let deferred: Value = serde_json::from_str(&raw)?;
-    ensure!(
-        saved["fingerprint"]
-            == hash(serde_json::to_vec(
-                &json!({"tool":deferred["tool"],"arguments":deferred["arguments"]})
-            )?),
-        "task_resume_payload_conflict"
-    );
-    ensure!(
-        deferred["owner"] == p.owner && deferred["task_id"] == task,
-        "task_resume_owner_conflict"
-    );
-    ensure!(
-        version
-            > deferred["authorization_version"]
-                .as_u64()
-                .context("task_resume_not_eligible")?,
-        "task_authorization_change_required"
-    );
-    let tool = deferred["tool"]
-        .as_str()
-        .context("task_resume_not_eligible")?
-        .to_owned();
-    ensure!(
-        crate::task_authorization::recoverable_tool(&tool),
-        "task_resume_not_eligible"
-    );
-    let mut original_args = deferred["arguments"].clone();
-    // The original command, paths, CAS versions and idempotency key are immutable.
-    original_args["authorization_version"] = json!(version);
-    let scope = tools::scope(&tool).context("unknown tool")?;
-    ensure!(p.scopes.iter().any(|v| v == scope), "insufficient_scope");
-    // Do not hold a writer while dispatch validates policy and collects results.
-    // Mark the claim first; interruption is an unknown outcome until observation.
-    saved["state"] = json!("authorization_resume_claimed");
-    saved["execution_state"] = json!("unknown");
-    saved["resume_authorization_version"] = json!(version);
-    saved["updated_at"] = json!(now());
-    sqlx::query("UPDATE kv SET value=? WHERE kind='request_receipt' AND key=?")
-        .bind(saved.to_string())
-        .bind(request)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    let mut value = match Box::pin(g.dispatch_traced(p, &tool, original_args, Some(request))).await
-    {
-        Ok(v) => v,
-        Err(e) => crate::diagnostics::error_with_request(
-            &tool,
-            &e.to_string(),
-            request,
-            None,
-            "gateway_dispatch",
-        ),
-    };
-    value["authorization_resume"] = json!({"original_request_id":request,"version":version});
-    finish(g, p, &tool, value, request, None).await
 }
 
 #[cfg(test)]

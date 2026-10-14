@@ -4,8 +4,12 @@ pub mod agent;
 pub mod agent_log;
 pub mod auth;
 mod capabilities;
+mod code_payload;
+mod payload_budget;
+mod permission_view;
 mod poll_health;
 mod status_view;
+mod submission_fence;
 pub use capabilities::release_manifest;
 pub mod adapter;
 mod change_review;
@@ -16,15 +20,19 @@ mod diagnostics;
 mod durable_transfer;
 pub mod files;
 mod files_sync;
+pub mod forge_browser;
 pub mod gateway;
 mod history_artifacts;
 mod history_gateway;
 mod history_retention;
 mod job_dispatch;
 mod job_receipts;
+mod local_sudo;
 mod maintenance;
 pub mod maintenance_tasks;
+mod oauth_handoff;
 mod observations;
+mod outcome_resolution;
 mod progress;
 mod readiness;
 mod reads;
@@ -100,6 +108,8 @@ pub struct DeviceRegistration {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GatewayConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forge_browser: Option<forge_browser::ForgeBrowserConfig>,
     pub public_url: String,
     pub bind: String,
     pub state_dir: PathBuf,

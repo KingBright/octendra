@@ -231,6 +231,9 @@ impl Gateway {
             );
         }
         config.validate_oauth_policy()?;
+        if let Some(browser) = &config.forge_browser {
+            browser.validate()?;
+        }
         let store = Store::open(&config.state_dir).await?;
         store.install_gateway_schema().await?;
         let audit_observations = match std::env::var("REMOTE_HOSTS_OBSERVATION_AUDIT") {
@@ -277,7 +280,7 @@ impl Gateway {
             .with_allowed_origins(self.config.browser_origins());
         let gateway = self.clone();
         let service = StreamableHttpService::new(
-            move || Ok(gateway.clone()),
+            move || Ok(crate::oauth_handoff::Wire(gateway.clone())),
             Arc::new(LocalSessionManager::default()),
             config,
         );
@@ -311,11 +314,13 @@ impl Gateway {
             .with_state(self.clone());
         Ok(Router::new()
             .merge(status)
+            .merge(crate::forge_browser::routes(self.clone()))
             .merge(crate::task_authorization::routes(self.clone()))
             .merge(mcp)
             .merge(admin)
             .merge(self.auth.routes())
             .merge(crate::transfers::routes(self.clone()))
+            .merge(crate::code_payload::routes(self.clone()))
             .merge(crate::transfer_control::routes(self.clone()))
             .merge(crate::transfer_receiver::routes(self.clone()))
             .merge(crate::maintenance::routes(self.clone()))
@@ -374,14 +379,20 @@ impl Gateway {
         request_id: Option<&str>,
     ) -> Result<Value> {
         let scope = tools::scope(name).context("unknown tool")?;
-        ensure!(
-            p.scopes.iter().any(|s| s == scope),
-            "insufficient_scope: {scope}"
-        );
+        for scope in tools::required_scopes(name) {
+            ensure!(
+                p.scopes.iter().any(|s| s == scope),
+                "insufficient_scope: {scope}"
+            );
+        }
         ensure!(p.owner == self.config.owner, "unknown owner");
         tools::validate(name, &args)?;
         if let Some(object) = args.as_object_mut() {
             object.remove("response_mode");
+            // Legacy Agents reject unknown fields; the default needs no new capability.
+            if name == "terminal_exec" && object.get("sudo") == Some(&json!(false)) {
+                object.remove("sudo");
+            }
         }
         if name == "task_resume" {
             return crate::task_authorization::resume(self, p, &args).await;
@@ -389,60 +400,11 @@ impl Gateway {
         if matches!(name, "transfer_cancel" | "transfer_resume") {
             return crate::transfer_control::apply(self, p, name, &args).await;
         }
+        if name == "outcome_resolve" && args["resolution"] == "close_not_enqueued" {
+            return crate::submission_fence::close(self, p, &args).await;
+        }
         if name == "outcome_resolve" {
-            let operation_id = files::text(&args, "operation_id")?;
-            uuid::Uuid::parse_str(operation_id).context("invalid operation id")?;
-            let resolution = files::text(&args, "resolution")?;
-            if let Some(saved) = self
-                .store
-                .get::<Value>("outcome_resolution", operation_id)
-                .await?
-            {
-                ensure!(
-                    saved["resolution"] == resolution,
-                    "outcome_resolution_conflict"
-                );
-                return Ok(json!({"state":"resolved","operation_id":operation_id,
-                    "resolution":resolution,"replayed":false,"duplicate":true}));
-            }
-            let row: Option<(String, Option<String>)> =
-                sqlx::query_as("SELECT request,result FROM jobs WHERE id=?")
-                    .bind(operation_id)
-                    .fetch_optional(&self.store.pool)
-                    .await?;
-            let (request, result) = row.context("unknown operation")?;
-            let request: Job = serde_json::from_str(&request)?;
-            ensure!(request.owner == p.owner, "operation owner mismatch");
-            let result: Value = result
-                .as_deref()
-                .map(serde_json::from_str)
-                .transpose()?
-                .context("operation has no durable result")?;
-            ensure!(
-                result["error"] == "outcome_unknown",
-                "operation is not outcome_unknown"
-            );
-            let guard: Option<(String,)> = sqlx::query_as(
-                "SELECT semantic FROM semantic_guards WHERE operation_id=? AND state='outcome_unknown'")
-                .bind(operation_id).fetch_optional(&self.store.pool).await?;
-            let (semantic,) = guard.context("outcome guard is not active")?;
-            sqlx::query("DELETE FROM semantic_guards WHERE semantic=? AND operation_id=?")
-                .bind(&semantic)
-                .bind(operation_id)
-                .execute(&self.store.pool)
-                .await?;
-            self.store
-                .put(
-                    "outcome_resolution",
-                    operation_id,
-                    &json!({
-                        "resolution":resolution,"resolved_at":now(),"owner":p.owner
-                    }),
-                    i64::MAX,
-                )
-                .await?;
-            return Ok(json!({"state":"resolved","operation_id":operation_id,
-                "resolution":resolution,"replayed":false}));
+            return crate::outcome_resolution::resolve(self, p, &args).await;
         }
         let source = if name == "file_upload" {
             let url = files::text(&args["file"], "download_url")?.to_owned();
@@ -586,8 +548,6 @@ impl Gateway {
             registration.scopes.iter().any(|s| s == scope),
             "device_scope_denied: {scope}"
         );
-        let task_binding =
-            crate::task_authorization::requested(self, p, name, &args, device).await?;
         if let Some(object) = args.as_object_mut() {
             if !matches!(name, "desktop_worker" | "desktop_frame") {
                 object.remove("task_id");
@@ -665,6 +625,18 @@ impl Gateway {
             }
             (id, false)
         } else {
+            // Exact retries observe their saved job; only new admission is rejected.
+            // Include JSON escaping and the complete poll envelope in this budget.
+            let features: Option<Value> = self.store.get("online", device).await?;
+            let payload_supported = features
+                .as_ref()
+                .is_some_and(|v| crate::code_payload::supported(&v["runtime_features"]));
+            crate::code_payload::admit(&job, payload_supported)?;
+            if name == "terminal_exec"
+                && let Some(command) = args.get("command").and_then(Value::as_str)
+            {
+                crate::payload_budget::command(command)?;
+            }
             if let Some(semantic) = &semantic
                 && let Some((original, state)) = sqlx::query_as::<_, (String, String)>(
                     "SELECT operation_id,state FROM semantic_guards WHERE semantic=?",
@@ -703,6 +675,15 @@ impl Gateway {
                     .and_then(|o| o.hello.maintenance_tasks.as_ref()),
                 online.as_ref().is_some_and(|o| o.hello.allow_exec),
             )?;
+            if name == "terminal_exec" && args["sudo"] == true {
+                ensure!(
+                    online
+                        .as_ref()
+                        .and_then(|o| o.runtime_features.as_ref())
+                        .is_some_and(|f| f.names.iter().any(|n| n == "local_sudo_v1")),
+                    "device_feature_unavailable: selected agent has no local sudo provider"
+                );
+            }
             for (tool, feature) in [
                 ("files_sync", "files_sync_v1"),
                 ("change_resume", "change_set_resume_v1"),
@@ -744,8 +725,8 @@ impl Gateway {
                 "device_offline: reconnect the selected device; do not fail over"
             );
             let mut transaction = self.store.pool.begin_with("BEGIN IMMEDIATE").await?;
-            if let Some(binding) = &task_binding {
-                crate::task_authorization::check_in_transaction(&mut transaction, binding).await?;
+            if name == "code_apply_edits" {
+                crate::submission_fence::require_open(&mut transaction, &idem).await?;
             }
             if let Some(semantic) = &semantic {
                 let inserted =
@@ -802,9 +783,6 @@ impl Gateway {
                 transaction.commit().await?;
                 (selected_id, false)
             } else {
-                if let Some(binding) = &task_binding {
-                    crate::task_authorization::bind(&mut transaction, &id, binding).await?;
-                }
                 // All dispatch prerequisites share the job's commit. A failure
                 // cannot publish a job without timing, recovery or source data.
                 if let Some(semantic) = &semantic {
@@ -825,6 +803,13 @@ impl Gateway {
                         .bind(&id)
                         .bind(serde_json::to_string(source)?)
                         .bind(now() + crate::transfers::SOURCE_TTL)
+                        .execute(&mut *transaction)
+                        .await?;
+                }
+                if name == "code_apply_edits" {
+                    sqlx::query("INSERT INTO kv VALUES('code_payload_admission',?,'true',?)")
+                        .bind(&id)
+                        .bind(i64::MAX)
                         .execute(&mut *transaction)
                         .await?;
                 }
@@ -1129,7 +1114,7 @@ impl ServerHandler for Gateway {
             .and_then(|parts| parts.extensions.get::<Principal>());
         Ok(ListToolsResult {
             tools: principal
-                .map(crate::contract::authorized_tools)
+                .map(crate::contract::discoverable_tools)
                 .unwrap_or_default(),
             ..Default::default()
         })
@@ -1168,6 +1153,18 @@ impl ServerHandler for Gateway {
             result.structured_content = Some(value);
             return Ok(result);
         };
+        // Account step-up is checked before receipts, device routing or desktop side effects.
+        // Policy/device/task denials after this point must never trigger OAuth relinking.
+        if p.owner == self.config.owner
+            && let Some(result) = crate::oauth_handoff::scope_challenge(
+                &p,
+                &tool,
+                &self.config.public_url,
+                &request_id,
+            )
+        {
+            return Ok(result);
+        }
         let args = Value::Object(request.arguments.unwrap_or_default());
         let compact = args.get("response_mode") != Some(&json!("full"));
         let compact_args = args.clone();
@@ -1311,7 +1308,9 @@ async fn status_page(
         return StatusCode::BAD_REQUEST.into_response();
     }
     match status_snapshot(&g, &principal).await {
-        Ok(snapshot) => {
+        Ok(mut snapshot) => {
+            crate::permission_view::owner_status(&mut snapshot["permissions"]);
+            snapshot["forge_browser_enabled"] = serde_json::json!(g.config.forge_browser.is_some());
             let revision = crate::status_view::revision(&snapshot);
             let etag = format!("W/\"{revision}\"");
             let unchanged = headers
@@ -1637,10 +1636,25 @@ async fn poll(
         notified.as_mut().enable();
         completed.as_mut().enable();
         match crate::job_dispatch::claim(&g.store, &selection, now()).await {
-            Ok(Some((_id, request))) => {
-                return match serde_json::from_str::<Value>(&request) {
-                    Ok(v) => Json(json!({"job":v})).into_response(),
-                    Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            Ok(Some((id, request))) => {
+                let result = async {
+                    let job: Job = serde_json::from_str(&request)?;
+                    let admitted = g
+                        .store
+                        .get::<bool>("code_payload_admission", &id)
+                        .await?
+                        .unwrap_or(false);
+                    let enabled = online.runtime_features.as_ref().is_some_and(|v| {
+                        crate::code_payload::supported(
+                            &serde_json::to_value(v).unwrap_or(Value::Null),
+                        )
+                    });
+                    crate::code_payload::envelope(&job, enabled, !admitted)
+                }
+                .await;
+                return match result {
+                    Ok(value) => Json(value).into_response(),
+                    Err(error) => crate::job_dispatch::storage_error("poll_payload", &error),
                 };
             }
             Ok(None) => {}
@@ -2097,4 +2111,12 @@ async fn security_headers(
 // reqwest re-exports Url but not Position.
 mod url {
     pub use ::url::Position;
+}
+
+#[cfg(test)]
+pub(crate) fn payload_poll_test_route(g: Gateway) -> Router {
+    Router::new()
+        .route("/device/poll", post(poll))
+        .with_state(g)
+        .layer(DefaultBodyLimit::max(crate::payload_budget::POLL_BYTES))
 }

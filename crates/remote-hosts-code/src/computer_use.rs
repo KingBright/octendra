@@ -1,7 +1,13 @@
 //! Shared desktop wire contract; production routing remains unavailable.
 pub use remote_hosts_desktop_protocol::*;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+pub(crate) mod lifecycle;
+#[cfg(target_os = "macos")]
+pub mod macos_worker;
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 pub(crate) mod transport;
+#[cfg(windows)]
+pub mod windows_target;
 #[cfg(test)]
 use uuid::Uuid;
 

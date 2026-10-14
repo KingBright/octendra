@@ -62,6 +62,32 @@ pub fn validate(name: &str, arguments: &Value) -> Result<()> {
             "invalid_arguments: desktop artifact identity"
         );
     }
+    if name == "outcome_resolve" {
+        if arguments["resolution"] == "close_not_enqueued" {
+            ensure!(
+                arguments.get("operation_id").is_none(),
+                "invalid_arguments: a submission has no operation id"
+            );
+            crate::submission_fence::identity(
+                "validation",
+                crate::files::text(arguments, "workspace_id")?,
+                crate::files::text(arguments, "original_idempotency_key")?,
+            )?;
+        } else {
+            uuid::Uuid::parse_str(crate::files::text(arguments, "operation_id")?)?;
+            ensure!(
+                arguments.get("workspace_id").is_none()
+                    && arguments.get("original_idempotency_key").is_none(),
+                "invalid_arguments: operation resolution does not seal a submission"
+            );
+        }
+    }
+    if name == "terminal_exec" && arguments["sudo"] == true {
+        ensure!(
+            arguments["pty"] != true && arguments["action"] != "maintenance_task",
+            "invalid_arguments: sudo requires a noninteractive shell command"
+        );
+    }
     crate::maintenance_tasks::validate(name, arguments)
 }
 
@@ -176,6 +202,22 @@ fn validate_node(schema: &Map<String, Value>, value: &Value, path: &str) -> Resu
     Ok(())
 }
 
+/// Complete OAuth requirements. Desktop worker uses one consent for its typed API.
+pub fn required_scopes(name: &str) -> Vec<&'static str> {
+    if name == "desktop_worker" {
+        vec!["desktop:observe", "desktop:input"]
+    } else {
+        scope(name).into_iter().collect()
+    }
+}
+
+pub(crate) fn has_required_scopes(p: &crate::auth::Principal, name: &str) -> bool {
+    scope(name).is_some()
+        && required_scopes(name)
+            .iter()
+            .all(|required| p.scopes.iter().any(|s| s == required))
+}
+
 fn build_catalog() -> Vec<Tool> {
     let string = || json!({"type":"string"});
     let integer = |min, max| json!({"type":"integer","minimum":min,"maximum":max});
@@ -183,12 +225,12 @@ fn build_catalog() -> Vec<Tool> {
     let mut add = |name: &str, description: &str, mut properties: Value, required: Vec<&str>| {
         properties["response_mode"] = json!({"type":"string","enum":["full","compact"],"default":"compact","description":"MCP envelope view; compact is the default. full restores diagnostic metadata."});
         if name != "task_context" {
-            properties["authorization_version"] = json!({"type":"integer","minimum":1,"maximum":9223372036854775807u64,"description":"Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions."});
+            properties["authorization_version"] = json!({"type":"integer","minimum":1,"maximum":9223372036854775807u64,"description":"Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization."});
             properties["task_id"] = json!({"type":"string","description":"Optional correlation label for one authorized cross-device task; it never authorizes or replays work."});
         }
-        let read = scope(name) == Some("code:read")
-            && !matches!(name, "workspace_open" | "file_download" | "task_resume");
-        let value = json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"outputSchema":{"type":"object","additionalProperties":true},"annotations":{"readOnlyHint":read,"destructiveHint":!read&&name!="workspace_open","idempotentHint":true,"openWorldHint":name.starts_with("terminal_")}});
+        let read =
+            scope(name) == Some("code:read") && !matches!(name, "workspace_open" | "file_download");
+        let value = json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"outputSchema":{"type":"object","additionalProperties":true},"_meta":{"securitySchemes":[{"type":"oauth2","scopes":required_scopes(name)}]},"annotations":{"readOnlyHint":read,"destructiveHint":!read&&name!="workspace_open","idempotentHint":true,"openWorldHint":matches!(name, "terminal_exec" | "terminal_input" | "terminal_cancel")}});
         // Catalog is composed entirely from static, server-controlled JSON.
         if let Ok(tool) = serde_json::from_value(value) {
             tools.push(tool);
@@ -228,7 +270,7 @@ fn build_catalog() -> Vec<Tool> {
     );
     add(
         "task_resume",
-        "Explicitly resume an owner-bound task-policy rejection after its authorization version changes. Supply exactly one original request_id or operation_id. Only durable not-started requests and never-dispatched queued jobs are eligible. Keeps the original arguments, CAS versions and idempotency identity. Never resumes unknown, running, completed, platform-denied, or source-policy-rejected work.",
+        "Legacy compatibility: observe one original request_id or operation_id. Task authorization is retired; this tool never renews authorization, dispatches or replays work. Pre-upgrade queued bindings remain held for explicit resolution.",
         json!({"task_id":string(),"authorization_version":integer(1,9223372036854775807u64),
             "request_id":string(),"operation_id":string()}),
         vec!["task_id", "authorization_version"],
@@ -283,9 +325,9 @@ fn build_catalog() -> Vec<Tool> {
     );
     add(
         "outcome_resolve",
-        "Resolve an existing mutation whose durable agent result is outcome_unknown. This never replays work. resolution=verified_not_applied clears the semantic guard so a later deliberate new operation may run; verified_applied records completion evidence and also clears the guard. Inspect scoped evidence first; the original operation_id and owner must match.",
-        json!({"operation_id":string(),"resolution":{"type":"string","enum":["verified_not_applied","verified_applied"]},"idempotency_key":string()}),
-        vec!["operation_id", "resolution", "idempotency_key"],
+        "Resolve an existing mutation whose durable agent result is outcome_unknown. This never replays work. resolution=verified_not_applied clears the semantic guard so a later deliberate new operation may run; verified_applied records completion evidence and also clears the guard. Inspect scoped evidence first; the original operation_id and owner must match. resolution=close_not_enqueued instead requires workspace_id and original_idempotency_key, with no operation_id: atomically seal a code_apply_edits submission key only when no operation exists. A delayed old request then cannot enqueue; an existing operation is returned unchanged.",
+        json!({"operation_id":string(),"workspace_id":string(),"original_idempotency_key":string(),"resolution":{"type":"string","enum":["verified_not_applied","verified_applied","close_not_enqueued"]},"idempotency_key":string()}),
+        vec!["resolution", "idempotency_key"],
     );
     add(
         "change_resume",
@@ -307,8 +349,8 @@ fn build_catalog() -> Vec<Tool> {
     );
     add(
         "terminal_exec",
-        "Start a command in the bound workspace. Default pty=false uses real pipes with stdin EOF and combined stdout/stderr; use pty=true only for interactive input. Shell has local-user authority outside code roots. Write-capable action. By default waits up to 1000 ms so short commands can return exit/output in one call; long commands return the same durable terminal_id. wait_ms may be 0..2000 and never stops the command. Follow the returned cursor; never replay uncertain execution. action=maintenance_task uses fixed argv and the shared ordinary-user maintenance core: prepare requires maintenance_action and a canonical maintenance_request_id; run requires the same ID and plan_sha256; approve records one short-lived approval bound to that plan and authenticated owner/workspace/device; cancel requires the same ID and plan_sha256; verify uses the same ID. A running or unknown request must be recovered through its original operation. Command/PTY fields are forbidden for maintenance; privileged execution remains unavailable. No root grant.",
-        json!({"workspace_id":string(),"idempotency_key":string(),"action":{"type":"string","enum":["shell","maintenance_task"],"default":"shell"},"command":string(),"pty":{"type":"boolean"},"timeout_seconds":integer(1,7200),"cols":integer(20,500),"rows":integer(5,200),"wait_ms":{"type":"integer","minimum":0,"maximum":2000,"default":1000},"maintenance_step":{"type":"string","enum":["prepare","run","approve","cancel","verify"]},"maintenance_request_id":string(),"maintenance_action":{"type":"string","enum":["inspect_remoteplay_mesh","repair_remoteplay_mesh_ownership"]},"plan_sha256":string()}),
+        "Execute using the connection's existing account/device and local-user permissions. This server adds no per-command business approval; host confirmations remain host-controlled. Default pty=false uses real pipes with stdin EOF and combined stdout/stderr; use pty=true only for interactive input. Shell has local-user authority outside code roots. Write-capable action. By default waits up to 1000 ms so short commands can return exit/output in one call; long commands return the same durable terminal_id. wait_ms may be 0..2000 and never stops the command. Follow the returned cursor; never replay uncertain execution. action=maintenance_task uses fixed argv and the shared ordinary-user maintenance core: prepare requires maintenance_action and a canonical maintenance_request_id; run requires the same ID and plan_sha256; approve records one short-lived approval bound to that plan and authenticated owner/workspace/device; cancel requires the same ID and plan_sha256; verify uses the same ID. A running or unknown request must be recovered through its original operation. Command/PTY fields are forbidden for maintenance; that adapter has no privileged executor. sudo=true optionally runs a noninteractive shell using OS sudo policy and this device/local user\'s pre-registered OS credential. No password argument or automatic retry. Output and exit status use the same terminal receipt; Windows and interactive sudo are unsupported.",
+        json!({"workspace_id":string(),"idempotency_key":string(),"action":{"type":"string","enum":["shell","maintenance_task"],"default":"shell"},"command":string(),"sudo":{"type":"boolean","default":false,"description":"Use device-local OS sudo credentials; noninteractive shell only. Never send a password."},"pty":{"type":"boolean"},"timeout_seconds":integer(1,7200),"cols":integer(20,500),"rows":integer(5,200),"wait_ms":{"type":"integer","minimum":0,"maximum":2000,"default":1000},"maintenance_step":{"type":"string","enum":["prepare","run","approve","cancel","verify"]},"maintenance_request_id":string(),"maintenance_action":{"type":"string","enum":["inspect_remoteplay_mesh","repair_remoteplay_mesh_ownership"]},"plan_sha256":string()}),
         vec!["workspace_id", "idempotency_key"],
     );
     add(
@@ -394,6 +436,35 @@ fn build_catalog() -> Vec<Tool> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn sudo_is_explicit_and_terminal_observation_is_read_only() {
+        let base = json!({"workspace_id":"fixture","idempotency_key":"fixture","command":"true","sudo":true});
+        validate("terminal_exec", &base).unwrap();
+        for (key, value) in [
+            ("pty", json!(true)),
+            ("action", json!("maintenance_task")),
+            ("password", json!("never accepted")),
+        ] {
+            let mut invalid = base.clone();
+            invalid[key] = value;
+            assert!(validate("terminal_exec", &invalid).is_err());
+        }
+        let catalog = serde_json::to_value(catalog()).unwrap();
+        let annotations = |name| {
+            catalog
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap()["annotations"]
+                .clone()
+        };
+        assert_eq!(annotations("terminal_exec")["readOnlyHint"], false);
+        assert_eq!(annotations("terminal_exec")["openWorldHint"], true);
+        assert_eq!(annotations("terminal_read")["readOnlyHint"], true);
+        assert_eq!(annotations("terminal_read")["openWorldHint"], false);
+        assert_eq!(annotations("task_resume")["readOnlyHint"], true);
+    }
     #[test]
     fn agent_tool_catalog_has_a_fixed_context_budget() -> Result<(), serde_json::Error> {
         let tools = catalog();

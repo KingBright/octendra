@@ -1,7 +1,7 @@
 //! Native stdio-to-Streamable-HTTP adapter using the Gateway's generated Tool catalog.
 //! OAuth consent/token refresh belongs to the authenticated client configuration.
 //! This adapter never retries a tools/call and never invents final host exposure.
-use crate::{auth::Principal, contract, hash, now, receipts};
+use crate::{contract, now, receipts};
 use anyhow::{Context, Result, ensure};
 use axum::http::{HeaderMap, HeaderValue};
 use rmcp::{RoleServer, ServerHandler, ServiceExt, model::*, service::RequestContext};
@@ -29,7 +29,6 @@ pub struct Adapter {
     protocol: String,
     session: Option<String>,
     catalog: Vec<Tool>,
-    scopes: Principal,
     state_dir: PathBuf,
     host_report_file: Option<PathBuf>,
 }
@@ -94,21 +93,21 @@ impl Adapter {
             protocol: "2025-06-18".into(),
             session: None,
             catalog: Vec::new(),
-            scopes: Principal {
-                owner: "upstream-authorized".into(),
-                scopes: Vec::new(),
-            },
             state_dir: config.state_dir,
             host_report_file: config.host_report_file,
         };
         let list = adapter.bootstrap().await?;
-        adapter.catalog = serde_json::from_value(list["tools"].clone())?;
+        adapter.accept_catalog(&list)?;
+        Ok(adapter)
+    }
+    fn accept_catalog(&mut self, list: &Value) -> Result<()> {
+        self.catalog = serde_json::from_value(list["tools"].clone())?;
         ensure!(
-            adapter.catalog.len() <= crate::tools::catalog().len(),
+            self.catalog.len() <= crate::tools::catalog().len(),
             "upstream_catalog_drift"
         );
         let local = crate::tools::catalog();
-        for tool in &adapter.catalog {
+        for tool in &self.catalog {
             ensure!(
                 local
                     .iter()
@@ -117,22 +116,10 @@ impl Adapter {
                 "upstream_catalog_drift: regenerate adapter from the same release"
             );
         }
-        let mut scopes = std::collections::BTreeSet::new();
-        for tool in &adapter.catalog {
-            if let Some(scope) = crate::tools::scope(&tool.name) {
-                scopes.insert(scope.to_owned());
-            }
-        }
-        adapter.scopes.scopes = scopes.into_iter().collect();
-        Ok(adapter)
+        Ok(())
     }
     fn headers(&self, id: &str) -> Result<HeaderMap> {
-        let mut headers = contract::adapter_headers(&self.scopes);
-        // The actual exposed upstream list, not an assumed full-permission list.
-        headers.insert(
-            "x-rh-adapter-catalog-sha256",
-            HeaderValue::from_str(&hash(serde_json::to_vec(&self.catalog)?))?,
-        );
+        let mut headers = contract::catalog_headers(&self.catalog);
         headers.insert("x-rh-request-id", HeaderValue::from_str(id)?);
         if let Some(path) = &self.host_report_file {
             private_regular(path)?;
@@ -335,7 +322,7 @@ pub async fn serve(config_path: &Path) -> Result<()> {
     private_regular(config_path)?;
     let config: Config = serde_json::from_slice(&std::fs::read(config_path)?)?;
     let adapter = Adapter::connect(config).await?;
-    adapter
+    crate::oauth_handoff::Wire(adapter)
         .serve(rmcp::transport::stdio())
         .await?
         .waiting()
@@ -346,6 +333,7 @@ pub async fn serve(config_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::Principal;
     use axum::{Json, Router, routing::post};
     use std::sync::atomic::{AtomicUsize, Ordering};
     async fn fixture(
@@ -391,8 +379,7 @@ mod tests {
             token: Arc::from("synthetic-test-token"),
             protocol: "2025-06-18".into(),
             session: None,
-            catalog: contract::authorized_tools(&scopes),
-            scopes,
+            catalog: contract::discoverable_tools(&scopes),
             state_dir: dir.path().to_owned(),
             host_report_file: None,
         };
@@ -454,3 +441,6 @@ mod tests {
         server.abort();
     }
 }
+
+#[cfg(test)]
+mod gateway_integration;

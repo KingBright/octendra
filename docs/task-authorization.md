@@ -1,161 +1,106 @@
-# Owner task authorization with automatic expiry
+# Connection authorization and device-local sudo
 
-## Source and deployed-runtime status
+## Current source behavior
 
-The NAS Gateway runs the independent 0.10.27 release with task authorization
-protocol 2, wire protocol 2 and 25 MCP tools. Runtime acceptance on 2026-10-09
-verified the installed and running executable SHA-256, UID 18787, local health,
-owner-route authentication and existing-authority read/terminal/transfer receipts.
-The 0.10.26 published bundle remains byte-identical. Only the Linux Gateway was
-built and deployed; Agents retain their existing wire-compatible versions.
+New code reads, writes and terminal operations use the authenticated connection's
+current account scopes, enrolled-device scopes and Agent local permissions.
+There is no TaskGrant creation, expiry, renewal or command-business approval.
+OAuth token-family revocation, owner/device checks, local allow flags, code path
+boundaries, schema validation and unknown-operation/idempotency guards remain.
+Terminal commands have local-user authority outside code roots; cwd is not a
+filesystem sandbox. Token expiry/revocation blocks later authenticated requests;
+it does not cancel already accepted queued or running operations.
 
-The binary is bound to commit `b55e061a1d88a9975125cbacc6761c1b321600c3` and the
-declared working-tree snapshot
-`0b1556c3ff430a9aca27946a832cda271a52e186eb1da0bd400566b53c4b9b6b`.
-The initial package's Skill revision used the hash of one file; acceptance caught
-that mismatch before service changes. A separate corrected package uses the
-ordered nine-file embedded Skill revision; original artifacts and the rejection
-receipt are retained. Its binary and updater bytes did not change or rebuild.
-The accepted NAS package is in `releases/0.10.27/verified-02`; runtime evidence is
-`task-auth-release-0.10.27/gateway-01/runtime-acceptance.json` in the task evidence
-workspace. No production grant, OAuth change or other-product action occurred.
+task_id is a correlation label. authorization_version is accepted only for
+compatibility and grants no authority. The retired owner form returns 410 after
+authentication. task_resume only observes its original request or operation.
+Existing queued task bindings stay held; upgrade does not dispatch previously
+blocked work. Historical rows and receipts are retained. Existing dispatched
+operations keep their original observation semantics.
 
-The conversation currently exposes 24 Remote Hosts tools against the Gateway's
-25-tool catalog: `task_resume` is absent and its enqueue tools do not accept
-`authorization_version`. The Gateway's advertised catalog does not establish host-side availability. There is no
-supported connector action exposed here to refresh that schema. For a custom
-MCP connection, use ChatGPT Plugins, select the existing connection, choose
-Refresh, verify the metadata, then start a new conversation and inspect the
-tools. Published plugins follow the host's catalog/review update process.
-See [OpenAI's connection documentation](https://developers.openai.com/plugins/deploy/connect-chatgpt).
-Never invent a version or submit a field/tool absent from the active schema.
+The task-authorization protocol marker remains 2 solely for stored-history and
+existing updater compatibility. The manifest separately advertises connection
+authorization and retirement of grants. This source change is not evidence of
+Gateway, Agent, connector-schema or fleet deployment.
 
-## Owner approval and scope
+## Optional sudo execution
 
-The trusted entry point remains `/status/task-authorization` on the existing
-Gateway HTTPS origin. The owner signs in directly and supplies the existing
-password for each grant write. Same-origin POST, a session-bound CSRF value and
-`expected_version` CAS remain required. MCP/OAuth credentials cannot create,
-renew or revoke a grant. The form starts no operation and creates no credential.
+On macOS/Linux, an Agent advertises local_sudo_v1. terminal_exec accepts
+sudo=true for a noninteractive shell; the default remains ordinary local-user
+execution. The Gateway rejects it when the selected Agent has not advertised
+support. Interactive PTYs and the legacy maintenance adapter cannot use this
+field. Windows has no provider in this implementation. Explicit sudo=false is
+normalized away before dispatch so an older Agent can still accept an ordinary
+command. Upgrading the Gateway alone does not add a provider to an old Agent.
 
-A grant records the owner, exact task ID, version, enabled state, exact enrolled
-device IDs, existing allowlisted scopes, protocol, update time and expiry.
-Authorization requires a lifetime of 1–1440 minutes. The server computes
-`expires_at = server_now + lifetime`; caller-provided absolute timestamps are
-not accepted. At `server_now >= expires_at` the grant is expired. Revocation
-increments the version, disables the grant and preserves its previous devices,
-scopes and expiry even after enrollment changes. All versions remain in the
-private history. An owner browser session ending does not end a valid grant;
-server expiry does not depend on that session or a scheduled manual revocation.
+No separate local enable flag is implemented. Before credential registration,
+an explicit sudo=true request may already succeed using an OS timestamp or
+NOPASSWD policy. Deployment of this provider is therefore a root-execution
+capability change even when no credential has been stored.
 
-The initial form leaves devices empty and proposes only `code:read`, with a
-60-minute lifetime. These are inactive defaults until the owner submits approval.
-A request must still satisfy current account scopes, enrolled-device scopes,
-the grant and Agent local allow flags/path checks. Task/device bindings do not
-enlarge that intersection. A bare `task_id` without a stored grant remains a
-correlation label; unlabelled legacy calls retain existing API authority.
-TaskGrant revocation therefore does not revoke the account's other API access.
+The Agent first invokes the system /usr/bin/sudo with -n -v. If authentication is
+needed, it retrieves a credential registered locally by the user, invokes sudo
+-S -p "" -v through a private stdin pipe, closes that pipe, and checks the actual
+exit status. Only then does it start sudo -n -- with the configured shell once.
+The business command has stdin EOF and never receives password bytes, including
+when cached or NOPASSWD policy avoids reading a password. No prompt matching,
+password argument, custom timed grant or command classifier is involved.
 
-TaskGrant has no directory, command or individual-tool allowlist. `code:read`
-covers the existing read tools and their existing local path policy. Neither a
-workspace ID, cwd nor a string prefix proves filesystem confinement.
-`terminal:exec` permits shell execution with local-user authority, including
-outside code roots. Do not call it a workspace sandbox or infer that TaskGrant
-limits a command to the intended project.
+This follows the machine's existing sudo timestamp and sudoers policy. A zero
+timestamp lifetime, requiretty, unavailable/locked credential store, denied sudo
+policy or expired cache can prevent execution. These conditions produce a
+visible failure; they never trigger automatic command replay or sudoers edits.
+Credential removal prevents future lookup; existing OS authentication caches and
+already running processes follow OS policy. See the [sudo timestamp manual](https://www.sudo.ws/docs/man/sudoers_timestamp.man/).
 
-## Enforcement and continuation
+The credential identity is service fun.hackerlife.remote-hosts.sudo and account
+<canonical Code Agent device UUID>:<effective OS uid>. macOS uses that user's
+Keychain generic-password entry; Linux uses that login session's Secret Service
+through /usr/bin/secret-tool. The user registers/rotates/deletes it using local OS
+interfaces. No MCP tool accepts the password or selects another credential.
+Keychain access may still need direct OS consent. This does not import an SSH
+connector vault or create a credential silently.
 
-Expiry, revocation, exact owner/task/version, enrolled device and scope are
-checked before queue creation, again while inserting the queue/binding in its
-transaction, and atomically before an undispatched job is claimed. Expired,
-revoked or changed grants block new/undispatched task work without blocking
-independent work. Existing dispatched/running work can continue; expiry is not
-a process-kill guarantee. Existing receipts remain readable under their current
-account/operation authorization.
+For macOS, register the exact verified device UUID and effective UID in the
+user's own local Terminal. The last -w option prompts for the password; never
+put its value in a command, environment variable, chat or MCP request:
 
-A protocol-1 grant without an expiry is not silently promoted. It reports
-`expiry_required` and bound undispatched work waits for direct owner renewal
-to a new version. Existing unbound jobs and receipt recovery keep their original
-semantics. The deployed protocol-2 form provides automatic expiry. The 0.10.27
-updater blocks migration while an effective unbounded legacy grant exists, so
-cutover cannot silently invalidate the owner's current approval. The production
-preflight found no grant, binding or history rows; no effective grant changed.
+```sh
+/usr/bin/security add-generic-password \
+  -a '<canonical-device-uuid>:<effective-uid>' \
+  -s 'fun.hackerlife.remote-hosts.sudo' -T '' -w
+```
 
-After direct owner renewal, `task_resume` requires the exact task ID, new
-owner-issued version and one original request or operation ID. A durable
-Gateway task-policy rejection must prove `not_started` with no operation.
-Recovery retains the immutable original intent, file versions and idempotency
-key. A queued job needs no result, no dispatch timestamp and an existing timing
-record; renewal updates its binding while keeping its operation ID. Concurrent
-resume must create/claim only one execution. An identical completed resume
-observes that original operation.
+-T '' removes implicit creator trust; never use the allow-all -A flag. The OS
+may ask separately for access by the signed Agent. Any persistent consent is
+the user's local choice. Delete/rotate the matching item through the local OS
+interface. Deletion does not invalidate an already valid OS sudo timestamp.
+The credential pipe prevents accidental forwarding to the submitted command;
+it does not isolate secrets from a compromised local account or an explicitly
+authorized arbitrary privileged command.
 
-Unknown outcomes, already dispatched work, platform approval, local policy
-denials, source-address rejection, credentials/terminal input, transfer URLs
-and generic access denial are not eligible. Observe their original handles.
-Renewal does not repair another product's transport, Android executor,
-Cloudflare browser-signature rejection, OAuth connection or host schema cache.
+Authentication failures return command_started=false, a safe error code and
+validation exit status. Command execution uses the existing Agent-owned terminal
+capture, process identity, combined stdout/stderr, cursor and real exit status.
+A privileged command writing a separate root-only file does not make that file
+readable; callers should use captured output where required. Cancellation follows
+OS signalling permissions and does not promise to kill every root descendant.
+Cancellation while authentication is still starting does not stop the pending
+preflight; inspect the returned state. A timed-out macOS Keychain lookup can
+leave its OS prompt outstanding, but its late result cannot start the command.
+Observe the original terminal after timeout/cancellation; do not resubmit it.
 
-## Replacement and rollback
+## Client confirmations and rollout
 
-The updater reads only aggregate policy capability metadata. Protocol-1 rows
-require support for at least protocol 1. Protocol-2 or expiry-bearing grant/binding
-rows require at least protocol 2 even if expired, revoked or orphaned. Unknown
-future versions and malformed metadata fail closed. Candidate manifests must
-declare a recognized integer protocol supporting the persisted minimum.
+Annotations reflect actual behavior. terminal_read and the retired observation
+tool are read-only; arbitrary terminal_exec remains write-capable and open-world.
+Gemini App's write confirmation is controlled by Google, while Gemini CLI and
+Codex have their own approval settings. Server metadata cannot promise unattended
+host approval or bypass an existing rejection. Google's [Gemini custom-app documentation](https://support.google.com/gemini/answer/17209137) explicitly requires manual confirmation for write actions.
 
-The capability gate runs before service changes, again after stopping the policy
-writer, and before rollback. An additional migration gate checks effective legacy
-grants before replacement and after stopping that writer. If it blocks cutover,
-the unchanged previous binary restarts; no grant is rewritten or erased. A new
-expiry policy cannot be ignored by a protocol-1 predecessor. If compatible rollback is unavailable, the configured service stays
-stopped and the live database is retained; use a verified compatible binary.
-Do not clear policy or restore an older database to force downgrade. This source
-change does not modify or supersede immutable previously packaged updaters.
-
-## Minimum future production probe
-
-The former proposal for three scopes plus manual revocation after one hour is
-withdrawn. No production grant was created. Manual revocation is not automatic
-expiry, and both the previous 0.10.26 acceptance and the 0.10.27 runtime acceptance
-used existing account authority rather than a human-issued TaskGrant.
-
-Protocol-2 release/runtime acceptance is complete. After the host schema is
-updated, the inactive proposal is task `taskgrant-expiry-live-0.10.27-01`, enrolled
-device `ba3bf113-2390-466e-88bc-40d5b4f02884` (MacBook-M2-Max), only `code:read`
-and five minutes. It requests no terminal or write scope.
-The owner must directly accept the actual read scope and issue the version.
-Use one harmless read in an existing permitted workspace, close the owner
-browser, observe its original receipt, then check that a new labelled read after
-server expiry is rejected before queue creation while the original receipt
-remains readable. Do not create a grant until the owner approves that concrete
-scope. This probes expiry/intersection only; it does not establish exact-file
-confinement or unattended assistant scheduling.
-
-Keep terminal/write recovery and revocation races in isolated fixtures for this
-minimum production probe. A future need for exact paths or shell confinement
-requires an enforced capability/sandbox design and separate acceptance;
-changing cwd or adding a path label is insufficient.
-
-## Current-source verification
-
-Use the existing registered release-slot target and its actual lease. Build
-only the relevant library test harness with the pinned toolchain, locked offline
-dependencies and one build job. Record declared source-input hashes before and
-after compilation/testing, Cargo's generated executable, its checksum, test
-count and sealed logs. A cached test executable without exact input provenance
-does not establish current-source acceptance; zero selected tests are rejected.
-
-The 0.10.27 frozen snapshot passed 17 TaskGrant library tests, 16 Python updater
-tests, eight dispatcher tests and one release-manifest test (42 total), plus
-format, Clippy and component check gates. It reused the registered target and
-lease, built one Linux production executable and left more than 107 GiB free.
-The updater tests include active-legacy preflight rejection, a grant appearing
-before cutover, and valid protocol-2 approval metadata.
-
-The isolated suite covers expiry boundaries, expiry between initial check and
-queue binding, post-enqueue expiry, legacy grants, owner/task/device/scope
-binding, current account/device/local policy, owner authentication/CAS,
-revocation/renewal races, original-marker exactly-once recovery and rollback
-downgrade faults. These fixtures do not establish live owner approval, fleet
-rollout, platform tool refresh or RemotePlay/Pixel/Android recovery.
+Before production deployment, review the exact Gateway/Agent targets, connection
+scopes, removal of legacy TaskGrant restrictions, treatment of held operations,
+and the optional root-shell capability for a locally registered credential.
+The implementation does not register real passwords, alter sudoers, enable a
+privileged daemon or deploy itself. Keep verification in the main checkout and
+existing shared target using the fixed build runner and targeted tests.

@@ -25,7 +25,7 @@ pub struct Agent {
     pub config: Arc<AgentConfig>,
     pub store: Store,
     terminals: Terminals,
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(any(target_os = "linux", target_os = "macos", test))]
     pub(crate) desktop_workers: crate::computer_use::transport::NativeWorkers,
     scheduler: Arc<Scheduler>,
     active: Arc<ActiveJobs>,
@@ -34,6 +34,7 @@ pub struct Agent {
     liveness: Arc<liveness::Liveness>,
     poll_health_revision: Arc<std::sync::atomic::AtomicU64>,
     history_access: Arc<tokio::sync::RwLock<()>>,
+    legacy_feature_advertisement: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Deserialize)]
@@ -43,8 +44,14 @@ pub(crate) struct DesktopJob {
     pub capability_version: u64,
     pub request: crate::computer_use::Request,
     pub device_id: Option<uuid::Uuid>,
+    // Gateway validates this envelope field; retain strict wire deserialization.
+    #[allow(dead_code)]
     pub idempotency_key: Option<String>,
+    // Gateway validates this envelope field; retain strict wire deserialization.
+    #[allow(dead_code)]
     pub authorization_version: Option<u64>,
+    // Gateway validates this envelope field; retain strict wire deserialization.
+    #[allow(dead_code)]
     pub response_mode: Option<String>,
 }
 impl DesktopJob {
@@ -72,8 +79,14 @@ pub(crate) struct DesktopFrameJob {
     pub device_id: uuid::Uuid,
     pub capability_version: u64,
     pub observed_operation_id: uuid::Uuid,
+    // Gateway validates this envelope field; retain strict wire deserialization.
+    #[allow(dead_code)]
     pub idempotency_key: String,
+    // Gateway validates this envelope field; retain strict wire deserialization.
+    #[allow(dead_code)]
     pub authorization_version: Option<u64>,
+    // Gateway validates this envelope field; retain strict wire deserialization.
+    #[allow(dead_code)]
     pub response_mode: Option<String>,
 }
 
@@ -122,14 +135,14 @@ impl Agent {
         )
         .await?;
         store.put("runtime", "build", &json!({"version":env!("CARGO_PKG_VERSION"),"pid":std::process::id(),"started_at":crate::now()}), i64::MAX).await?;
-        #[cfg(any(target_os = "linux", test))]
+        #[cfg(any(target_os = "linux", target_os = "macos", test))]
         let desktop_workers = crate::computer_use::transport::NativeWorkers::load(
             &config.state_dir,
             &config.device_id,
         )
         .with_store(store.clone());
         Ok(Self {
-            #[cfg(any(target_os = "linux", test))]
+            #[cfg(any(target_os = "linux", target_os = "macos", test))]
             desktop_workers,
             config: Arc::new(config),
             store,
@@ -141,9 +154,10 @@ impl Agent {
             liveness: Arc::default(),
             poll_health_revision: Arc::default(),
             history_access: Arc::default(),
+            legacy_feature_advertisement: Arc::default(),
         })
     }
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(any(target_os = "linux", target_os = "macos", test))]
     pub async fn read_desktop_frame(&self, job: &Job) -> Result<Vec<u8>> {
         ensure!(
             job.tool == "desktop_worker" && job.device_id == self.config.device_id,
@@ -171,7 +185,7 @@ impl Agent {
             .read_frame(&artifact, &identity, args.capability_version)
             .await
     }
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(any(target_os = "linux", target_os = "macos", test))]
     pub async fn revoke_desktop(&self, binding: &crate::computer_use::Binding) -> bool {
         self.desktop_workers.revoke(Some(binding)).await
     }
@@ -311,12 +325,19 @@ impl Agent {
     }
     async fn perform(&self, job: &Job, progress: &crate::progress::Progress) -> Result<Value> {
         let v = &job.arguments;
-        #[cfg(any(target_os = "linux", test))]
+        #[cfg(any(target_os = "linux", target_os = "macos", test))]
         if job.tool == "desktop_worker" {
             // Typed catalog admission is independent of shell/code permissions.
             crate::tools::validate(&job.tool, v)?;
             let args: DesktopJob = serde_json::from_value(v.clone())?;
             if matches!(args.request, crate::computer_use::Request::Capabilities {}) {
+                #[cfg(target_os = "macos")]
+                return Ok(serde_json::to_value(
+                    crate::computer_use::Response::Capabilities {
+                        capabilities: self.desktop_workers.capabilities().await,
+                    },
+                )?);
+                #[cfg(not(target_os = "macos"))]
                 return Ok(serde_json::to_value(
                     crate::computer_use::unavailable(&args.request)
                         .expect("capabilities are always available"),
@@ -334,7 +355,7 @@ impl Agent {
                 .await;
         }
 
-        #[cfg(any(target_os = "linux", test))]
+        #[cfg(any(target_os = "linux", target_os = "macos", test))]
         if job.tool == "desktop_frame" {
             crate::tools::validate(&job.tool, v)?;
             let args: DesktopFrameJob = serde_json::from_value(v.clone())?;
@@ -633,7 +654,7 @@ impl Agent {
             self.run_loop(None),
             crate::history_retention::agent_loop(self.config.clone(), self.history_access.clone())
         );
-        #[cfg(any(target_os = "linux", test))]
+        #[cfg(any(target_os = "linux", target_os = "macos", test))]
         self.desktop_workers.revoke(None).await;
         result?;
         Ok(())
@@ -647,7 +668,7 @@ impl Agent {
             self.run_loop(Some(&home)),
             crate::history_retention::agent_loop(self.config.clone(), self.history_access.clone())
         );
-        #[cfg(any(target_os = "linux", test))]
+        #[cfg(any(target_os = "linux", target_os = "macos", test))]
         self.desktop_workers.revoke(None).await;
         result?;
         Ok(())
@@ -914,8 +935,9 @@ impl Agent {
                     "readiness snapshot unavailable; original poll facts retained, work continues"
                 );
             }
+            let active = self.active.list()?;
             if last_reconcile.elapsed() >= Duration::from_secs(15) {
-                match self.terminals.reconcile_orphans(30).await {
+                match self.terminals.reconcile_orphans(30, &active).await {
                     Ok(count) if count > 0 => {
                         tracing::warn!(count, "reconciled orphaned terminal state")
                     }
@@ -924,7 +946,6 @@ impl Agent {
                 }
                 last_reconcile = tokio::time::Instant::now();
             }
-            let active = self.active.list()?;
             if terminal_snapshot
                 .refresh(
                     &self.store,
@@ -1053,7 +1074,12 @@ impl Agent {
         let filter = self.resource_filter(lane).await?;
         request["poll_wait_ms"] = json!(if filter.is_empty() { 20000 } else { 250 });
         request["resource_filter"] = serde_json::to_value(filter)?;
-        request["runtime_features"] = json!(crate::capabilities::RuntimeFeatures::current());
+        if !self
+            .legacy_feature_advertisement
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            request["runtime_features"] = json!(crate::capabilities::RuntimeFeatures::current());
+        }
         // Heartbeat owns terminal-state replication. Independent poll lanes must
         // not repeat the same SQLite snapshot on every long poll.
         request["receipt_delivery"] = json!(
@@ -1076,6 +1102,31 @@ impl Agent {
             .send()
             .await
             .map_err(|error| crate::poll_health::Failure::transport("poll_send", &error))?;
+        // A confirmed 400 did not dispatch a job. Retry registration once with
+        // only optional feature metadata omitted; never retry authentication or transport failure.
+        if response.status() == reqwest::StatusCode::BAD_REQUEST
+            && request.get("runtime_features").is_some()
+        {
+            request
+                .as_object_mut()
+                .expect("hello object")
+                .remove("runtime_features");
+            let fallback = client
+                .post(format!("{}/device/poll", self.config.gateway_url))
+                .bearer_auth(&self.config.device_token)
+                .json(&request)
+                .send()
+                .await
+                .map_err(|error| crate::poll_health::Failure::transport("poll_send", &error))?;
+            if fallback.status().is_success() {
+                self.legacy_feature_advertisement
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    "legacy Gateway accepted registration without optional runtime feature metadata"
+                );
+            }
+            response = fallback;
+        }
         if !response.status().is_success() {
             return Err(crate::poll_health::Failure::http(
                 response.status().as_u16(),
@@ -1092,7 +1143,7 @@ impl Agent {
             .await
             .map_err(|error| crate::poll_health::Failure::transport("poll_receive", &error))?
         {
-            if bytes.len().saturating_add(chunk.len()) > 512 * 1024 {
+            if bytes.len().saturating_add(chunk.len()) > crate::payload_budget::POLL_BYTES {
                 return Err(
                     crate::poll_health::Failure::at("response_too_large", "poll_receive").into(),
                 );
@@ -1136,10 +1187,164 @@ impl Agent {
         self.liveness.observed(contact_started);
         Ok(job)
     }
-    async fn execute_report(&self, delivery: &Delivery, job: Job) -> Result<()> {
-        // Releasing an execution worker does not discard delivery intent. The
-        // independent sender owns retries, including after an Agent restart.
-        self.execute_with_delivery(&job, Some(delivery)).await?;
+    async fn execute_report(&self, delivery: &Delivery, wire: Job) -> Result<()> {
+        if wire.arguments.get("code_payload").is_none() {
+            self.execute_with_delivery(&wire, Some(delivery)).await?;
+            return Ok(());
+        }
+        let payload_lock = format!("code-payload:{}", wire.id);
+        let _payload_guard = self.scheduler.operations.lock(&payload_lock).await?;
+        let metadata = &wire.arguments["code_payload"];
+        // A redelivery after completion must not fetch cleaned temporary data.
+        {
+            let _guard = self.scheduler.operations.lock(&wire.id).await?;
+            if let Some(op) = self
+                .store
+                .get::<LocalOperation>("local_operation", &wire.id)
+                .await?
+            {
+                ensure!(
+                    metadata["job_sha256"] == op.fingerprint,
+                    "operation fingerprint conflict"
+                );
+                if !op.gateway_accepted {
+                    let result = op.result.unwrap_or_else(
+                        || json!({"error":"outcome_unknown","operation_id":wire.id}),
+                    );
+                    delivery.enqueue(&wire.id, &result).await?;
+                }
+                return Ok(());
+            }
+        }
+        let job = match crate::code_payload::hydrate(
+            &self.config,
+            &self.store,
+            self.scheduler.writes.clone(),
+            &wire,
+        )
+        .await
+        {
+            Ok(job) => job,
+            Err(error)
+                if error
+                    .downcast_ref::<crate::durable_transfer::Fault>()
+                    .is_some_and(|fault| {
+                        fault.state == "paused" && fault.code == "network_retry_exhausted"
+                    }) =>
+            {
+                // Same operation redelivery resumes its verified checkpoint.
+                return Err(error);
+            }
+            Err(_) => {
+                self.reject_payload_receive(delivery, &wire).await?;
+                crate::code_payload::cleanup(&self.config, &self.store, &wire.id).await?;
+                return Ok(());
+            }
+        };
+        if metadata["reconcile_only"] == true {
+            self.reconcile_payload(delivery, &job).await?;
+        } else {
+            self.execute_with_delivery(&job, Some(delivery)).await?;
+        }
+        crate::code_payload::cleanup(&self.config, &self.store, &job.id).await?;
+        Ok(())
+    }
+    async fn reject_payload_receive(&self, delivery: &Delivery, wire: &Job) -> Result<()> {
+        let _guard = self.scheduler.operations.lock(&wire.id).await?;
+        let fingerprint = files::text(&wire.arguments["code_payload"], "job_sha256")?.to_owned();
+        ensure!(
+            crate::transfers::valid_hash(&fingerprint),
+            "invalid payload operation fingerprint"
+        );
+        if let Some(op) = self
+            .store
+            .get::<LocalOperation>("local_operation", &wire.id)
+            .await?
+        {
+            ensure!(
+                op.fingerprint == fingerprint,
+                "operation fingerprint conflict"
+            );
+            if !op.gateway_accepted {
+                let result = op
+                    .result
+                    .unwrap_or_else(|| json!({"error":"outcome_unknown","operation_id":wire.id}));
+                delivery.enqueue(&wire.id, &result).await?;
+            }
+            return Ok(());
+        }
+        let result = json!({"error":"payload_receive_failed","error_code":"payload_receive_failed",
+            "operation_id":wire.id,"failure_boundary":"device_content_receive","execution_state":"not_started",
+            "outcome":"not_executed","retry_policy":"observe_original_receipt_before_resubmitting"});
+        self.store
+            .put(
+                "local_operation",
+                &wire.id,
+                &LocalOperation {
+                    fingerprint,
+                    state: "done".into(),
+                    result: Some(result.clone()),
+                    gateway_accepted: false,
+                    resumable: false,
+                    workspace_id: wire.arguments["workspace_id"].as_str().map(str::to_owned),
+                    tool: Some(wire.tool.clone()),
+                    updated_at: crate::now(),
+                },
+                i64::MAX,
+            )
+            .await?;
+        delivery.enqueue(&wire.id, &result).await?;
+        Ok(())
+    }
+    async fn reconcile_payload(&self, delivery: &Delivery, job: &Job) -> Result<()> {
+        let _guard = self.scheduler.operations.lock(&job.id).await?;
+        let fingerprint = crate::hash(serde_json::to_vec(job)?);
+        if let Some(op) = self
+            .store
+            .get::<LocalOperation>("local_operation", &job.id)
+            .await?
+        {
+            ensure!(
+                op.fingerprint == fingerprint,
+                "operation fingerprint conflict"
+            );
+            if !op.gateway_accepted {
+                let result = op
+                    .result
+                    .unwrap_or_else(|| json!({"error":"outcome_unknown","operation_id":job.id}));
+                delivery.enqueue(&job.id, &result).await?;
+            }
+            return Ok(());
+        }
+        // This is a device acknowledgement of non-acceptance under the same
+        // operation lock used by execution, never a Gateway timeout guess.
+        let mut result = crate::diagnostics::error(
+            &job.tool,
+            "payload_too_large: original request never accepted",
+            Some(&job.id),
+            "agent_execute",
+        );
+        result["device_acceptance"] = json!("not_accepted");
+        result["acceptance_evidence"] = json!("durable_agent_journal_checked_under_operation_lock");
+        result["request_fingerprint"] = json!(fingerprint);
+        self.store
+            .put(
+                "local_operation",
+                &job.id,
+                &LocalOperation {
+                    fingerprint,
+                    state: "done".into(),
+                    result: Some(result.clone()),
+                    gateway_accepted: false,
+                    resumable: false,
+                    workspace_id: job.arguments["workspace_id"].as_str().map(str::to_owned),
+                    tool: Some(job.tool.clone()),
+                    updated_at: crate::now(),
+                },
+                i64::MAX,
+            )
+            .await?;
+        delivery.enqueue(&job.id, &result).await?;
         Ok(())
     }
 }
@@ -1151,6 +1356,9 @@ fn absolute(path: &Path) -> Result<PathBuf> {
     }
 }
 
+#[cfg(test)]
+#[path = "agent_payload_tests.rs"]
+mod payload_tests;
 #[cfg(test)]
 #[path = "agent_scheduling_tests.rs"]
 mod scheduling_tests;

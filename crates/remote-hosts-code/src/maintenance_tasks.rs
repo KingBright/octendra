@@ -573,7 +573,7 @@ mod tests {
         let features = crate::capabilities::RuntimeFeatures::current();
         assert_eq!(features.names.len(), 32);
         assert!(features.valid());
-        assert_eq!(crate::tools::catalog().len(), 25);
+        assert_eq!(crate::tools::catalog().len(), 27);
         let hello: crate::gateway::DeviceHello = serde_json::from_value(
             json!({"session":"legacy","roots":[],"allow_write":false,"allow_exec":false}),
         )

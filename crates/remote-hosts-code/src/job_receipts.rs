@@ -66,6 +66,28 @@ pub(crate) async fn commit(
         value.get("transfer_revision").is_none() || revision.is_some_and(|v| v >= 0),
         "invalid_receipt_revision"
     );
+    if value["device_acceptance"] == "not_accepted" {
+        let request: String =
+            sqlx::query_scalar("SELECT request FROM jobs WHERE id=? AND device=?")
+                .bind(id)
+                .bind(device)
+                .fetch_optional(&store.pool)
+                .await?
+                .context("negative_acceptance_job_missing")?;
+        let job: crate::gateway::Job = serde_json::from_str(&request)?;
+        ensure!(
+            value["error_code"] == "payload_too_large"
+                && value["execution_state"] == "not_started"
+                && value["request_fingerprint"] == crate::hash(serde_json::to_vec(&job)?)
+                && job.tool == "code_apply_edits"
+                && crate::payload_budget::poll_bytes(&job)? > crate::payload_budget::POLL_BYTES
+                && store
+                    .get::<bool>("code_payload_admission", id)
+                    .await?
+                    .is_none(),
+            "negative_acceptance_identity_conflict"
+        );
+    }
     let encoded = serde_json::to_string(value)?;
     // Do not acquire a writer just to acknowledge an already committed packet.
     // Ownership and generation are included in both the read and transaction.
@@ -98,7 +120,7 @@ pub(crate) async fn commit(
     ensure!(changed.rows_affected() == 1, "receipt_identity_changed");
     // operation_id has a UNIQUE index. Do not depend on a second KV mapping
     // lookup whose failed write could leave an otherwise completed job guarded.
-    if value["error"] == "outcome_unknown" {
+    if crate::diagnostics::outcome_unknown(value) {
         sqlx::query(
             "UPDATE semantic_guards SET state='outcome_unknown',updated=? WHERE operation_id=?",
         )

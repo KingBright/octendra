@@ -6,6 +6,14 @@ pub mod engine;
 pub mod executor;
 #[cfg(unix)]
 pub mod filesystem;
+#[cfg(unix)]
+pub mod ho5;
+#[cfg(unix)]
+pub mod ho5_bus;
+#[cfg(unix)]
+pub mod ho5_cli;
+#[cfg(unix)]
+pub mod ho5_store;
 pub mod protocol;
 #[cfg(unix)]
 pub mod tasks;

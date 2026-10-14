@@ -238,7 +238,7 @@ pub(crate) async fn task(g: &Gateway, p: &Principal, args: &Value) -> Result<Val
         "summary":{"linked_operations":count,"page_operations":ids.len(),"active_in_page":active,"uncertain_in_page":uncertain,"authorization_blocked":authorization_blocked},
         "has_more":more,"scope_complete":!more&&after.is_none(),
         "next_page":if more{ids.last().cloned()}else{None},
-        "next_action":if more{"continue_task_page"}else if next.is_some(){"observe_existing_operation"}else if authorization_blocked>0 || !rejected_requests.is_empty(){"review_task_authorization_then_resume_original"}else if count==0{"not_observed_or_expired"}else{"no_active_work_in_page"},
+        "next_action":if more{"continue_task_page"}else if next.is_some(){"observe_existing_operation"}else if authorization_blocked>0 || !rejected_requests.is_empty(){"observe_legacy_request_or_cancel_held_operation"}else if count==0{"not_observed_or_expired"}else{"no_active_work_in_page"},
         "next_operation_id":next,"automatic_replay":false,
         "last_verified_source":null,"verification_note":"Only attached verification receipts prove source/test identity; terminal exit alone does not.",
         "retention_seconds":receipts::RETENTION,"retention_policy":"until_explicit_owner_cleanup"}),
@@ -247,6 +247,7 @@ pub(crate) async fn task(g: &Gateway, p: &Principal, args: &Value) -> Result<Val
 
 pub(crate) async fn status(g: &Gateway, p: &Principal) -> Result<Value> {
     let fleet = g.dispatch(p, "fleet_status", json!({})).await?;
+    let permissions = crate::permission_view::snapshot(&fleet, &g.config.devices, p);
     let ids:Vec<String>=sqlx::query_scalar("SELECT j.id FROM jobs j LEFT JOIN kv t ON t.kind='terminal_observation' AND t.key=j.id AND t.expires>? WHERE json_extract(j.request,'$.owner')=? ORDER BY (j.state IN ('queued','dispatched') OR json_extract(t.value,'$.terminal.state') IN ('running','starting')) DESC,j.updated DESC,j.id LIMIT 101")
         .bind(now()).bind(&p.owner).fetch_all(&g.store.pool).await?;
     let truncated = ids.len() > 100;
@@ -302,6 +303,6 @@ pub(crate) async fn status(g: &Gateway, p: &Principal) -> Result<Value> {
             "unconfirmed_requests":unconfirmed_requests,"unavailable_or_filtered_operations":unavailable,
             "scope_complete":!truncated&&unavailable==0,"state":if active>0{"active_operations"}else if uncertain>0||unconfirmed_requests>0{"outcomes_require_observation"}else if unavailable>0{"observation_incomplete"}else if truncated{"history_page_limited"}else{"no_active_work"}},
         "history_truncated":truncated,"heartbeat_is_not_business_progress":true,
-        "fleet":fleet,"operations":items,"requests_without_operation":request_views}),
+        "permissions":permissions,"fleet":fleet,"operations":items,"requests_without_operation":request_views}),
     )
 }

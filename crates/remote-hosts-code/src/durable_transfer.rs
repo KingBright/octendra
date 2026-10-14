@@ -599,7 +599,7 @@ async fn checkpoint(
 }
 // The transport, durable state and live progress remain explicit at this boundary.
 #[allow(clippy::too_many_arguments)]
-async fn fetch(
+pub(crate) async fn fetch(
     client: &reqwest::Client,
     url: &reqwest::Url,
     output: &mut tokio::fs::File,

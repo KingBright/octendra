@@ -123,6 +123,43 @@ fn lock(dir: &std::path::Path) -> Result<std::fs::File> {
 async fn main() -> Result<()> {
     #[cfg(windows)]
     {
+        let args: Vec<_> = std::env::args().collect();
+        if args.get(1).is_some_and(|v| v == "desktop-window-target") {
+            ensure!(args.len() == 4, "window target requires PID and window ID");
+            let target = remote_hosts_code::computer_use::windows_target::window_target(
+                args[2].parse()?,
+                args[3].parse()?,
+            )?;
+            println!("{}", serde_json::to_string(&target)?);
+            return Ok(());
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let args: Vec<_> = std::env::args_os().collect();
+        if args.get(1).is_some_and(|v| v == "--approval") {
+            ensure!(args.len() == 3, "worker requires one private approval path");
+            return remote_hosts_code::computer_use::macos_worker::run(std::path::Path::new(
+                &args[2],
+            ))
+            .await;
+        }
+        if args.get(1).is_some_and(|v| v == "desktop-window-target") {
+            ensure!(
+                args.len() == 4,
+                "desktop-window-target requires PID and window ID"
+            );
+            let pid = args[2].to_str().context("process ID")?.parse()?;
+            let window = args[3].to_str().context("window ID")?.parse()?;
+            println!(
+                "{}",
+                remote_hosts_code::computer_use::macos_worker::window_target(pid, window)?
+            );
+            return Ok(());
+        }
+    }
+    #[cfg(windows)]
+    {
         let args: Vec<_> = std::env::args_os().skip(1).collect();
         let background = args.first().is_some_and(|v| v == "agent")
             && !args
@@ -236,6 +273,7 @@ async fn main() -> Result<()> {
                 .hash_password(password.as_bytes(), &salt)?
                 .to_string();
             let c = GatewayConfig {
+                forge_browser: None,
                 public_url,
                 bind,
                 state_dir,

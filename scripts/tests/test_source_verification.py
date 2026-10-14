@@ -58,6 +58,20 @@ class SourceEvidenceTests(unittest.TestCase):
             self.assertEqual(entry['working_directory'], str(self.root.resolve()))
             self.assertEqual(checker.digest(self.root/entry['log']), entry['sha256'])
 
+    def test_checkout_rules_and_page_fixtures_invalidate_receipts(self):
+        paths = ('.gitattributes', 'scripts/tests/page.rs', 'scripts/tests/page.mjs')
+        for name in paths:
+            (self.root/name).write_text('original fixture\n')
+        proof = self.run_check()
+        self.assertTrue(checker.receipt_current(proof, self.root))
+        for name in paths:
+            with self.subTest(path=name):
+                path = self.root/name
+                path.write_text('changed fixture\n')
+                self.assertFalse(checker.receipt_current(proof, self.root))
+                path.write_text('original fixture\n')
+                self.assertTrue(checker.receipt_current(proof, self.root))
+
     def test_native_gates_have_inactivity_budgets_without_wall_limits(self):
         observed = {}
         commands = {}

@@ -1343,6 +1343,7 @@ mod tests {
             public_url: "https://offline.invalid".into(),
             bind: "127.0.0.1:0".into(),
             state_dir: dir.path().join("gateway"),
+            forge_browser: None,
             owner: identity.owner.clone(),
             password_hash: "test-unused".into(),
             devices: vec![crate::DeviceRegistration {

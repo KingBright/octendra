@@ -135,7 +135,6 @@ impl Adapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::Principal;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -241,10 +240,6 @@ mod tests {
             protocol: "2025-06-18".into(),
             session: None,
             catalog: Vec::new(),
-            scopes: Principal {
-                owner: "fixture".into(),
-                scopes: Vec::new(),
-            },
             state_dir: dir.path().to_owned(),
             host_report_file: None,
         };

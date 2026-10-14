@@ -1,11 +1,272 @@
 {
-  "adapter_tools_sha256": "6515d87730bbdc7f67ac3dcc4d56c2346e7eca122b2c28b5f831f37fea1b88c0",
+  "adapter_tools_sha256": "2e200e4a94a9b387f5b3434183f71ceb74c7bdde5c916a61f7282a0066cb9ea0",
   "boundary": "Adapter-sent catalog is not proof of final host exposure. No final host report means unknown.",
   "protocol": 1,
-  "server_tools_sha256": "6515d87730bbdc7f67ac3dcc4d56c2346e7eca122b2c28b5f831f37fea1b88c0",
+  "server_tools_sha256": "2e200e4a94a9b387f5b3434183f71ceb74c7bdde5c916a61f7282a0066cb9ea0",
   "skill_revision": "6aa3bdbdd86135c9db72bcf2ab8bb8f9017af48fc5c701de898866a7ed1afdc1",
   "tools": [
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "desktop:observe",
+              "desktop:input"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Run one typed desktop operation using an explicitly authorized persistent owner/device/desktop capability. Each Open binds the current task and a short lease. Terminal/code permission does not grant desktop authority. Defaults unavailable.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "authorization_version": {
+            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "capability_version": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "device_id": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "request": {
+            "description": "Strict tagged desktop protocol. Task/owner/device/desktop/epoch are checked again at admission.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "identity": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "desktop_id": {
+                        "type": "string"
+                      },
+                      "device_id": {
+                        "format": "uuid",
+                        "type": "string"
+                      },
+                      "owner": {
+                        "type": "string"
+                      },
+                      "task_id": {
+                        "format": "uuid",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "owner",
+                      "task_id",
+                      "device_id",
+                      "desktop_id"
+                    ],
+                    "type": "object"
+                  },
+                  "lease_ms": {
+                    "maximum": 30000,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "operation": {
+                    "const": "open"
+                  }
+                },
+                "required": [
+                  "operation",
+                  "identity",
+                  "lease_ms"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "binding": {
+                    "type": "object"
+                  },
+                  "operation": {
+                    "enum": [
+                      "observe",
+                      "close"
+                    ]
+                  }
+                },
+                "required": [
+                  "operation",
+                  "binding"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "actions": {
+                    "items": {
+                      "type": "object"
+                    },
+                    "maxItems": 16,
+                    "minItems": 1,
+                    "type": "array"
+                  },
+                  "frame": {
+                    "type": "object"
+                  },
+                  "operation": {
+                    "const": "act"
+                  },
+                  "sequence": {
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "operation",
+                  "frame",
+                  "sequence",
+                  "actions"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "operation": {
+                    "const": "capabilities"
+                  }
+                },
+                "required": [
+                  "operation"
+                ],
+                "type": "object"
+              }
+            ],
+            "type": "object",
+            "x-desktop-request": true
+          },
+          "response_mode": {
+            "default": "compact",
+            "description": "MCP envelope view; compact is the default. full restores diagnostic metadata.",
+            "enum": [
+              "full",
+              "compact"
+            ],
+            "type": "string"
+          },
+          "task_id": {
+            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "device_id",
+          "task_id",
+          "capability_version",
+          "idempotency_key",
+          "request"
+        ],
+        "type": "object"
+      },
+      "name": "desktop_worker",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      }
+    },
+    {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "desktop:observe"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Export the complete owned pixels of an authorized Observe operation through the existing 4 MiB chunk/artifact channel. Requires matching owner/task/device/capability, active epoch and TTL. Accepts an operation UUID; no filesystem path.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "authorization_version": {
+            "description": "Current owner-established task grant version. Restricts existing authority; never grants account, device, local-user, or platform permissions.",
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "capability_version": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "device_id": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "observed_operation_id": {
+            "type": "string"
+          },
+          "response_mode": {
+            "default": "compact",
+            "description": "MCP envelope view; compact is the default. full restores diagnostic metadata.",
+            "enum": [
+              "full",
+              "compact"
+            ],
+            "type": "string"
+          },
+          "task_id": {
+            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "device_id",
+          "task_id",
+          "capability_version",
+          "observed_operation_id",
+          "idempotency_key"
+        ],
+        "type": "object"
+      },
+      "name": "desktop_frame",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      }
+    },
+    {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -52,6 +313,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": true,
         "idempotentHint": true,
@@ -101,6 +372,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -144,6 +425,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -187,6 +478,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -240,6 +541,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -299,6 +610,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -375,6 +696,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -466,6 +797,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -525,6 +866,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:write"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": true,
         "idempotentHint": true,
@@ -631,6 +982,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:write"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": true,
         "idempotentHint": true,
@@ -688,6 +1049,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:write"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": true,
         "idempotentHint": true,
@@ -741,6 +1112,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:write"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": true,
         "idempotentHint": true,
@@ -811,6 +1192,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -882,6 +1273,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "terminal:exec"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": true,
         "idempotentHint": true,
@@ -989,6 +1390,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -1055,6 +1466,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "terminal:exec"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": true,
         "idempotentHint": true,
@@ -1112,6 +1533,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "terminal:exec"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": true,
         "idempotentHint": true,
@@ -1165,6 +1596,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -1330,6 +1771,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -1391,6 +1842,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -1475,6 +1936,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:write"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": true,
         "idempotentHint": true,
@@ -1600,6 +2071,16 @@
       }
     },
     {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:write"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
         "destructiveHint": true,
         "idempotentHint": true,
@@ -1709,5 +2190,5 @@
     "host_tools": "x-rh-host-tools",
     "request_id": "x-rh-request-id"
   },
-  "version": "0.10.26"
+  "version": "0.10.30"
 }

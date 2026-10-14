@@ -63,6 +63,7 @@ impl Fixture {
             .unwrap()
             .to_string();
         let g = Gateway::new(GatewayConfig {
+            forge_browser: None,
             public_url: ORIGIN.into(),
             bind: "127.0.0.1:0".into(),
             state_dir: dir.path().join("state"),
@@ -336,8 +337,12 @@ async fn status_page_uses_owner_password_cookie_and_gateway_truth() {
         .await;
     assert_eq!(status, StatusCode::OK);
     let page = page.as_str().unwrap();
-    assert!(page.contains("Authoritative Gateway state"));
-    assert!(page.contains("Heartbeat is not counted as business progress"));
+    assert!(page.contains("Remote Hosts 连接与访问"));
+    assert!(page.contains("任务与真实操作"));
+    assert!(page.contains("id='rh-status' data-revision='"));
+    assert!(page.contains("当前页完整"));
+    assert!(!page.contains("action='/status/login'"));
+    assert!(!page.contains("href='/status/forge/'"));
     assert!(!page.contains("device_token"));
     assert!(!page.contains("command_preview"));
 }
@@ -570,11 +575,33 @@ async fn basic_mcp_refresh_and_authenticated_revoke() {
     let (status, _, tools) = f.mcp(&token, "tools/list", json!({})).await;
     assert_eq!(status, StatusCode::OK);
     let authorized = tools["result"]["tools"].as_array().unwrap();
-    // This OAuth grant requested code:read only. Tool discovery must not
-    // advertise terminal execution or code writes that the grant cannot call.
-    assert!(authorized.iter().all(|t| remote_hosts_code::tools::scope(
-        t["name"].as_str().unwrap()
-    ) == Some("code:read")));
+    // This grant is still code:read only. Desktop tools are discoverable for
+    // explicit OAuth step-up, while terminal execution and code writes stay hidden.
+    assert_eq!(token["scope"], "code:read");
+    assert!(authorized.iter().all(|t| {
+        let name = t["name"].as_str().unwrap();
+        remote_hosts_code::tools::scope(name) == Some("code:read")
+            || matches!(name, "desktop_worker" | "desktop_frame")
+    }));
+    for name in ["desktop_worker", "desktop_frame"] {
+        let tool = authorized.iter().find(|t| t["name"] == name).unwrap();
+        assert_eq!(tool["securitySchemes"], tool["_meta"]["securitySchemes"]);
+        let (_, _, denied) = f
+            .mcp(&token, "tools/call", json!({"name":name,"arguments":{}}))
+            .await;
+        assert_eq!(denied["result"]["isError"], true);
+        assert_eq!(
+            denied["result"]["structuredContent"]["execution_started"],
+            false
+        );
+        assert_eq!(
+            denied["result"]["_meta"]["mcp/www_authenticate"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
     assert!(
         !authorized
             .iter()
@@ -1260,4 +1287,40 @@ async fn static_cli_credentials_are_private_no_clobber_and_usable() {
         f.mcp(&token, "tools/list", json!({})).await.0,
         StatusCode::OK
     );
+}
+
+#[tokio::test]
+async fn desktop_oauth_handoff_step_up_is_client_and_resource_bound_without_default_escalation() {
+    let f = Fixture::new().await;
+    let client = f.register("client_secret_basic", SPARK).await;
+    let other = f.register("client_secret_basic", GPT).await;
+    let code = f
+        .code_with_options(
+            &client,
+            Some(RESOURCE),
+            "code:read code:write terminal:exec desktop:observe desktop:input",
+        )
+        .await;
+    assert_eq!(
+        f.authenticated(&other, "/oauth/token", code.clone())
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut wrong = code.clone();
+    wrong["resource"] = json!("https://wrong.example/mcp");
+    assert_eq!(
+        f.authenticated(&client, "/oauth/token", wrong).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let (status, _, granted) = f.authenticated(&client, "/oauth/token", code.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    let scope = granted["scope"].as_str().unwrap();
+    assert!(scope.contains("desktop:observe") && scope.contains("desktop:input"));
+    assert_eq!(
+        f.authenticated(&client, "/oauth/token", code).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let default = f.login(&client).await;
+    assert!(!default["scope"].as_str().unwrap().contains("desktop:"));
 }

@@ -189,12 +189,17 @@ pub(crate) struct RuntimeFeatures {
     pub protocol: u32,
     pub names: Vec<String>,
 }
+// The authenticated control body has the shared 512 KiB byte budget.
+// Feature tags are optional metadata and grant no authority; their count is not a product limit.
+
 impl RuntimeFeatures {
     pub fn current() -> Self {
         Self {
             protocol: 1,
             names: [
                 "terminal_wait_v1",
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                "local_sudo_v1",
                 "line_fragments_v1",
                 "partial_reads_v1",
                 "request_snapshot_v1",
@@ -208,6 +213,7 @@ impl RuntimeFeatures {
                 "workspace_context_pages_v1",
                 "workspace_events_v1",
                 "files_sync_v1",
+                crate::code_payload::FEATURE,
                 "complete_diff_v1",
                 "terminal_observation_v1",
                 "diagnostics_v1",
@@ -233,7 +239,6 @@ impl RuntimeFeatures {
     }
     pub fn valid(&self) -> bool {
         self.protocol == 1
-            && self.names.len() <= 32
             && self.names.iter().all(|s| {
                 !s.is_empty()
                     && s.len() <= 64
@@ -273,6 +278,11 @@ pub(crate) fn gateway_manifest(known: Option<&str>) -> Value {
         ("outcome_guard_protocol", json!(1)),
         ("observation_protocol", json!(2)),
         ("capabilities_protocol", json!(2)),
+        (
+            "authorization_mode",
+            json!("connection_account_device_local_policy"),
+        ),
+        ("task_grants", json!("retired_legacy_queued_bindings_held")),
         ("schema_diagnostics_protocol", json!(2)),
         ("admin_status_protocol", json!(1)),
         (
@@ -326,7 +336,7 @@ pub(crate) fn gateway_manifest(known: Option<&str>) -> Value {
         json!({
             "all_tools": ["response_mode"],
             "operation_get": ["request_id", "operation_ids", "wait_ms", "cursor", "terminal_cursor", "max_bytes"],
-            "terminal_exec": ["wait_ms"],
+            "terminal_exec": ["wait_ms", "sudo"],
             "terminal_read": ["output_mode"],
             "code_read": ["allow_partial", "requests[].line_byte_offset"],
             "devices_list": ["known_tools_sha256"],
@@ -378,6 +388,10 @@ mod release_manifest_tests {
         assert_eq!(manifest["terminal_observation_protocol"], 2);
         assert_eq!(manifest["request_receipt_protocol"], 2);
         assert_eq!(manifest["machine_contract_protocol"], 1);
+        assert_eq!(
+            manifest["optional_inputs"]["terminal_exec"],
+            json!(["wait_ms", "sudo"])
+        );
         assert!(manifest.get("host_schema_status").is_none());
         assert!(manifest.get("client_schema_comparison").is_none());
         assert!(manifest.get("refresh_required").is_none());
