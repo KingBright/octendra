@@ -376,6 +376,11 @@ async fn suspended(
                 json!("resume_original_only_after_connection_and_source_authorization_confirmed");
         }
     }
+    if j.direction == "desktop_frame" {
+        // The Agent owns the terminal desktop receipt. Publishing a resumable
+        // status here would commit a different payload before that receipt.
+        return Ok(value);
+    }
     // If this bounded status transmission is interrupted, the gateway's expired
     // dispatch lease retrieves the same paused journal; no file work is redone.
     let client = http()?;

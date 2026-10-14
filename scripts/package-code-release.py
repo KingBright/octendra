@@ -12,8 +12,11 @@ import pathlib
 import shutil
 import subprocess
 import sys
-import tempfile
 import tarfile
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import release_current
+import source_snapshot
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -46,7 +49,10 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--version', required=True)
     p.add_argument('--verification', required=True, type=pathlib.Path)
+    p.add_argument('--producer-pid', required=True, type=int)
     args = p.parse_args()
+    release_current.primary(ROOT)
+    release_current.validate_producer(ROOT, args.producer_pid)
     proof_path = args.verification.resolve()
     proof = json.loads(proof_path.read_text())
     required = {'fmt', 'clippy', 'rust_tests', 'python_tests', 'workspace'}
@@ -64,8 +70,7 @@ def main():
                         if current.get(name) != proof['source_inputs'].get(name))
     if mismatches or not verifier.receipt_current(proof, ROOT):
         raise SystemExit('verified source changed or evidence incomplete: ' + ', '.join(mismatches))
-    metadata = json.loads(subprocess.check_output(['cargo','metadata','--format-version','1','--no-deps','--locked'], cwd=ROOT))
-    target = pathlib.Path(metadata['target_directory'])
+    target = release_current.established_target(ROOT)
     files = {
         'remote-hosts-code-macos-arm64': target/'release/remote-hosts-code',
         'remote-hosts-code-linux-amd64': target/'x86_64-unknown-linux-musl/release/remote-hosts-code',
@@ -96,6 +101,7 @@ def main():
     for path in files.values():
         if not path.is_file():
             raise SystemExit('missing artifact: ' + str(path))
+    input_hashes = {name: digest(path) for name, path in files.items()}
     native = files['remote-hosts-code-macos-arm64']
     actual = subprocess.check_output([str(native), '--version'], text=True).strip()
     if actual != 'remote-hosts-code ' + args.version:
@@ -110,44 +116,44 @@ def main():
     for path in files.values():
         if path.suffix == '.py':
             compile(path.read_text(), str(path), 'exec')
-    dest = ROOT/'dist'/('remote-hosts-code-'+args.version)
-    dest.parent.mkdir(exist_ok=True)
-    if dest.exists():
-        raise SystemExit('release directory already exists; do not overwrite a published candidate')
-    with tempfile.TemporaryDirectory(prefix='.release-', dir=dest.parent) as temp:
-        stage = pathlib.Path(temp)
-        artifacts = {}
-        for name, source in files.items():
-            shutil.copyfile(source, stage/name)
-            (stage/name).chmod(0o755 if not name.endswith('.py') else 0o644)
-            artifacts[name] = {'sha256':digest(stage/name), 'size':(stage/name).stat().st_size}
-        shutil.copyfile(proof_path, stage/'source-verification.json')
-        manifest = {
-            'schema_version':1, **contract,
-            'packaged_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            'snapshot_id':proof.get('snapshot_id'),
-            'build_execution_root':str(ROOT),
-            'source_verification_sha256':digest(proof_path),
-            'source_inputs':proof['source_inputs'], 'artifacts':artifacts,
-            'tests':proof['functional_tests'], 'deployed':False,
-            'limitations':['64 MiB default per file; 0.7+ negotiated large-file mode permits explicit requests up to 256 MiB when storage reserve and agent capability gates pass; retained partials expire after 24 hours',
-                            'inbound prefix recovery needs a strong validator or original expected SHA-256',
-                            'expired authorization requires explicit transfer_resume with a refreshed file reference',
-                            'publication already committed wins a concurrent cancellation',
-                            'paused operations require an explicit resume; arbitrary shell outcomes never replay',
-                            'workspace_context is scoped runtime state, not Git or chat-history reconstruction',
-                            'native attachment and deployed-process acceptance are separate gates'],
-        }
-        (stage/'manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')
-        (stage/'SHA256SUMS').write_text(''.join(digest(stage/name)+'  '+name+'\n' for name in sorted([*files,'manifest.json','source-verification.json'])))
-        (stage/'README.md').write_text('# Remote Hosts '+args.version+'\n\nThe bundle is the release identity. Upgrade the Gateway before Agents, or use fleet-upgrade.py to converge the whole fleet. Keep existing device identities.\nAll platform binaries and updater helpers are bound by manifest.json.\nRecord actual runtime versions and check binary SHA-256 against manifest.json.\nAcceptance is capability-based: required capabilities must be present; additive tools are allowed.\nSource verification is not a deployment acceptance receipt.\n')
-        stage.rename(dest)
-    bundle=dest.parent/(dest.name+'-bundle.tgz')
-    if bundle.exists(): raise SystemExit('release bundle already exists; do not overwrite')
+    dest, bundle = release_current.stages(ROOT)
+    if dest.exists() or dest.is_symlink() or bundle.exists() or bundle.is_symlink():
+        raise SystemExit('fixed transaction stage already exists; observe or recover the original operation')
+    dest.mkdir()
+    stage = dest
+    artifacts = {}
+    for name, source in files.items():
+        shutil.copyfile(source, stage/name)
+        (stage/name).chmod(0o755 if not name.endswith('.py') else 0o644)
+        artifacts[name] = {'sha256':digest(stage/name), 'size':(stage/name).stat().st_size}
+        if artifacts[name]['sha256'] != input_hashes[name] or digest(source) != input_hashes[name]:
+            raise ValueError('artifact changed during package validation/copy: '+name)
+    shutil.copyfile(proof_path, stage/'source-verification.json')
+    manifest = {
+        'schema_version':1, **contract,
+        'packaged_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        'snapshot_id':source_snapshot.identity(current, source_snapshot.executable_files(ROOT, current)),
+        'build_execution_root':str(ROOT),
+        'source_verification_sha256':digest(proof_path),
+        'source_inputs':proof['source_inputs'], 'artifacts':artifacts,
+        'tests':proof['functional_tests'], 'deployed':False,
+        'limitations':['64 MiB default per file; 0.7+ negotiated large-file mode permits explicit requests up to 256 MiB when storage reserve and agent capability gates pass; retained partials expire after 24 hours',
+                        'inbound prefix recovery needs a strong validator or original expected SHA-256',
+                        'expired authorization requires explicit transfer_resume with a refreshed file reference',
+                        'publication already committed wins a concurrent cancellation',
+                        'paused operations require an explicit resume; arbitrary shell outcomes never replay',
+                        'workspace_context is scoped runtime state, not Git or chat-history reconstruction',
+                        'native attachment and deployed-process acceptance are separate gates'],
+    }
+    (stage/'manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')
+    (stage/'SHA256SUMS').write_text(''.join(digest(stage/name)+'  '+name+'\n' for name in sorted([*files,'manifest.json','source-verification.json'])))
+    (stage/'README.md').write_text('# Remote Hosts '+args.version+'\n\nThe bundle is the release identity. Upgrade the Gateway before Agents, or use fleet-upgrade.py to converge the whole fleet. Keep existing device identities.\nAll platform binaries and updater helpers are bound by manifest.json.\nRecord actual runtime versions and check binary SHA-256 against manifest.json.\nAcceptance is capability-based: required capabilities must be present; additive tools are allowed.\nSource verification is not a deployment acceptance receipt.\n')
     with tarfile.open(bundle,'x:gz') as archive:
         for path in sorted(dest.iterdir(), key=lambda p:p.name):
             if path.is_file(): archive.add(path,arcname=path.name)
-    print(json.dumps({'release_dir':str(dest), 'manifest_sha256':digest(dest/'manifest.json'),
+    if verifier.inputs(ROOT) != current or not verifier.receipt_current(proof, ROOT):
+        raise ValueError('source changed during package; current was not replaced')
+    print(json.dumps({'staged_current': True, 'release_dir':str(dest), 'manifest_sha256':digest(dest/'manifest.json'),
                       'bundle':str(bundle),'bundle_sha256':digest(bundle),'bundle_size':bundle.stat().st_size,
                       'artifacts':artifacts, 'deployed':False}))
 

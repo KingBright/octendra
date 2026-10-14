@@ -131,14 +131,14 @@ cargo check --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Code Gateway 使用固定输入快照发布：
+Code Gateway 在实际主源码 main 原地验证与发布，复用 `~/rust-target`；入口前后核对输入指纹，不复制源码：
 
 ```bash
-python3 scripts/source_snapshot.py --destination target/source-snapshots/<id>
 python3 scripts/release-code.py \
-  --snapshot target/source-snapshots/<id> \
   --report target/<iteration>/pipeline.json
 ```
+
+已有源码快照只允许用 `source_snapshot.py --check` 核对历史证据，不作为构建或验收目录。
 
 如果某个构建/发布观察器超时，不要因为“没看到结果”就重新执行副作用；先读取原 report、operation 或 updater receipt。
 

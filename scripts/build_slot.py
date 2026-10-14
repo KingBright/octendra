@@ -1,18 +1,16 @@
-"""Leased, reusable build checkout. It is not the editable repository or a sandbox.
+"""Existing long-lived producer lease; formal entries execute primary main.
 
-Only declared snapshot files are synchronized. Identical files keep their mtime,
-so Cargo can reuse a stable checkout path without modifying frozen candidates.
+Source checkout synchronization is retired. Locks and historical metadata remain;
+callers provide primary main explicitly for execution.
 """
 import contextlib
 import hashlib
 import json
 import os
 import pathlib
-import stat
 import tempfile
 import time
 
-import source_snapshot
 
 
 def atomic_json(path, value):
@@ -62,11 +60,14 @@ def stale_owner_recoverable(previous):
     except (KeyError, OSError, ValueError, TypeError):
         return False
     child = report.get('child_pid')
-    return child is None or not process_alive(child, group=True)
+    stages = list(report.get('stages', {}).values()) + [report.get('build', {})]
+    groups = {group for stage in stages for group in stage.get('cleanup', {}).get('remaining_groups', [])}
+    return ((child is None or not process_alive(child, group=True))
+            and not any(process_alive(group, group=True) for group in groups))
 
 
 @contextlib.contextmanager
-def lease(directory, report, snapshot_id):
+def lease(directory, report, snapshot_id, execution_root=None):
     if os.name != 'posix':
         raise RuntimeError('build slot locking currently requires POSIX')
     import fcntl
@@ -106,9 +107,18 @@ def lease(directory, report, snapshot_id):
                  'snapshot_id': snapshot_id, 'started_at': int(time.time()), 'state': 'running'}
         atomic_json(directory/'owner.json', owner)
         try:
-            yield directory/'checkout'
+            # A lease without an execution root is metadata-only, never a copied checkout.
+            yield no_links(execution_root).resolve(strict=True) if execution_root is not None else None
         finally:
-            owner.update(state='released', released_at=int(time.time()))
+            unsettled = False
+            if execution_root is not None and pathlib.Path(report).is_file():
+                try:
+                    saved = json.loads(pathlib.Path(report).read_text())
+                    stages = list(saved.get('stages', {}).values()) + [saved.get('build', {})]
+                    unsettled = any(stage.get('cleanup', {}).get('state') == 'unconfirmed' for stage in stages)
+                except (OSError, ValueError, TypeError):
+                    unsettled = True
+            owner.update(state='recovery_required' if unsettled else 'released', released_at=int(time.time()))
             atomic_json(directory/'owner.json', owner)
 
 
@@ -121,53 +131,8 @@ def digest(path):
 
 
 def synchronize(snapshot, checkout):
-    """Must be called under lease. Do not repair/erase an unexpectedly dirty slot."""
-    snapshot = no_links(snapshot).resolve(strict=True)
-    checkout = no_links(checkout)
-    if checkout == snapshot or checkout in snapshot.parents or snapshot in checkout.parents:
-        raise ValueError('build checkout and frozen snapshot must be disjoint')
-    manifest = source_snapshot.check(snapshot)
-    previous = None
-    if checkout.exists():
-        if not checkout.is_dir():
-            raise ValueError('checkout is not a directory')
-        if any(checkout.iterdir()):
-            previous = source_snapshot.check(checkout)
-    else:
-        checkout.mkdir(parents=True)
-    old = previous['source_inputs'] if previous else {}
-    files = manifest['source_inputs']
-    executable = set(manifest['executable_files'])
-    changed = [n for n, h in files.items() if old.get(n) != h
-               or bool((checkout/n).stat().st_mode & 0o111) != (n in executable)]
-    removed = sorted(old.keys()-files.keys())
-    # Only files in the previously verified inventory can be removed. Extra input
-    # files cause check(checkout) above to fail rather than being silently deleted.
-    for name in sorted(removed, key=len, reverse=True):
-        (checkout/name).unlink()
-    for name in sorted(changed):
-        destination = checkout/name
-        relative = pathlib.PurePosixPath(name)
-        if relative.is_absolute() or '..' in relative.parts:
-            raise ValueError('invalid declared snapshot path')
-        if destination.exists() and not stat.S_ISREG(destination.stat().st_mode):
-            raise ValueError('build input is not a regular file')
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix='.sync-', dir=destination.parent) as tmp:
-            temporary = pathlib.Path(tmp)/'input'
-            source_snapshot.copy_checked(snapshot/name, temporary, files[name])
-            os.replace(temporary, destination)
-    # Once installed, verify both sides. Any interrupted/dirty sync is unusable,
-    # never a partially valid source tree. A later retry must reconcile it first.
-    source_snapshot.check(snapshot)
-    atomic_json(checkout/source_snapshot.MANIFEST, manifest)
-    installed = source_snapshot.check(checkout)
-    if installed['snapshot_id'] != manifest['snapshot_id']:
-        raise ValueError('build checkout does not match frozen inputs')
-    return {'snapshot_id': manifest['snapshot_id'], 'files': len(files),
-            'written_files': len(changed), 'preserved_files': len(files)-len(changed),
-            'removed_files': len(removed), 'checkout': str(checkout),
-            'cache_semantics': 'unchanged bytes and executable modes keep mtime; no hardlinks'}
+    """Retired; old evidence and existing checkout bytes are preserved unchanged."""
+    raise ValueError('source checkout synchronization is retired; execute the primary main checkout')
 
 
 def cpu_time(text):

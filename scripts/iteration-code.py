@@ -18,7 +18,7 @@ import sys
 import time
 
 import release_receipts as rr
-import source_snapshot
+import release_current
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DOC_PREFIXES = ('docs/',)
@@ -199,6 +199,7 @@ def main():
             value['live_publish_status'] = compact_publish_status(args.publish_status_dir)
         print(json.dumps(value)); return
 
+    release_current.primary(ROOT)
     if report.exists():
         previous = json.loads(report.read_text())
         paths = previous.get('paths') or []
@@ -230,13 +231,11 @@ def main():
         if state['stages'].get('verification', {}).get('state') != 'passed':
             state['phase'] = 'verification'; save(report, state)
             audit_commit_scope(paths)
+            manifest = release_current.snapshot_evidence(None, ROOT)
             if profile == 'runtime':
                 root = report.parent
-                snapshot = root/'snapshot'
                 pipeline = root/'pipeline.json'
-                if not snapshot.exists():
-                    source_snapshot.create(ROOT, snapshot)
-                run([sys.executable, 'scripts/release-code.py', '--snapshot', str(snapshot), '--report', str(pipeline)])
+                run([sys.executable, 'scripts/release-code.py', '--report', str(pipeline)])
                 built = json.loads(pipeline.read_text())
                 if built.get('state') != 'passed':
                     raise RuntimeError('full release pipeline did not pass')
@@ -248,9 +247,10 @@ def main():
                 state['bundle_sha256'] = built['package']['bundle_sha256']
             else:
                 verify_light(profile, paths)
+            release_current.check_inputs(ROOT, manifest)
             if fingerprint(paths) != initial:
                 raise RuntimeError('iteration inputs changed during verification')
-            state['stages']['verification'] = {'state': 'passed', 'profile': profile}
+            state['stages']['verification'] = {'state': 'passed', 'profile': profile, 'source_id': manifest['snapshot_id']}
             save(report, state)
 
         if not args.no_push and state['stages'].get('git_push', {}).get('state') != 'passed':

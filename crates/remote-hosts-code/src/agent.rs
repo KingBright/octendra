@@ -25,6 +25,8 @@ pub struct Agent {
     pub config: Arc<AgentConfig>,
     pub store: Store,
     terminals: Terminals,
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) desktop_workers: crate::computer_use::transport::NativeWorkers,
     scheduler: Arc<Scheduler>,
     active: Arc<ActiveJobs>,
     progress: Arc<crate::progress::Registry>,
@@ -33,6 +35,48 @@ pub struct Agent {
     poll_health_revision: Arc<std::sync::atomic::AtomicU64>,
     history_access: Arc<tokio::sync::RwLock<()>>,
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DesktopJob {
+    pub task_id: uuid::Uuid,
+    pub capability_version: u64,
+    pub request: crate::computer_use::Request,
+    pub device_id: Option<uuid::Uuid>,
+    pub idempotency_key: Option<String>,
+    pub authorization_version: Option<u64>,
+    pub response_mode: Option<String>,
+}
+impl DesktopJob {
+    pub(crate) fn identity(&self, job: &Job) -> Result<crate::computer_use::Identity> {
+        let id = self
+            .request
+            .identity()
+            .context("desktop identity missing")?;
+        ensure!(
+            id.owner == job.owner
+                && id.task_id == self.task_id
+                && id.device_id.to_string() == job.device_id
+                && !id.task_id.is_nil()
+                && self.device_id.is_none_or(|d| d == id.device_id)
+                && self.capability_version > 0,
+            "desktop job identity conflict"
+        );
+        Ok(id.clone())
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DesktopFrameJob {
+    pub task_id: uuid::Uuid,
+    pub device_id: uuid::Uuid,
+    pub capability_version: u64,
+    pub observed_operation_id: uuid::Uuid,
+    pub idempotency_key: String,
+    pub authorization_version: Option<u64>,
+    pub response_mode: Option<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 struct LocalOperation {
     fingerprint: String,
@@ -78,7 +122,15 @@ impl Agent {
         )
         .await?;
         store.put("runtime", "build", &json!({"version":env!("CARGO_PKG_VERSION"),"pid":std::process::id(),"started_at":crate::now()}), i64::MAX).await?;
+        #[cfg(any(target_os = "linux", test))]
+        let desktop_workers = crate::computer_use::transport::NativeWorkers::load(
+            &config.state_dir,
+            &config.device_id,
+        )
+        .with_store(store.clone());
         Ok(Self {
+            #[cfg(any(target_os = "linux", test))]
+            desktop_workers,
             config: Arc::new(config),
             store,
             terminals,
@@ -91,10 +143,63 @@ impl Agent {
             history_access: Arc::default(),
         })
     }
+    #[cfg(any(target_os = "linux", test))]
+    pub async fn read_desktop_frame(&self, job: &Job) -> Result<Vec<u8>> {
+        ensure!(
+            job.tool == "desktop_worker" && job.device_id == self.config.device_id,
+            "desktop job required"
+        );
+        uuid::Uuid::parse_str(&job.id)?;
+        let args: DesktopJob = serde_json::from_value(job.arguments.clone())?;
+        let identity = args.identity(job)?;
+        let saved: LocalOperation = self
+            .store
+            .get("local_operation", &job.id)
+            .await?
+            .context("desktop result missing")?;
+        ensure!(
+            saved.fingerprint == crate::hash(serde_json::to_vec(job)?),
+            "operation fingerprint conflict"
+        );
+        // Delivery may retire the result body after ACK; bounded frame metadata
+        // is owned by the active desktop epoch, independently of receipt retention.
+        let artifact = self
+            .desktop_workers
+            .artifact(uuid::Uuid::parse_str(&job.id)?)
+            .await?;
+        self.desktop_workers
+            .read_frame(&artifact, &identity, args.capability_version)
+            .await
+    }
+    #[cfg(any(target_os = "linux", test))]
+    pub async fn revoke_desktop(&self, binding: &crate::computer_use::Binding) -> bool {
+        self.desktop_workers.revoke(Some(binding)).await
+    }
     pub async fn execute(&self, job: &Job) -> Result<Value> {
         self.execute_with_delivery(job, None).await
     }
-    async fn execute_with_delivery(&self, job: &Job, delivery: Option<&Delivery>) -> Result<Value> {
+    pub(crate) async fn execute_with_delivery(
+        &self,
+        job: &Job,
+        delivery: Option<&Delivery>,
+    ) -> Result<Value> {
+        self.execute_journaled(job, delivery, |progress| async move {
+            self.perform(job, &progress).await
+        })
+        .await
+    }
+    // Shared journal/receipt boundary. Offline mocks may substitute execution,
+    // but are never registered in the production tool catalog.
+    pub(crate) async fn execute_journaled<F, Fut>(
+        &self,
+        job: &Job,
+        delivery: Option<&Delivery>,
+        perform: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(crate::progress::Progress) -> Fut,
+        Fut: std::future::Future<Output = Result<Value>>,
+    {
         uuid::Uuid::parse_str(&job.id).context("invalid operation id")?;
         ensure!(job.device_id == self.config.device_id, "wrong device");
         let _guard = self.scheduler.operations.lock(&job.id).await?;
@@ -144,7 +249,7 @@ impl Agent {
             )
             .await?;
         progress.phase("running");
-        let mut result = match self.perform(job, &progress).await {
+        let mut result = match perform(progress.clone()).await {
             Ok(v) => v,
             Err(e) => {
                 crate::diagnostics::error(&job.tool, &e.to_string(), Some(&job.id), "agent_execute")
@@ -206,6 +311,134 @@ impl Agent {
     }
     async fn perform(&self, job: &Job, progress: &crate::progress::Progress) -> Result<Value> {
         let v = &job.arguments;
+        #[cfg(any(target_os = "linux", test))]
+        if job.tool == "desktop_worker" {
+            // Typed catalog admission is independent of shell/code permissions.
+            crate::tools::validate(&job.tool, v)?;
+            let args: DesktopJob = serde_json::from_value(v.clone())?;
+            if matches!(args.request, crate::computer_use::Request::Capabilities {}) {
+                return Ok(serde_json::to_value(
+                    crate::computer_use::unavailable(&args.request)
+                        .expect("capabilities are always available"),
+                )?);
+            }
+            let identity = args.identity(job)?;
+            return self
+                .desktop_workers
+                .dispatch(
+                    uuid::Uuid::parse_str(&job.id)?,
+                    &identity,
+                    args.capability_version,
+                    args.request,
+                )
+                .await;
+        }
+
+        #[cfg(any(target_os = "linux", test))]
+        if job.tool == "desktop_frame" {
+            crate::tools::validate(&job.tool, v)?;
+            let args: DesktopFrameJob = serde_json::from_value(v.clone())?;
+            ensure!(
+                args.device_id.to_string() == job.device_id,
+                "desktop artifact device"
+            );
+            let artifact = self
+                .desktop_workers
+                .artifact(args.observed_operation_id)
+                .await?;
+            let identity = &artifact.binding.identity;
+            ensure!(
+                identity.owner == job.owner
+                    && identity.task_id == args.task_id
+                    && identity.device_id == args.device_id
+                    && artifact.capability_version == args.capability_version,
+                "desktop artifact owner/task/capability"
+            );
+            // Verify the existing bounded owned file, then reuse the file journal,
+            // receiver and 4 MiB checkpoints. No client-selected root or path.
+            drop(
+                self.desktop_workers
+                    .read_frame(&artifact, identity, args.capability_version)
+                    .await?,
+            );
+            let mut export = job.clone();
+            // Keep the desktop direction so the shared transfer code never
+            // publishes a resumable file status for this ephemeral export.
+            export.arguments = json!({"path":args.observed_operation_id.to_string(),
+                "max_bytes":artifact.bytes,"expected_version":artifact.sha256});
+            let ws = Workspace {
+                id: format!("desktop:{}", args.observed_operation_id),
+                device_id: job.device_id.clone(),
+                root: self.config.state_dir.join("desktop-frames"),
+            };
+            let remaining = artifact
+                .expires_at_ms
+                .saturating_sub(crate::now_ms() as u64);
+            let result = tokio::time::timeout(
+                Duration::from_millis(remaining),
+                crate::durable_transfer::run(
+                    &self.config,
+                    &ws,
+                    &export,
+                    progress,
+                    &self.store,
+                    self.scheduler.writes.clone(),
+                ),
+            )
+            .await;
+            // A desktop snapshot never gains file-transfer retention or replay.
+            let data = self
+                .config
+                .state_dir
+                .join("transfers-v2")
+                .join(format!("{}.data", job.id));
+            let removed = match tokio::fs::remove_file(data).await {
+                Ok(()) => true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+                _ => false,
+            };
+            let journal_expired = sqlx::query("UPDATE kv SET value=json_set(value,'$.phase','expired','$.data_cleaned',?,'$.expires_at',?) WHERE kind='transfer_local' AND key=?")
+                .bind(removed).bind(crate::now()).bind(&job.id).execute(&self.store.pool).await.is_ok();
+            let failure_code = match &result {
+                Ok(Ok(value)) => value["diagnostic"]["code"]
+                    .as_str()
+                    .unwrap_or("desktop_export_failed")
+                    .to_owned(),
+                Ok(Err(_)) => "desktop_export_failed".into(),
+                Err(_) => "desktop_artifact_expired".into(),
+            };
+            let completed = matches!(&result, Ok(Ok(value)) if value["state"] == "completed" && !crate::durable_transfer::is_suspended(value));
+            let active = if completed && removed && journal_expired {
+                self.desktop_workers
+                    .read_frame(&artifact, identity, args.capability_version)
+                    .await
+                    .is_ok()
+                    && (crate::now_ms() as u64) < artifact.expires_at_ms
+            } else {
+                false
+            };
+            if !active {
+                let retired = self
+                    .desktop_workers
+                    .retire_artifact(args.observed_operation_id)
+                    .await
+                    .is_ok();
+                // File-transfer checkpoints are already expired. Commit a terminal
+                // receipt, and retire the observed frame so a new job cannot replay it.
+                let mut terminal = json!({"operation_id":job.id,"state":"failed","error":"desktop_export_interrupted",
+                    "error_code":"desktop_export_interrupted","outcome":"unknown","resumable":false,"pending":false,
+                    "automatic_replay_safe":false,"cleanup_complete":removed && retired && journal_expired,
+                    "diagnostic":{"code":failure_code},"next_action":"observe_a_new_frame"});
+                if let Ok(Ok(value)) = &result
+                    && let Some(revision) = value.get("transfer_revision")
+                {
+                    terminal["transfer_revision"] = revision.clone();
+                }
+                return Ok(terminal);
+            }
+            return result.map_err(|_| anyhow::anyhow!("desktop artifact expired"))?;
+        }
+
         let scope = crate::tools::scope(&job.tool).context("unsupported tool")?;
         ensure!(
             scope != "code:write" || self.config.allow_write,
@@ -396,10 +629,13 @@ impl Agent {
         }
     }
     pub async fn run(&self) -> Result<()> {
-        tokio::try_join!(
+        let result = tokio::try_join!(
             self.run_loop(None),
             crate::history_retention::agent_loop(self.config.clone(), self.history_access.clone())
-        )?;
+        );
+        #[cfg(any(target_os = "linux", test))]
+        self.desktop_workers.revoke(None).await;
+        result?;
         Ok(())
     }
     /// Run the real device lifecycle with Skill files isolated below this
@@ -407,10 +643,13 @@ impl Agent {
     /// the operator's installed Codex or Gemini Skill files.
     pub async fn run_isolated(&self) -> Result<()> {
         let home = self.config.state_dir.join("isolated-skill-home");
-        tokio::try_join!(
+        let result = tokio::try_join!(
             self.run_loop(Some(&home)),
             crate::history_retention::agent_loop(self.config.clone(), self.history_access.clone())
-        )?;
+        );
+        #[cfg(any(target_os = "linux", test))]
+        self.desktop_workers.revoke(None).await;
+        result?;
         Ok(())
     }
     async fn run_loop(&self, skill_home: Option<&std::path::Path>) -> Result<()> {

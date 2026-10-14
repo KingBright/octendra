@@ -31,73 +31,27 @@ class BuildSlotTests(unittest.TestCase):
         (self.root/'crates/remote-hosts-code/src/lib.rs').write_text('pub fn answer() -> u8 { 42 }\n')
         shutil.copyfile(SCRIPTS/'check-code-source.py', self.root/'scripts/check-code-source.py')
         self.slot = self.base/'slot'
-        self.snapshot = self.base/'snapshot-one'
-        self.manifest = source_snapshot.create(self.root, self.snapshot)
+        self.snapshot = None
+        self.patches = [mock.patch.object(runner, 'ROOT', self.root),
+            mock.patch.object(runner.release_current, 'primary', side_effect=lambda root: root),
+            mock.patch.object(runner.release_current, 'preflight', return_value={}),
+            mock.patch.object(runner.release_current, 'admit', return_value={}),
+            mock.patch.object(runner.release_current, 'abort', return_value={}),
+            mock.patch.object(runner.release_current, 'established_target', return_value=self.base/'shared-target')]
+        for patch in self.patches: patch.start()
+        self.manifest = runner.release_current.snapshot_evidence(None, self.root)
     def tearDown(self):
+        for patch in reversed(self.patches): patch.stop()
         self.tmp.cleanup()
-    def prepare(self, snapshot=None):
-        with build_slot.lease(self.slot, self.base/'receipt.json', self.manifest['snapshot_id']) as checkout:
+    def prepare(self):
+        with build_slot.lease(self.slot, self.base/'receipt.json', self.manifest['snapshot_id'], execution_root=self.root) as checkout:
             self.checkout = checkout
-            return build_slot.synchronize(snapshot or self.snapshot, checkout)
-    def test_identical_snapshot_keeps_inode_mtime_and_does_not_link_inputs(self):
-        first = self.prepare()
-        path = self.checkout/'crates/remote-hosts-code/src/lib.rs'
-        before = path.stat()
-        second = self.prepare()
-        after = path.stat()
-        self.assertGreater(first['written_files'], 0)
-        self.assertEqual(second['written_files'], 0)
-        self.assertEqual((before.st_ino, before.st_mtime_ns), (after.st_ino, after.st_mtime_ns))
-        self.assertNotEqual(after.st_ino, (self.snapshot/'crates/remote-hosts-code/src/lib.rs').stat().st_ino)
-        self.assertEqual(after.st_nlink, 1)
-    def test_next_candidate_copies_only_changed_input_at_same_checkout_path(self):
+            return runner.release_current.check_inputs(checkout, self.manifest)
+    def test_main_input_mutation_is_preserved_and_rejected(self):
         self.prepare()
-        old = self.checkout/'Cargo.toml'
-        before = old.stat().st_mtime_ns
-        changed = self.root/'crates/remote-hosts-code/src/lib.rs'
-        changed.write_text('pub fn answer() -> u8 { 43 }\n')
-        second = self.base/'snapshot-two'
-        source_snapshot.create(self.root, second)
-        result = self.prepare(second)
-        self.assertEqual(result['written_files'], 1)
-        self.assertEqual(old.stat().st_mtime_ns, before)
-        self.assertEqual((self.checkout/changed.relative_to(self.root)).read_text(), changed.read_text())
-        self.assertIn('42', (self.snapshot/changed.relative_to(self.root)).read_text())
-    def test_changed_executable_mode_is_replaced_and_recorded(self):
-        self.prepare()
-        path = self.root/'scripts/check-code-source.py'
-        path.chmod(0o755)
-        second = self.base/'snapshot-two'
-        source_snapshot.create(self.root, second)
-        result = self.prepare(second)
-        self.assertEqual(result['written_files'], 1)
-        self.assertTrue((self.checkout/'scripts/check-code-source.py').stat().st_mode & 0o111)
-    def test_dirty_checkout_is_rejected_without_erasing_new_changes(self):
-        self.prepare()
-        path = self.checkout/'Cargo.toml'
-        path.write_text('local unapproved edits')
-        with self.assertRaises(ValueError):
-            self.prepare()
-        self.assertEqual(path.read_text(), 'local unapproved edits')
-    def test_extra_source_file_is_not_silently_deleted(self):
-        self.prepare()
-        path = self.checkout/'crates/remote-hosts-code/src/other.rs'
-        path.write_text('not owned by manifest')
-        with self.assertRaises(ValueError):
-            self.prepare()
-        self.assertTrue(path.exists())
-    def test_removed_input_does_not_delete_build_outputs(self):
-        self.prepare()
-        target = self.checkout/'target/cache-preserved'
-        target.parent.mkdir()
-        target.write_text('cached')
-        (self.root/'crates/remote-hosts-code/src/lib.rs').unlink()
-        second = self.base/'snapshot-two'
-        source_snapshot.create(self.root, second)
-        result = self.prepare(second)
-        self.assertEqual(result['removed_files'], 1)
-        self.assertEqual(target.read_text(), 'cached')
-        self.assertFalse((self.checkout/'crates/remote-hosts-code/src/lib.rs').exists())
+        path=self.root/'Cargo.toml';path.write_text('new editor changes')
+        with self.assertRaises(ValueError):self.prepare()
+        self.assertEqual(path.read_text(),'new editor changes')
     def test_concurrent_owner_returns_original_report_without_work(self):
         report = self.base/'active.json'
         with build_slot.lease(self.slot, report, self.manifest['snapshot_id']):
@@ -123,7 +77,7 @@ class BuildSlotTests(unittest.TestCase):
             build_slot.synchronize(self.snapshot, link/'checkout')
     def test_snapshot_and_checkout_must_not_overlap(self):
         with self.assertRaises(ValueError):
-            build_slot.synchronize(self.snapshot, self.snapshot/'nested')
+            build_slot.synchronize(self.snapshot, self.root/'nested')
     def test_busy_pipeline_does_not_execute_any_command(self):
         with build_slot.lease(self.slot, self.base/'active.json', self.manifest['snapshot_id']):
             with mock.patch.object(runner.subprocess, 'Popen', side_effect=AssertionError('must not compile')):
@@ -164,9 +118,11 @@ class BuildSlotTests(unittest.TestCase):
         directory = self.base/'stage-logs'
         directory.mkdir()
         state = {'stages': {}}
-        with self.assertRaisesRegex(RuntimeError, 'stage_failed'):
+        with mock.patch.object(runner.build_process, 'process_table', return_value={}), \
+             mock.patch.object(runner.build_process, 'live_groups', return_value=[]), \
+             self.assertRaisesRegex(RuntimeError, 'stage_failed'):
             runner.run_stage('fixture', [sys.executable, '-c', 'print("fixture-output"); raise SystemExit(7)'],
-                             self.checkout, directory, self.base/'stage.json', state, dict(os.environ), timeout=10)
+                             self.checkout, directory, self.base/'stage.json', state, dict(os.environ), timeout=10, manifest=self.manifest)
         saved = json.loads((self.base/'stage.json').read_text())
         self.assertEqual(saved['stages']['fixture']['exit_code'], 7)
         self.assertIn('fixture-output', (directory/'fixture.log').read_text())
@@ -176,9 +132,11 @@ class BuildSlotTests(unittest.TestCase):
         directory = self.base/'stage-logs'
         directory.mkdir()
         state = {'stages': {}}
-        with self.assertRaises(ValueError):
+        with mock.patch.object(runner.build_process, 'process_table', return_value={}), \
+             mock.patch.object(runner.build_process, 'live_groups', return_value=[]), \
+             self.assertRaises(ValueError):
             runner.run_stage('fixture', [sys.executable, '-c', 'from pathlib import Path; Path("Cargo.toml").write_text("changed")'],
-                             self.checkout, directory, self.base/'stage.json', state, dict(os.environ), timeout=10)
+                             self.checkout, directory, self.base/'stage.json', state, dict(os.environ), timeout=10, manifest=self.manifest)
         self.assertEqual((self.checkout/'Cargo.toml').read_text(), 'changed')
         self.assertNotEqual(state['state'], 'passed')
     def test_symlinked_metadata_does_not_redirect_status_writes(self):
@@ -190,13 +148,15 @@ class BuildSlotTests(unittest.TestCase):
             with build_slot.lease(self.slot, self.base/'r.json', 'x'):
                 self.fail('followed symlink')
         self.assertEqual(target.read_text(), 'unchanged')
-    def test_existing_version_fails_before_expensive_checks(self):
+    def test_admission_refusal_preserves_historical_version_before_expensive_checks(self):
         self.prepare()
         (self.checkout/'dist/remote-hosts-code-0.3.5').mkdir(parents=True)
-        with mock.patch.object(runner.subprocess, 'Popen', side_effect=AssertionError('must not compile')):
+        with mock.patch.object(runner.subprocess, 'Popen', side_effect=AssertionError('must not compile')), \
+             mock.patch.object(runner.release_current, 'admit', side_effect=ValueError('current activity protected')):
             result = runner.run_pipeline(self.snapshot, self.base/'collision.json', self.slot)
         self.assertEqual(result['state'], 'failed')
-        self.assertEqual(result['failure_type'], 'FileExistsError')
+        self.assertEqual(result['failure_type'], 'ValueError')
+        self.assertTrue((self.checkout/'dist/remote-hosts-code-0.3.5').is_dir())
     def test_progress_reads_active_cargo_log_and_rejects_escaped_path(self):
         self.prepare()
         directory = self.base/'probe-logs'

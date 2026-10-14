@@ -662,6 +662,143 @@ struct Link {
     device: String,
     owner: String,
 }
+
+pub(crate) async fn desktop_artifact(
+    g: &Gateway,
+    job: &Job,
+) -> Result<remote_hosts_desktop_protocol::FrameArtifact> {
+    let a: crate::agent::DesktopFrameJob = serde_json::from_value(job.arguments.clone())?;
+    ensure!(
+        job.tool == "desktop_frame"
+            && job.owner == g.config.owner
+            && a.device_id.to_string() == job.device_id
+            && a.capability_version > 0,
+        "desktop artifact owner/device"
+    );
+    let (request, result): (String, Option<String>) =
+        sqlx::query_as("SELECT request,result FROM jobs WHERE id=? AND device=?")
+            .bind(a.observed_operation_id.to_string())
+            .bind(&job.device_id)
+            .fetch_one(&g.store.pool)
+            .await?;
+    let original: Job = serde_json::from_str(&request)?;
+    let original_args: crate::agent::DesktopJob =
+        serde_json::from_value(original.arguments.clone())?;
+    let original_identity = original_args.identity(&original)?;
+    ensure!(
+        original.tool == "desktop_worker"
+            && original.owner == job.owner
+            && matches!(
+                original_args.request,
+                remote_hosts_desktop_protocol::Request::Observe { .. }
+            )
+            && original_args.task_id == a.task_id
+            && original_args.capability_version == a.capability_version,
+        "desktop artifact task/capability"
+    );
+    let result: Value =
+        serde_json::from_str(&result.context("desktop observation not delivered")?)?;
+    let artifact: remote_hosts_desktop_protocol::FrameArtifact =
+        serde_json::from_value(result["frame_artifact"].clone())?;
+    ensure!(
+        artifact.operation_id == a.observed_operation_id
+            && artifact.binding.identity == original_identity
+            && artifact.capability_version == a.capability_version
+            && artifact.expires_at_ms > crate::now_ms() as u64
+            && artifact.bytes > 0
+            && artifact.bytes <= remote_hosts_desktop_protocol::MAX_WORKER_PIXELS
+            && valid_hash(&artifact.sha256),
+        "desktop artifact expired/identity"
+    );
+    let blocked: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM jobs WHERE device=? AND json_extract(request,'$.owner')=? AND json_extract(request,'$.tool')='desktop_worker' AND COALESCE(json_extract(request,'$.arguments.request.binding.epoch'),json_extract(request,'$.arguments.request.frame.binding.epoch'))=? AND (json_extract(request,'$.arguments.request.operation')='close' OR json_extract(result,'$.error')='outcome_unknown'))")
+        .bind(&job.device_id).bind(&job.owner).bind(artifact.binding.epoch.to_string())
+        .fetch_one(&g.store.pool).await?;
+    ensure!(!blocked, "desktop artifact epoch closed or unknown");
+    let failed_export: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM jobs WHERE device=? AND json_extract(request,'$.owner')=? AND json_extract(request,'$.tool')='desktop_frame' AND json_extract(request,'$.arguments.observed_operation_id')=? AND json_extract(result,'$.error_code')='desktop_export_interrupted')")
+        .bind(&job.device_id).bind(&job.owner).bind(a.observed_operation_id.to_string())
+        .fetch_one(&g.store.pool).await?;
+    ensure!(
+        !failed_export,
+        "desktop artifact export already interrupted"
+    );
+    Ok(artifact)
+}
+
+pub(crate) async fn retire_desktop_epoch(
+    g: &Gateway,
+    operation_id: &str,
+    result: &Value,
+) -> Result<()> {
+    let Some(text): Option<String> = sqlx::query_scalar("SELECT request FROM jobs WHERE id=?")
+        .bind(operation_id)
+        .fetch_optional(&g.store.pool)
+        .await?
+    else {
+        return Ok(());
+    };
+    let job: Job = serde_json::from_str(&text)?;
+    if job.tool != "desktop_worker" {
+        return Ok(());
+    }
+    let a: crate::agent::DesktopJob = serde_json::from_value(job.arguments.clone())?;
+    let epoch = match a.request {
+        remote_hosts_desktop_protocol::Request::Close { binding }
+            if result["state"] == "closed" || result["error"] == "outcome_unknown" =>
+        {
+            binding.epoch
+        }
+        remote_hosts_desktop_protocol::Request::Act { frame, .. }
+            if result["error"] == "outcome_unknown" =>
+        {
+            frame.binding.epoch
+        }
+        remote_hosts_desktop_protocol::Request::Observe { binding }
+            if result["error"] == "outcome_unknown" =>
+        {
+            binding.epoch
+        }
+        _ => return Ok(()),
+    };
+    let _allocation = g.transfer_limits.allocation.lock().await;
+    let ids:Vec<String>=sqlx::query_scalar(
+        "SELECT DISTINCT f.id FROM jobs f JOIN jobs o ON o.id=json_extract(f.request,'$.arguments.observed_operation_id') JOIN kv k ON k.key=f.id AND k.kind IN ('file_blob','transfer_receiver') WHERE f.device=? AND json_extract(f.request,'$.owner')=? AND json_extract(f.request,'$.tool')='desktop_frame' AND json_extract(o.request,'$.arguments.request.binding.epoch')=? LIMIT 3")
+        .bind(&job.device_id).bind(&job.owner).bind(epoch.to_string()).fetch_all(&g.store.pool).await?;
+    for id in ids {
+        uuid::Uuid::parse_str(&id)?;
+        let Ok(_permit) = g.transfer_limits.try_acquire(&job.device_id, &id) else {
+            continue;
+        };
+        for path in [
+            blob_path(g, &id),
+            g.config
+                .state_dir
+                .join("file-objects")
+                .join(format!("{id}.part040")),
+        ] {
+            match tokio::fs::remove_file(path).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        sqlx::query("DELETE FROM kv WHERE kind IN ('file_blob','transfer_receiver','receive_progress') AND key=?")
+            .bind(&id).execute(&g.store.pool).await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn desktop_export_job(g: &Gateway, mut job: Job) -> Result<Job> {
+    if job.tool == "desktop_frame" {
+        let artifact = desktop_artifact(g, &job).await?;
+        job.arguments["path"] = json!(format!("{}.raw", artifact.operation_id));
+        job.arguments["max_bytes"] = json!(artifact.bytes);
+        job.arguments["expected_version"] = json!(artifact.sha256);
+        job.arguments["artifact_expires_at"] = json!(artifact.expires_at_ms / 1000);
+    }
+    Ok(job)
+}
+
 pub(crate) fn blob_path(g: &Gateway, id: &str) -> PathBuf {
     g.config
         .state_dir
@@ -689,12 +826,12 @@ async fn authorized_job(g: &Gateway, h: &HeaderMap, id: &str, tool: &str) -> Res
     let (request, state) = row.context("transfer operation not found")?;
     let job: Job = serde_json::from_str(&request)?;
     ensure!(
-        job.tool == tool
+        (job.tool == tool || (tool == "file_download" && job.tool == "desktop_frame"))
             && job.owner == g.config.owner
             && (state == "dispatched" || state == "done"),
         "transfer operation is not authorized"
     );
-    let scope = crate::tools::scope(tool).context("unknown transfer scope")?;
+    let scope = crate::tools::scope(&job.tool).context("unknown transfer scope")?;
     ensure!(
         g.config
             .devices
@@ -702,7 +839,7 @@ async fn authorized_job(g: &Gateway, h: &HeaderMap, id: &str, tool: &str) -> Res
             .any(|d| d.id == device && d.scopes.iter().any(|s| s == scope)),
         "transfer scope revoked"
     );
-    Ok(job)
+    desktop_export_job(g, job).await
 }
 async fn get_source(
     State(g): State<Gateway>,
@@ -967,11 +1104,14 @@ fn unavailable_download(result: &mut Value) -> Result<()> {
 
 /// Called only after the original operation and principal have been authorized.
 pub async fn decorate(g: &Gateway, job: &Job, result: &mut Value) -> Result<()> {
-    if job.tool != "file_download"
+    if !matches!(job.tool.as_str(), "file_download" | "desktop_frame")
         || result.get("error").is_some()
         || result.get("state").is_some_and(|s| s != "completed")
     {
         return Ok(());
+    }
+    if job.tool == "desktop_frame" && desktop_artifact(g, job).await.is_err() {
+        return unavailable_download(result);
     }
     // The durable operation receipt outlives its temporary downloadable blob.
     // Expiration affects availability, never whether the operation completed.
@@ -1012,6 +1152,37 @@ pub async fn decorate(g: &Gateway, job: &Job, result: &mut Value) -> Result<()> 
     result["mime_type"] = json!("application/octet-stream");
     Ok(())
 }
+// Desktop bodies recheck the epoch and their original deadline for every bounded
+// read. A removed path does not revoke an already-open file descriptor.
+fn desktop_body(g: Gateway, job: Job, file: tokio::fs::File, bytes: u64, deadline: u64) -> Body {
+    let reader = ReaderStream::with_capacity(file.take(bytes), 64 * 1024);
+    let stream = futures_util::stream::try_unfold(
+        (reader, g, job),
+        move |(mut reader, g, job)| async move {
+            let denied = || {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "desktop artifact revoked or expired",
+                )
+            };
+            if crate::now_ms() as u64 >= deadline {
+                return Err(denied());
+            }
+            desktop_artifact(&g, &job).await.map_err(|_| denied())?;
+            let Some(chunk) = reader.next().await else {
+                return Ok(None);
+            };
+            let chunk = chunk?;
+            if crate::now_ms() as u64 >= deadline {
+                return Err(denied());
+            }
+            desktop_artifact(&g, &job).await.map_err(|_| denied())?;
+            Ok::<_, std::io::Error>(Some((chunk, (reader, g, job))))
+        },
+    );
+    Body::from_stream(stream)
+}
+
 async fn serve_file(
     State(g): State<Gateway>,
     HttpPath((key, _name)): HttpPath<(String, String)>,
@@ -1024,12 +1195,38 @@ async fn serve_file(
         Ok(Some(link)) => link,
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
+    let desktop_job: Result<Option<String>, sqlx::Error> = sqlx::query_scalar(
+        "SELECT request FROM jobs WHERE id=? AND json_extract(request,'$.tool')='desktop_frame'",
+    )
+    .bind(&link.operation)
+    .fetch_optional(&g.store.pool)
+    .await;
+    let desktop_job = match desktop_job {
+        Ok(v) => v,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let desktop = if let Some(text) = desktop_job {
+        let Ok(job) = serde_json::from_str::<Job>(&text) else {
+            return StatusCode::GONE.into_response();
+        };
+        let Ok(artifact) = desktop_artifact(&g, &job).await else {
+            return StatusCode::GONE.into_response();
+        };
+        Some((job, artifact.expires_at_ms))
+    } else {
+        None
+    };
+    let required_scope = if desktop.is_some() {
+        "desktop:observe"
+    } else {
+        "code:read"
+    };
     if link.owner != g.config.owner
         || !g
             .config
             .devices
             .iter()
-            .any(|d| d.id == link.device && d.scopes.iter().any(|s| s == "code:read"))
+            .any(|d| d.id == link.device && d.scopes.iter().any(|s| s == required_scope))
     {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -1109,16 +1306,197 @@ async fn serve_file(
             format!("bytes {start}-{}/{}", end - 1, blob.size),
         );
     }
+    let body = if let Some((job, deadline)) = desktop {
+        desktop_body(
+            g,
+            job,
+            file,
+            (end - start) as u64,
+            deadline.min(blob.expires as u64 * 1000),
+        )
+    } else {
+        Body::from_stream(ReaderStream::new(file.take((end - start) as u64)))
+    };
     builder
-        .body(Body::from_stream(ReaderStream::new(
-            file.take((end - start) as u64),
-        )))
+        .body(body)
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn desktop_stream_fixture() -> (tempfile::TempDir, Gateway, Job, String) {
+        use remote_hosts_desktop_protocol::*;
+        let dir = tempfile::tempdir().unwrap();
+        let identity = Identity {
+            owner: "offline-stream".into(),
+            task_id: uuid::Uuid::new_v4(),
+            device_id: uuid::Uuid::new_v4(),
+            desktop_id: "offline-private".into(),
+        };
+        let binding = Binding {
+            identity: identity.clone(),
+            epoch: uuid::Uuid::new_v4(),
+        };
+        let g = Gateway::new(crate::GatewayConfig {
+            public_url: "https://offline.invalid".into(),
+            bind: "127.0.0.1:0".into(),
+            state_dir: dir.path().join("gateway"),
+            owner: identity.owner.clone(),
+            password_hash: "test-unused".into(),
+            devices: vec![crate::DeviceRegistration {
+                id: identity.device_id.to_string(),
+                name: "offline".into(),
+                token_hash: hash("test-device"),
+                scopes: vec!["desktop:observe".into(), "desktop:input".into()],
+            }],
+            redirect_uris: vec![],
+            allowed_origins: vec![],
+        })
+        .await
+        .unwrap();
+        let observe = Job {
+            id: uuid::Uuid::new_v4().to_string(),
+            owner: identity.owner.clone(),
+            device_id: identity.device_id.to_string(),
+            tool: "desktop_worker".into(),
+            arguments: json!({"task_id":identity.task_id,"device_id":identity.device_id,"capability_version":7,
+                "idempotency_key":"observe","request":Request::Observe { binding:binding.clone() }}),
+        };
+        let data = vec![1u8; 196608];
+        let artifact = FrameArtifact {
+            operation_id: uuid::Uuid::parse_str(&observe.id).unwrap(),
+            binding,
+            capability_version: 7,
+            expires_at_ms: crate::now_ms() as u64 + 60000,
+            bytes: data.len(),
+            sha256: hash(&data),
+            pixels: RawPixels {
+                encoding: "nv12".into(),
+                size: [512, 256],
+                color: [1; 4],
+                plane_lengths: vec![131072, 65536],
+                plane_sha256: vec![hash(&data[..131072]), hash(&data[131072..])],
+            },
+        };
+        sqlx::query("INSERT INTO jobs(id,device,idem,fingerprint,request,result,state,updated) VALUES(?,?,?,?,?,?,'done',?)")
+            .bind(&observe.id).bind(&observe.device_id).bind(&observe.id).bind(hash(serde_json::to_vec(&observe).unwrap()))
+            .bind(serde_json::to_string(&observe).unwrap()).bind(json!({"frame_artifact":artifact}).to_string())
+            .bind(now()).execute(&g.store.pool).await.unwrap();
+        let export = Job {
+            id: uuid::Uuid::new_v4().to_string(),
+            owner: identity.owner.clone(),
+            device_id: identity.device_id.to_string(),
+            tool: "desktop_frame".into(),
+            arguments: json!({"task_id":identity.task_id,"device_id":identity.device_id,"capability_version":7,
+                "observed_operation_id":observe.id,"idempotency_key":"frame"}),
+        };
+        sqlx::query("INSERT INTO jobs(id,device,idem,fingerprint,request,result,state,updated) VALUES(?,?,?,?,?,NULL,'done',?)")
+            .bind(&export.id).bind(&export.device_id).bind(&export.id).bind(hash(serde_json::to_vec(&export).unwrap()))
+            .bind(serde_json::to_string(&export).unwrap()).bind(now()).execute(&g.store.pool).await.unwrap();
+        tokio::fs::create_dir_all(g.config.state_dir.join("file-objects"))
+            .await
+            .unwrap();
+        tokio::fs::write(blob_path(&g, &export.id), &data)
+            .await
+            .unwrap();
+        let blob = Blob {
+            operation: export.id.clone(),
+            device: export.device_id.clone(),
+            owner: export.owner.clone(),
+            name: "frame.raw".into(),
+            size: data.len(),
+            sha256: hash(&data),
+            expires: now() + 60,
+        };
+        g.store
+            .put("file_blob", &export.id, &blob, i64::MAX)
+            .await
+            .unwrap();
+        let key = random();
+        g.store
+            .put(
+                "file_link",
+                &hash(&key),
+                &Link {
+                    operation: export.id.clone(),
+                    device: export.device_id.clone(),
+                    owner: export.owner.clone(),
+                },
+                now() + 60,
+            )
+            .await
+            .unwrap();
+        (dir, g, export, key)
+    }
+
+    #[tokio::test]
+    async fn desktop_slow_stream_close_revokes_open_descriptor() {
+        let (_dir, g, export, key) = desktop_stream_fixture().await;
+        let response = serve_file(
+            State(g.clone()),
+            HttpPath((key, "frame.raw".into())),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+        assert_eq!(stream.next().await.unwrap().unwrap().len(), 64 * 1024);
+        let observed = export.arguments["observed_operation_id"].as_str().unwrap();
+        let request: String = sqlx::query_scalar("SELECT request FROM jobs WHERE id=?")
+            .bind(observed)
+            .fetch_one(&g.store.pool)
+            .await
+            .unwrap();
+        let mut close: Job = serde_json::from_str(&request).unwrap();
+        close.id = uuid::Uuid::new_v4().to_string();
+        close.arguments["request"]["operation"] = json!("close");
+        sqlx::query("INSERT INTO jobs(id,device,idem,fingerprint,request,result,state,updated) VALUES(?,?,?,?,?,NULL,'queued',?)")
+            .bind(&close.id).bind(&close.device_id).bind(&close.id).bind(hash(serde_json::to_vec(&close).unwrap()))
+            .bind(serde_json::to_string(&close).unwrap()).bind(now()).execute(&g.store.pool).await.unwrap();
+        tokio::fs::remove_file(blob_path(&g, &export.id))
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM kv WHERE kind='file_blob' AND key=?")
+            .bind(&export.id)
+            .execute(&g.store.pool)
+            .await
+            .unwrap();
+        assert!(stream.next().await.unwrap().is_err());
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn desktop_slow_stream_deadline_stops_existing_descriptor() {
+        let (_dir, g, export, key) = desktop_stream_fixture().await;
+        let observed = export.arguments["observed_operation_id"].as_str().unwrap();
+        let deadline = crate::now_ms() as u64 + 250;
+        sqlx::query(
+            "UPDATE jobs SET result=json_set(result,'$.frame_artifact.expires_at_ms',?) WHERE id=?",
+        )
+        .bind(deadline as i64)
+        .bind(observed)
+        .execute(&g.store.pool)
+        .await
+        .unwrap();
+        let response = serve_file(
+            State(g.clone()),
+            HttpPath((key, "frame.raw".into())),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+        assert_eq!(stream.next().await.unwrap().unwrap().len(), 64 * 1024);
+        tokio::time::sleep(Duration::from_millis(
+            deadline.saturating_sub(crate::now_ms() as u64) + 20,
+        ))
+        .await;
+        assert!(blob_path(&g, &export.id).exists());
+        assert!(stream.next().await.unwrap().is_err());
+        assert!(stream.next().await.is_none());
+    }
     #[test]
     fn source_and_destination_faults_report_boundaries_without_paths_or_secrets() {
         let u = source_url(

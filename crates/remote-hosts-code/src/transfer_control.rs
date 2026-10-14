@@ -33,7 +33,10 @@ pub(crate) async fn device_job(g: &Gateway, headers: &HeaderMap, id: &str) -> Re
         .context("transfer unavailable")?;
     let job: Job = serde_json::from_str(&request)?;
     ensure!(
-        matches!(job.tool.as_str(), "file_upload" | "file_download") && job.owner == g.config.owner,
+        matches!(
+            job.tool.as_str(),
+            "file_upload" | "file_download" | "desktop_frame"
+        ) && job.owner == g.config.owner,
         "transfer unavailable"
     );
     let scope = tools::scope(&job.tool).context("unsupported transfer")?;

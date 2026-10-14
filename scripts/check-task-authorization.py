@@ -12,7 +12,7 @@ import sys
 import time
 
 import build_slot
-import source_snapshot
+import release_current
 
 ROOT = Path(__file__).resolve().parents[1]
 OWNED = [
@@ -32,7 +32,8 @@ def stage(argv, checkout, target, report, name, state, limit):
     log = report.parent / (name + ".log")
     env = dict(os.environ)
     env["CARGO_TARGET_DIR"] = str(target)
-    before = source_snapshot.check(checkout)["snapshot_id"]
+    manifest = state["source_evidence"]
+    release_current.check_inputs(checkout, manifest)
     started = time.monotonic()
     with log.open("xb") as output:
         proc = subprocess.Popen(argv, cwd=checkout, env=env, stdout=output,
@@ -58,7 +59,8 @@ def stage(argv, checkout, target, report, name, state, limit):
                                   "disk_free_gib":round(free/1024**3,2)}), flush=True)
                 last = elapsed
             time.sleep(0.5)
-    unchanged = source_snapshot.check(checkout)["snapshot_id"] == before
+    release_current.check_inputs(checkout, manifest)
+    unchanged = True
     state["stages"][name] = {
         "exit_code":proc.returncode,"stopped":stopped,"source_unchanged":unchanged,
         "elapsed_seconds":round(time.monotonic()-started,2),"log":str(log),
@@ -76,22 +78,24 @@ def main():
     parser.add_argument("--export-contract", action="store_true")
     parser.add_argument("--acceptance", action="store_true")
     args=parser.parse_args()
+    release_current.primary(ROOT)
     evidence=args.evidence_dir.absolute()
     evidence.mkdir(parents=True,exist_ok=False)
     report=evidence/"report.json"
-    snapshot=evidence/"snapshot"
-    manifest=source_snapshot.create(ROOT,snapshot)
+    manifest=release_current.snapshot_evidence(None, ROOT)
     slot=ROOT/"target/release-slot"
-    target=slot/"cargo-target"
+    target=Path.home()/"rust-target"
     if shutil.disk_usage(ROOT).free < 10*1024**3:
         raise RuntimeError("insufficient_starting_disk_budget")
     state={"state":"running","phase":"lease","snapshot_id":manifest["snapshot_id"],
-           "source_root":str(ROOT),"target":str(target),"stages":{},
+           "source_root":str(ROOT),"source_evidence":manifest,"target":str(target),"stages":{},
            "disk_floor_bytes":4*1024**3,"stop_threshold_bytes":5*1024**3}
     build_slot.atomic_json(report,state)
     try:
-        with build_slot.lease(slot,report,manifest["snapshot_id"]) as checkout:
-            state["sync"]=build_slot.synchronize(snapshot,checkout)
+        with build_slot.lease(slot,report,manifest["snapshot_id"],execution_root=ROOT) as checkout:
+            release_current.check_inputs(checkout, manifest)
+            target=release_current.established_target(checkout, dict(os.environ, CARGO_TARGET_DIR=str(target)))
+            state["execution_root"]=str(checkout)
             build_slot.atomic_json(report,state)
             stage(["rustfmt","--edition","2024","--check","--config","skip_children=true",*OWNED],
                   checkout,target,report,"format",state,60)

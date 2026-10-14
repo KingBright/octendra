@@ -135,9 +135,15 @@ scripts/build-windows-cross.sh
 ```
 
 On Debian or Ubuntu, install `nasm` and `zip` from the system package manager. The build script
-requires `cargo-xwin` 0.23.0 or newer, compiles with `--locked`, creates a ZIP under `dist/`, and
-writes a sibling `.sha256` file. The archive contains the native executable, service manager,
-external admin UI, release manifest, Windows guide, and Agent Skill.
+requires the already installed MSVC target, `cargo-xwin` 0.23.0 or newer and NASM, then compiles
+with `--locked --release` and one job in primary main using the established `~/rust-target`.
+It replaces the fixed `dist/remote-hosts-windows-x86_64-current` directory, matching `.zip` and
+`.zip.sha256` through the shared current transaction after validating package bytes. The archive
+contains both native CLI and launcher executables, service manager, external admin UI, release
+manifest, Windows guide, and Agent Skill. It records source identity, artifact hashes and the
+build receipt; cross-compilation is not Windows runtime or signing acceptance. Alternate
+`REMOTE_HOSTS_DIST_DIR` paths are refused; old version/commit packages and evidence are preserved.
+Failure or the next entry recovers only this transaction's owned, inactive temporary paths.
 
 The MSVC runtime is normally present on supported Windows systems. If Windows reports a missing
 runtime DLL, install the current Microsoft Visual C++ Redistributable for x64.

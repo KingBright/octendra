@@ -2,8 +2,8 @@
 """Fixed isolated transfer acceptance: synthetic grants, temporary loopback servers.
 
 No owner login, device enrollment, service manager, deployment or Git action.
-Only subprocesses created by these fixtures are restarted/killed. Existing source
-snapshot and build-slot helpers bind receipts to exact inputs and serialize Cargo.
+Only subprocesses created by these fixtures are restarted/killed. Primary main input
+fingerprints and the existing metadata lease bind receipts and serialize Cargo.
 """
 import argparse
 import hashlib
@@ -17,7 +17,7 @@ import sys
 import time
 
 import build_slot
-import source_snapshot
+import release_current
 
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 CASES=[
@@ -38,6 +38,7 @@ CASES=[
 
 
 def run_stage(name, argv, checkout, env, directory, state, timeout=1200):
+    release_current.check_inputs(checkout, state['source_evidence'])
     log=directory/(name+'.log')
     entry={'state':'running','command':argv,'log':str(log),'started_at':int(time.time())}
     state['stages'][name]=entry
@@ -73,6 +74,7 @@ def run_stage(name, argv, checkout, env, directory, state, timeout=1200):
         if not count or not re.search(r'^OK$',text,re.M):
             raise RuntimeError('coordinator acceptance incomplete')
         entry.update(executed=int(count[1]),passed=int(count[1]),failed=0,skipped=0)
+    release_current.check_inputs(checkout, state['source_evidence'])
     entry['state']='passed'
     build_slot.atomic_json(directory/'verification.json',state)
     print(json.dumps({'stage':name,'state':'passed','executed':entry.get('executed',0)}),flush=True)
@@ -81,8 +83,12 @@ def run_stage(name, argv, checkout, env, directory, state, timeout=1200):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--report-dir',type=pathlib.Path,required=True)
-    parser.add_argument('--build-slot',type=pathlib.Path,required=True)
+    parser.add_argument('--build-slot',type=pathlib.Path,default=ROOT/'target/release-slot')
     args=parser.parse_args()
+    release_current.primary(ROOT)
+    slot=build_slot.no_links(args.build_slot)
+    if slot.resolve() != (ROOT/'target/release-slot').resolve():
+        raise ValueError('acceptance must reuse the existing target/release-slot metadata lease')
     directory=args.report_dir.absolute()
     if directory.exists():
         raise FileExistsError('acceptance report already exists; observe its original evidence before another isolated run')
@@ -92,13 +98,13 @@ def main():
            'cases':[{'target':t,'test':n,'boundary':b} for t,n,b in CASES],'stages':{}}
     build_slot.atomic_json(directory/'verification.json',state)
     try:
-        snapshot=directory/'source'
-        captured=source_snapshot.create(ROOT,snapshot)
-        state.update(snapshot_id=captured['snapshot_id'],source_inputs=captured['source_inputs'])
-        with build_slot.lease(args.build_slot,directory/'verification.json',captured['snapshot_id']) as checkout:
-            state['synchronization']=build_slot.synchronize(snapshot,checkout)
-            env=os.environ.copy()
-            env['CARGO_TARGET_DIR']=str(args.build_slot.absolute()/'cargo-target')
+        captured=release_current.snapshot_evidence(None, ROOT)
+        state.update(snapshot_id=captured['snapshot_id'],source_inputs=captured['source_inputs'],source_evidence=captured)
+        with build_slot.lease(slot,directory/'verification.json',captured['snapshot_id'],execution_root=ROOT) as checkout:
+            release_current.check_inputs(checkout,captured)
+            env=dict(os.environ,CARGO_TARGET_DIR=str(pathlib.Path.home()/'rust-target'))
+            state['target']=str(release_current.established_target(checkout,env))
+            state['execution_root']=str(checkout)
             for key in ('RH040_CHECKPOINT_FIXTURE','RH040_GATEWAY_FIXTURE'):
                 env.pop(key,None)
             run_stage('python_coordinator',[sys.executable,'-B','-W','error::ResourceWarning','-m','unittest',
@@ -108,8 +114,7 @@ def main():
                 selection=['--lib'] if target=='lib' else ['--test',target]
                 run_stage('rust_'+str(index),['cargo','test','--offline','--locked','-p','remote-hosts-code',
                           *selection,name,'--','--exact','--nocapture'],checkout,env,directory,state)
-            source_snapshot.check(snapshot)
-            source_snapshot.check(checkout)
+            release_current.check_inputs(checkout,captured)
             state.update(state='passed',python_passed=state['stages']['python_coordinator']['passed'],
                          rust_passed=len(CASES),failed=0,skipped=0,
                          accepted_scope='fixture coordinator plus actual Rust protocol/owned process recovery; not deployed fleet',

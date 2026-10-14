@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify/build/package one frozen candidate in a stable leased checkout.
+"""Verify/build/package primary main inputs under the existing long-lived lease.
 
 No deployment, credentials, service restart, git reset or implicit test-result reuse.
 Status is durable and queryable without spawning another build. Only selected
@@ -20,7 +20,9 @@ import tomllib
 import uuid
 
 import build_slot
+import build_process
 import source_snapshot
+import release_current
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -57,33 +59,17 @@ def prepare_build_limits(resource_api=None, platform=None):
 
 
 def current_status(report):
+    report = pathlib.Path(report)
+    if not report.exists():
+        launch = report.with_name(report.stem+'-launch.json')
+        result = load(launch)
+        result['phase'] = 'worker_startup'
+        result['observation'] = {'observed_at': stamp(), 'mutates_build': False}
+        return result
     result = load(report)
     result['observation'] = {'observed_at': stamp(), 'mutates_build': False,
                              'seconds_since_update': max(0, time.time()-result.get('updated_epoch', time.time()))}
     return result
-
-
-def process_cpu(pid):
-    try:
-        p = subprocess.run(['ps', '-axo', 'pid=,ppid=,time='], text=True, capture_output=True, timeout=3)
-        return build_slot.descendants(p.stdout, pid) if p.returncode == 0 else {}
-    except (OSError, subprocess.TimeoutExpired):
-        return {}
-
-
-def stop_owned(process):
-    # The verifier handles SIGTERM and stops its own nested process group.
-    if process.poll() is not None:
-        return
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        process.wait(timeout=8)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.wait(timeout=5)
 
 
 def progress_log(name, checkout, directory, fallback):
@@ -104,84 +90,55 @@ def progress_log(name, checkout, directory, fallback):
         return fallback, None
 
 
-def run_stage(name, argv, checkout, directory, report, state, env, timeout=1800):
+def run_stage(name, argv, checkout, directory, report, state, env, timeout=1800, manifest=None):
+    """Observe durable output and raw exit; timeout bounds inactivity only."""
     path = directory/(name+'.log')
-    started = time.monotonic()
     check = {'state': 'running', 'started_at': stamp(), 'log': str(path), 'exit_code': None}
     state['stages'][name] = check
     state.update(state='running', phase=name, phase_started_at=stamp(), activity='starting')
 
-    def publish():
+    def progress(value):
+        check.update(value)
+        state.update({key: value[key] for key in
+                      ('activity', 'stage_elapsed_seconds', 'seconds_since_observed_progress',
+                       'log_bytes', 'cpu_delta_seconds', 'child_processes_observed',
+                       'heartbeat', 'progress', 'verification_gate', 'observed_log') if key in value})
+        if value.get('process_id'):
+            state['child_pid'] = value['process_id']
         state.update(updated_at=stamp(), updated_epoch=time.time())
         build_slot.atomic_json(report, state)
 
-    publish()
+    build_slot.atomic_json(report, state)
     print(json.dumps({'phase': name, 'state': 'running', 'report': str(report)}), flush=True)
-    last_size = 0
-    last_log = None
-    previous_cpu = {}
-    last_progress = started
-    with path.open('xb') as output:
-        process = subprocess.Popen(argv, cwd=checkout, env=env, stdout=output,
-                                   stderr=subprocess.STDOUT, start_new_session=True)
-        state['child_pid'] = process.pid
-        publish()
-        try:
-            while process.poll() is None:
-                remaining = timeout-(time.monotonic()-started)
-                if remaining <= 0:
-                    raise subprocess.TimeoutExpired(name, timeout)
-                try:
-                    process.wait(timeout=min(3, remaining))
-                except subprocess.TimeoutExpired:
-                    pass
-                observed_log, gate = progress_log(name, checkout, directory, path)
-                size = observed_log.stat().st_size
-                output_advanced = size != last_size or observed_log != last_log
-                cpus = process_cpu(process.pid)
-                active_cpu = sum(max(0, value-previous_cpu.get(pid, value)) for pid, value in cpus.items())
-                with observed_log.open('rb') as source:
-                    source.seek(max(0, size-4096))
-                    tail = source.read().decode('utf-8', errors='replace')
-                if active_cpu > 0.01:
-                    activity = 'cpu_active'
-                elif output_advanced:
-                    activity = 'output_advanced'
-                elif 'Blocking waiting for file lock' in tail:
-                    activity = 'cargo_lock_wait_hint'
-                else:
-                    activity = 'quiet_not_proven_stalled'
-                if active_cpu > 0.01 or output_advanced:
-                    last_progress = time.monotonic()
-                state.update(activity=activity, child_processes_observed=len(cpus),
-                             stage_elapsed_seconds=round(time.monotonic()-started, 3),
-                             seconds_since_observed_progress=round(time.monotonic()-last_progress, 3),
-                             log_bytes=size, observed_log=str(observed_log), cpu_delta_seconds=round(active_cpu, 3))
-                if gate is not None:
-                    state['verification_gate'] = gate
-                publish()
-                previous_cpu, last_size, last_log = cpus, size, observed_log
-            check.update(state='finished', exit_code=process.returncode)
-        except (Exception, KeyboardInterrupt) as error:
-            stop_owned(process)
-            check.update(state='interrupted' if isinstance(error, KeyboardInterrupt) else 'failed',
-                         exit_code=process.returncode, failure_type=type(error).__name__)
-            raise
-        finally:
-            check.update(elapsed_seconds=round(time.monotonic()-started, 3), sha256=build_slot.digest(path))
-            state.pop('child_pid', None)
-            publish()
-    if process.returncode != 0:
+    outcome = build_process.run(
+        argv, checkout, path, env, idle_timeout=timeout, on_update=progress,
+        observed_log=lambda: progress_log(name, checkout, directory, path),
+        exclude_root_cpu=name == 'verification')
+    check.update(outcome, sha256=build_slot.digest(path) if path.is_file() else None)
+    if outcome.get('cleanup', {}).get('state') != 'unconfirmed':
+        state.pop('child_pid', None)
+    state.update(updated_at=stamp(), updated_epoch=time.time())
+    build_slot.atomic_json(report, state)
+    print(json.dumps({'phase': name, 'state': check['state'], 'exit_code': check['exit_code'],
+                      'output_complete': check['output_complete'], 'exit_receipt': check['exit_receipt'],
+                      'elapsed_seconds': check['elapsed_seconds']}), flush=True)
+    if outcome['state'] == 'interrupted':
+        raise KeyboardInterrupt
+    if outcome['state'] != 'finished' or outcome['exit_code'] != 0 or not outcome['output_complete']:
         raise RuntimeError('stage_failed:'+name+'; inspect saved log, do not duplicate the build')
-    source_snapshot.check(checkout)
-    print(json.dumps({'phase': name, 'state': 'finished', 'elapsed_seconds': check['elapsed_seconds']}), flush=True)
+    if manifest is not None:
+        release_current.check_inputs(checkout, manifest)
+    else:
+        source_snapshot.check(checkout)
 
 
-def run_pipeline(snapshot, report, slot, verify_only=False):
-    snapshot = snapshot.resolve(strict=True)
+def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=None):
+    snapshot = snapshot.resolve(strict=True) if snapshot is not None else None
     report = report.absolute()
-    manifest = source_snapshot.check(snapshot)
-    version = tomllib.loads((snapshot/'crates/remote-hosts-code/Cargo.toml').read_text())['package']['version']
+    manifest = release_current.snapshot_evidence(snapshot, ROOT)
+    if expected_source_id is not None and manifest['snapshot_id'] != expected_source_id:
+        raise ValueError('main inputs changed after launch; preserve the original operation and edits')
+    version = tomllib.loads((ROOT/'crates/remote-hosts-code/Cargo.toml').read_text())['package']['version']
     report.parent.mkdir(parents=True, exist_ok=True)
     if report.exists():
         previous = load(report)
@@ -192,32 +149,34 @@ def run_pipeline(snapshot, report, slot, verify_only=False):
                           'report': str(report), 'action': 'observe_original; no build started'}), flush=True)
         return previous
     state = {'schema_version': 1, 'version': version, 'state': 'preparing', 'phase': 'lease',
-             'snapshot_id': manifest['snapshot_id'], 'snapshot': str(snapshot), 'verify_only': verify_only,
+             'snapshot_id': manifest['snapshot_id'], 'snapshot': str(snapshot) if snapshot is not None else None, 'verify_only': verify_only,
              'started_at': stamp(), 'pid': os.getpid(), 'stages': {}, 'deployed': False}
     # Atomic claim prevents racing requests with the same report id.
     with report.open('x') as stream:
         json.dump(state, stream, indent=2)
+    admitted = False
+    committed = False
     try:
-        with build_slot.lease(slot, report, manifest['snapshot_id']) as checkout:
+        with build_slot.lease(slot, report, manifest['snapshot_id'], execution_root=ROOT) as checkout:
             state['build_process_limits'] = prepare_build_limits()
             build_slot.atomic_json(report, state)
-            state['synchronization'] = build_slot.synchronize(snapshot, checkout)
-            if not verify_only and (checkout/'dist'/('remote-hosts-code-'+version)).exists():
-                raise FileExistsError('release_version_already_packaged; observe its original report or use a new version')
+            state['source_validation'] = {'execution_root': str(checkout), 'snapshot_is_evidence_only': True}
+            release_current.check_inputs(checkout, manifest)
+            state['current_preflight'] = release_current.preflight(checkout)
+            if not verify_only:
+                state['current_admission'] = release_current.admit(checkout)
+                admitted = True
             directory = report.parent/(report.stem+'-logs')
             directory.mkdir(exist_ok=False)
             state['execution_root'] = str(checkout)
-            env = dict(os.environ, CARGO_TERM_COLOR='never')
-            # Stable path per slot; unrelated editor builds cannot overwrite these
-            # final binary filenames in the user's globally configured target-dir.
-            env['CARGO_TARGET_DIR'] = str(slot/'cargo-target')
-            state['cargo_target_dir'] = env['CARGO_TARGET_DIR']
+            env = dict(os.environ, CARGO_TERM_COLOR='never', PYTHONUNBUFFERED='1', CARGO_BUILD_JOBS='1')
+            state['cargo_target_dir'] = str(release_current.established_target(checkout, env))
             # Cold toolchain startup on a busy workstation is not a lease failure.
             state.update(phase='toolchain_probe', state='running')
             build_slot.atomic_json(report, state)
             state['toolchain'] = subprocess.check_output(['rustc', '-vV'], cwd=checkout, env=env, text=True, timeout=60).strip()
             run_stage('verification', [sys.executable, 'scripts/check-code-source.py', '--report', str(directory/'verification.json')],
-                      checkout, directory, report, state, env, timeout=5400)
+                      checkout, directory, report, state, env, timeout=5400, manifest=manifest)
             proof = load(directory/'verification.json')
             verifier = source_snapshot.verifier(checkout)
             if not verifier.receipt_current(proof, checkout):
@@ -232,24 +191,28 @@ def run_pipeline(snapshot, report, slot, verify_only=False):
                 for name, args in [('macos_release', ['cargo', 'build', '-p', 'remote-hosts-code', '--release', '--locked']),
                                    ('linux_release', ['cargo', 'zigbuild', '-p', 'remote-hosts-code', '--release', '--locked', '--target', 'x86_64-unknown-linux-musl']),
                                    ('windows_release', ['cargo', 'xwin', 'build', '-p', 'remote-hosts-code', '--release', '--locked', '--target', 'x86_64-pc-windows-msvc'])]:
-                    run_stage(name, args, checkout, directory, report, state, env)
+                    run_stage(name, args, checkout, directory, report, state, env, manifest=manifest)
                 run_stage('package', [sys.executable, 'scripts/package-code-release.py', '--version', version,
-                                     '--verification', str(directory/'verification.json')], checkout, directory, report, state, env)
-                release = checkout/'dist'/('remote-hosts-code-'+version)
+                                     '--verification', str(directory/'verification.json'), '--producer-pid', str(os.getpid())],
+                          checkout, directory, report, state, env, manifest=manifest)
+                release, bundle = release_current.stages(checkout)
                 packaged = load(release/'manifest.json')
                 if packaged['source_inputs'] != manifest['source_inputs']:
                     raise ValueError('packaged source differs from verified snapshot')
                 for filename, info in packaged['artifacts'].items():
                     if pathlib.Path(filename).name != filename or build_slot.digest(release/filename) != info['sha256']:
                         raise ValueError('packaged artifact checksum mismatch')
-                bundle = release.parent/(release.name+'-bundle.tgz')
                 if not bundle.is_file():
                     raise ValueError('release bundle missing after package stage')
+                release_current.check_inputs(checkout, manifest)
+                state['current_publication'] = release_current.publish(checkout)
+                committed = True
+                release, bundle = release_current.files(checkout)
                 state['package'] = {'path': str(release), 'manifest_sha256': build_slot.digest(release/'manifest.json'),
                                     'bundle': str(bundle), 'bundle_sha256': build_slot.digest(bundle),
                                     'bundle_size': bundle.stat().st_size, 'artifacts': packaged['artifacts']}
-            source_snapshot.check(snapshot)
-            source_snapshot.check(checkout)
+            release_current.snapshot_evidence(snapshot, checkout)
+            release_current.check_inputs(checkout, manifest)
             state.update(state='passed', phase='finished', source_inputs_unchanged=True)
     except build_slot.SlotBusy as error:
         state.update(state='busy', phase='lease', owner=error.owner,
@@ -260,10 +223,66 @@ def run_pipeline(snapshot, report, slot, verify_only=False):
         if isinstance(error, (ValueError, FileExistsError, RuntimeError, subprocess.TimeoutExpired)):
             state['failure_detail'] = str(error)[:400]
     finally:
+        if admitted and not committed:
+            settled = all(stage.get('cleanup', {}).get('state') != 'unconfirmed'
+                          for stage in state['stages'].values())
+            state['current_recovery'] = (release_current.abort(ROOT) if settled else
+                {'status': 'deferred', 'reason': 'owned child cleanup unconfirmed', 'artifacts_preserved': True})
         state.update(updated_at=stamp(), updated_epoch=time.time())
         build_slot.atomic_json(report, state)
     print(json.dumps({k: state.get(k) for k in ('state', 'version', 'phase', 'snapshot_id', 'verification', 'package', 'next_action')}), flush=True)
     return state
+
+
+def start_pipeline(snapshot, report, verify_only=False):
+    """Submit once; observation or launcher timeout never owns the worker group."""
+    snapshot = snapshot.resolve(strict=True) if snapshot is not None else None
+    report = report.absolute()
+    manifest = release_current.snapshot_evidence(snapshot, ROOT)
+    report.parent.mkdir(parents=True, exist_ok=True)
+    launch = report.with_name(report.stem+'-launch.json')
+    driver_log = report.with_name(report.stem+'-driver.log')
+    if report.exists() or launch.exists():
+        print(json.dumps({'state': 'existing_attempt', 'report': str(report),
+                          'launch_receipt': str(launch), 'action': 'observe_original; no process started'}), flush=True)
+        return
+    # An interrupted launch claim remains evidence; no automatic second spawn.
+    intent = {'schema_version': 1, 'state': 'launching', 'snapshot_id': manifest['snapshot_id'],
+              'snapshot': str(snapshot) if snapshot is not None else None, 'report': str(report), 'driver_log': str(driver_log),
+              'verify_only': verify_only, 'started_at': stamp(), 'launcher_pid': os.getpid()}
+    try:
+        with launch.open('x') as stream:
+            json.dump(intent, stream, indent=2);stream.flush();os.fsync(stream.fileno())
+    except FileExistsError:
+        print(json.dumps({'state': 'existing_attempt', 'launch_receipt': str(launch),
+                          'action': 'observe_original; no process started'}), flush=True)
+        return
+    worker_pid = None
+    try:
+        argv = [sys.executable, str(pathlib.Path(__file__).resolve()), '--report', str(report)]
+        argv.extend(['--expected-source-id', manifest['snapshot_id']])
+        if snapshot is not None:
+            argv.extend(['--snapshot', str(snapshot)])
+        if verify_only:
+            argv.append('--verify-only')
+        # posix_spawn has no un-reaped Popen object in this short-lived launcher.
+        # The new session owns its stdout file and survives a tool's observation timeout.
+        with driver_log.open('xb', buffering=0) as output, open(os.devnull, 'rb') as null:
+            actions = [(os.POSIX_SPAWN_DUP2, null.fileno(), 0),
+                       (os.POSIX_SPAWN_DUP2, output.fileno(), 1),
+                       (os.POSIX_SPAWN_DUP2, output.fileno(), 2)]
+            worker_pid = os.posix_spawn(sys.executable, argv,
+                                       dict(os.environ, PYTHONUNBUFFERED='1'),
+                                       file_actions=actions, setsid=True)
+        intent.update(state='submitted', worker_pid=worker_pid, worker_process_group=worker_pid)
+        build_slot.atomic_json(launch, intent)
+    except BaseException as error:
+        # If spawn succeeded, retain its identity; never cancel it on observation failure.
+        intent.update(state='submitted_receipt_error' if worker_pid else 'launch_failed',
+                      failure_type=type(error).__name__, worker_pid=worker_pid)
+        build_slot.atomic_json(launch, intent)
+        raise
+    print(json.dumps(intent), flush=True)
 
 
 def main():
@@ -271,17 +290,22 @@ def main():
     parser.add_argument('--snapshot', type=pathlib.Path)
     parser.add_argument('--report', type=pathlib.Path, required=True)
     parser.add_argument('--status', action='store_true')
+    parser.add_argument('--start', action='store_true', help='Submit one detached, durable build; never replay an existing report/launch')
     parser.add_argument('--verify-only', action='store_true')
+    parser.add_argument('--expected-source-id', help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.status:
         print(json.dumps(current_status(args.report)), flush=True)
         return
-    if not args.snapshot or os.name != 'posix':
-        parser.error('a snapshot and POSIX build host are required')
+    if os.name != 'posix':
+        parser.error('a POSIX build host is required')
+    if args.start:
+        start_pipeline(args.snapshot, args.report, args.verify_only)
+        return
     def interrupt(_signum, _frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupt)
-    result = run_pipeline(args.snapshot, args.report, ROOT/'target/release-slot', args.verify_only)
+    result = run_pipeline(args.snapshot, args.report, ROOT/'target/release-slot', args.verify_only, args.expected_source_id)
     if result['state'] != 'passed':
         raise SystemExit(1)
 
