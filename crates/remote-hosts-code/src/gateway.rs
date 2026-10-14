@@ -6,7 +6,7 @@ use crate::{
     store::Store,
     tools,
 };
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use axum::{
     Extension, Form, Json, Router,
     extract::{DefaultBodyLimit, Request, State},

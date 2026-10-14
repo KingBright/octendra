@@ -1,15 +1,19 @@
-//! OAuth step-up signaling only. Never creates grants, tokens, retries or jobs.
+//! MCP tool security metadata at wire serialization.
+#[cfg(test)]
 use crate::{auth::Principal, tools};
+#[cfg(test)]
+use rmcp::model::{CallToolResult, ContentBlock, Meta};
 use rmcp::{
     RoleServer, Service,
-    model::{
-        CallToolResult, ClientNotification, ClientRequest, ContentBlock, CustomResult, ErrorData,
-        Meta, ServerInfo, ServerResult,
-    },
+    model::{ClientNotification, ClientRequest, CustomResult, ErrorData, ServerInfo, ServerResult},
     service::{NotificationContext, RequestContext},
 };
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 
+// Existing wire fixtures may construct a challenge; production dispatch no longer does.
+#[cfg(test)]
 pub(crate) fn scope_challenge(
     p: &Principal,
     tool: &str,
