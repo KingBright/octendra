@@ -132,7 +132,8 @@ def run_stage(name, argv, checkout, directory, report, state, env, timeout=1800,
         source_snapshot.check(checkout)
 
 
-def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=None):
+def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=None, platforms=None):
+    platforms = release_current.selected_platforms(platforms)
     snapshot = snapshot.resolve(strict=True) if snapshot is not None else None
     report = report.absolute()
     manifest = release_current.snapshot_evidence(snapshot, ROOT)
@@ -143,13 +144,14 @@ def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=N
     if report.exists():
         previous = load(report)
         if (previous.get('snapshot_id') != manifest['snapshot_id']
-                or previous.get('verify_only') != verify_only):
+                or previous.get('verify_only') != verify_only
+                or tuple(previous.get('platforms', release_current.PLATFORMS)) != platforms):
             raise ValueError('report belongs to different inputs or mode; never overwrite')
         print(json.dumps({'state': 'existing_attempt', 'original_state': previous['state'],
                           'report': str(report), 'action': 'observe_original; no build started'}), flush=True)
         return previous
     state = {'schema_version': 1, 'version': version, 'state': 'preparing', 'phase': 'lease',
-             'snapshot_id': manifest['snapshot_id'], 'snapshot': str(snapshot) if snapshot is not None else None, 'verify_only': verify_only,
+             'snapshot_id': manifest['snapshot_id'], 'snapshot': str(snapshot) if snapshot is not None else None, 'verify_only': verify_only, 'platforms': list(platforms),
              'started_at': stamp(), 'pid': os.getpid(), 'stages': {}, 'deployed': False}
     # Atomic claim prevents racing requests with the same report id.
     with report.open('x') as stream:
@@ -169,7 +171,8 @@ def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=N
             directory = report.parent/(report.stem+'-logs')
             directory.mkdir(exist_ok=False)
             state['execution_root'] = str(checkout)
-            env = dict(os.environ, CARGO_TERM_COLOR='never', PYTHONUNBUFFERED='1', CARGO_BUILD_JOBS='1')
+            env = dict(os.environ, CARGO_TERM_COLOR='never', PYTHONUNBUFFERED='1',
+                       CARGO_BUILD_JOBS=str(min(4, max(1, os.cpu_count() or 1))))
             state['cargo_target_dir'] = str(release_current.established_target(checkout, env))
             # Cold toolchain startup on a busy workstation is not a lease failure.
             state.update(phase='toolchain_probe', state='running')
@@ -188,12 +191,17 @@ def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=N
             state['verification_gate'] = 'passed'
             build_slot.atomic_json(report, state)
             if not verify_only:
-                for name, args in [('macos_release', ['cargo', 'build', '-p', 'remote-hosts-code', '--release', '--locked']),
-                                   ('linux_release', ['cargo', 'zigbuild', '-p', 'remote-hosts-code', '--release', '--locked', '--target', 'x86_64-unknown-linux-musl']),
-                                   ('windows_release', ['cargo', 'xwin', 'build', '-p', 'remote-hosts-code', '--release', '--locked', '--target', 'x86_64-pc-windows-msvc'])]:
+                for name, args in [('macos_release', ['cargo', 'build', '-p', 'remote-hosts-code', '-p', 'remote-hosts-cli', '--release', '--locked']),
+                                   ('linux_release', ['cargo', 'zigbuild', '-p', 'remote-hosts-code', '-p', 'remote-hosts-cli', '--release', '--locked', '--target', 'x86_64-unknown-linux-musl']),
+                                   ('windows_release', ['cargo', 'xwin', 'build', '-p', 'remote-hosts-code', '-p', 'remote-hosts-cli', '--release', '--locked', '--target', 'x86_64-pc-windows-msvc'])]:
+                    # The native executable supplies the release machine contract,
+                    # including when only cross-platform binaries are packaged.
+                    if name != 'macos_release' and name.removesuffix('_release') not in platforms:
+                        continue
                     run_stage(name, args, checkout, directory, report, state, env, manifest=manifest)
                 run_stage('package', [sys.executable, 'scripts/package-code-release.py', '--version', version,
-                                     '--verification', str(directory/'verification.json'), '--producer-pid', str(os.getpid())],
+                                     '--verification', str(directory/'verification.json'), '--producer-pid', str(os.getpid()),
+                                     '--platforms', *platforms],
                           checkout, directory, report, state, env, manifest=manifest)
                 release, bundle = release_current.stages(checkout)
                 packaged = load(release/'manifest.json')
@@ -234,8 +242,9 @@ def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=N
     return state
 
 
-def start_pipeline(snapshot, report, verify_only=False):
+def start_pipeline(snapshot, report, verify_only=False, platforms=None):
     """Submit once; observation or launcher timeout never owns the worker group."""
+    platforms = release_current.selected_platforms(platforms)
     snapshot = snapshot.resolve(strict=True) if snapshot is not None else None
     report = report.absolute()
     manifest = release_current.snapshot_evidence(snapshot, ROOT)
@@ -249,7 +258,7 @@ def start_pipeline(snapshot, report, verify_only=False):
     # An interrupted launch claim remains evidence; no automatic second spawn.
     intent = {'schema_version': 1, 'state': 'launching', 'snapshot_id': manifest['snapshot_id'],
               'snapshot': str(snapshot) if snapshot is not None else None, 'report': str(report), 'driver_log': str(driver_log),
-              'verify_only': verify_only, 'started_at': stamp(), 'launcher_pid': os.getpid()}
+              'verify_only': verify_only, 'platforms': list(platforms), 'started_at': stamp(), 'launcher_pid': os.getpid()}
     try:
         with launch.open('x') as stream:
             json.dump(intent, stream, indent=2);stream.flush();os.fsync(stream.fileno())
@@ -261,6 +270,8 @@ def start_pipeline(snapshot, report, verify_only=False):
     try:
         argv = [sys.executable, str(pathlib.Path(__file__).resolve()), '--report', str(report)]
         argv.extend(['--expected-source-id', manifest['snapshot_id']])
+        if platforms != release_current.PLATFORMS:
+            argv.extend(['--platforms', *platforms])
         if snapshot is not None:
             argv.extend(['--snapshot', str(snapshot)])
         if verify_only:
@@ -292,6 +303,8 @@ def main():
     parser.add_argument('--status', action='store_true')
     parser.add_argument('--start', action='store_true', help='Submit one detached, durable build; never replay an existing report/launch')
     parser.add_argument('--verify-only', action='store_true')
+    parser.add_argument('--platforms', nargs='+', choices=release_current.PLATFORMS,
+                        help='Explicit package platforms; omitted platforms remain pending, never accepted')
     parser.add_argument('--expected-source-id', help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.status:
@@ -300,12 +313,12 @@ def main():
     if os.name != 'posix':
         parser.error('a POSIX build host is required')
     if args.start:
-        start_pipeline(args.snapshot, args.report, args.verify_only)
+        start_pipeline(args.snapshot, args.report, args.verify_only, args.platforms)
         return
     def interrupt(_signum, _frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupt)
-    result = run_pipeline(args.snapshot, args.report, ROOT/'target/release-slot', args.verify_only, args.expected_source_id)
+    result = run_pipeline(args.snapshot, args.report, ROOT/'target/release-slot', args.verify_only, args.expected_source_id, args.platforms)
     if result['state'] != 'passed':
         raise SystemExit(1)
 

@@ -40,6 +40,8 @@ class CurrentTests(unittest.TestCase):
         (self.root/'crates/remote-hosts-code').mkdir(parents=True)
         (self.root/'crates/remote-hosts-code/Cargo.toml').write_text('[package]\nversion="1.2.3"\n')
         (self.root/'Cargo.toml').write_text('[workspace]\n')
+        (self.root/'crates/remote-hosts-cli').mkdir()
+        (self.root/'crates/remote-hosts-cli/Cargo.toml').write_text('[package]\nversion="0.1.0"\n')
         shutil.copyfile(SCRIPTS/'check-code-source.py', self.root/'scripts/check-code-source.py')
         self.target = self.root/'shared-target'
         self.target.mkdir()
@@ -161,6 +163,8 @@ class CurrentTests(unittest.TestCase):
         def stage(name, argv, checkout, directory, report, state, env, **kwargs):
             self.assertEqual(checkout, self.root)
             self.assertNotIn('CARGO_TARGET_DIR', env)
+            self.assertGreaterEqual(int(env['CARGO_BUILD_JOBS']), 1)
+            self.assertLessEqual(int(env['CARGO_BUILD_JOBS']), 4)
             self.assertEqual(kwargs['manifest'], self.manifest)
             if failed:
                 state['stages'][name] = {'cleanup': {'state': 'unconfirmed' if unsettled else 'complete'}}
@@ -220,7 +224,9 @@ class CurrentTests(unittest.TestCase):
             'launch-code-upgrade-windows.ps1', 'fleet-upgrade.py', 'gateway_self_upgrade_runner.py']
         for name in helpers: (self.root/'scripts'/name).write_text('# fixture helper\n')
         binaries = ['release/remote-hosts-code', 'x86_64-unknown-linux-musl/release/remote-hosts-code',
-                    'x86_64-pc-windows-msvc/release/remote-hosts-code.exe']
+                    'x86_64-pc-windows-msvc/release/remote-hosts-code.exe',
+                    'release/remote-hosts', 'x86_64-unknown-linux-musl/release/remote-hosts',
+                    'x86_64-pc-windows-msvc/release/remote-hosts.exe']
         for name in binaries:
             path = self.target/name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'MZ fixture')
         verifier = source_snapshot.verifier(self.root)
@@ -233,7 +239,7 @@ class CurrentTests(unittest.TestCase):
         current.mkdir(); (current/'old').write_bytes(b'old current'); current_bundle.write_bytes(b'old bundle')
         return proof_path, current, current_bundle
 
-    def invoke_package(self, proof, mutate=False):
+    def invoke_package(self, proof, mutate=False, platforms=None):
         original_loader = package.importlib.util.module_from_spec
         def loader(spec):
             module = original_loader(spec)
@@ -250,7 +256,10 @@ class CurrentTests(unittest.TestCase):
             return value
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(package, 'ROOT', self.root))
-            stack.enter_context(mock.patch.object(sys, 'argv', ['package', '--version', '1.2.3', '--verification', str(proof), '--producer-pid', str(os.getpid())]))
+            argv = ['package', '--version', '1.2.3', '--verification', str(proof), '--producer-pid', str(os.getpid())]
+            if platforms is not None:
+                argv.extend(['--platforms', *platforms])
+            stack.enter_context(mock.patch.object(sys, 'argv', argv))
             stack.enter_context(mock.patch.object(lifecycle, 'validate_producer', return_value={}))
             stack.enter_context(mock.patch.object(lifecycle, 'established_target', return_value=self.target))
             stack.enter_context(mock.patch.object(package.subprocess, 'check_output', return_value='remote-hosts-code 1.2.3'))
@@ -268,6 +277,9 @@ class CurrentTests(unittest.TestCase):
         self.assertIn('remote-hosts-code-macos-arm64', names)
         self.assertIn('remote-hosts-code-linux-amd64', names)
         self.assertIn('remote-hosts-code-windows-amd64.exe', names)
+        self.assertIn('remote-hosts-macos-arm64', names)
+        self.assertIn('remote-hosts-linux-amd64', names)
+        self.assertIn('remote-hosts-windows-amd64.exe', names)
         self.assertIn('source-verification.json', names)
         self.assertIn('manifest.json', names)
         self.assertEqual((current/'old').read_bytes(), b'old current')
@@ -275,6 +287,73 @@ class CurrentTests(unittest.TestCase):
         manifest = json.loads((stage/'manifest.json').read_text())
         self.assertEqual(manifest['build_execution_root'], str(self.root))
         self.assertFalse(manifest['deployed'])
+
+    def test_selected_platforms_preserve_missing_windows_as_pending(self):
+        proof, current, current_bundle = self.package_fixture()
+        (self.target/'x86_64-pc-windows-msvc/release/remote-hosts-code.exe').unlink()
+        self.invoke_package(proof, platforms=['linux', 'macos'])
+        stage, bundle = lifecycle.stages(self.root)
+        manifest = json.loads((stage/'manifest.json').read_text())
+        self.assertEqual(manifest['included_platforms'], ['macos', 'linux'])
+        self.assertEqual(manifest['pending_platforms'], ['windows'])
+        with tarfile.open(bundle) as archive:
+            names = archive.getnames()
+        self.assertNotIn('remote-hosts-code-windows-amd64.exe', names)
+        self.assertIn('remote-hosts-code-linux-amd64', names)
+        self.assertIn('remote-hosts-linux-amd64', names)
+        self.assertNotIn('remote-hosts-windows-amd64.exe', names)
+        self.assertEqual(manifest['components']['native_cli']['source_version'], '0.1.0')
+        self.assertEqual((current/'old').read_bytes(), b'old current')
+        self.assertEqual(current_bundle.read_bytes(), b'old bundle')
+
+    def test_windows_can_be_packaged_independently(self):
+        proof, current, _ = self.package_fixture()
+        (self.target/'x86_64-unknown-linux-musl/release/remote-hosts-code').unlink()
+        self.invoke_package(proof, platforms=['windows'])
+        stage, bundle = lifecycle.stages(self.root)
+        manifest = json.loads((stage/'manifest.json').read_text())
+        self.assertEqual(manifest['included_platforms'], ['windows'])
+        self.assertEqual(manifest['pending_platforms'], ['macos', 'linux'])
+        with tarfile.open(bundle) as archive:
+            names = archive.getnames()
+        self.assertIn('remote-hosts-code-windows-amd64.exe', names)
+        self.assertNotIn('remote-hosts-code-macos-arm64', names)
+        self.assertNotIn('remote-hosts-code-linux-amd64', names)
+        self.assertIn('remote-hosts-windows-amd64.exe', names)
+        self.assertNotIn('remote-hosts-macos-arm64', names)
+        self.assertNotIn('remote-hosts-linux-amd64', names)
+        self.assertEqual((current/'old').read_bytes(), b'old current')
+
+    def test_default_package_still_requires_windows(self):
+        proof, current, _ = self.package_fixture()
+        (self.target/'x86_64-pc-windows-msvc/release/remote-hosts-code.exe').unlink()
+        with self.assertRaises(SystemExit):
+            self.invoke_package(proof)
+        self.assertEqual((current/'old').read_bytes(), b'old current')
+        self.assertFalse(lifecycle.stages(self.root)[1].exists())
+
+    def test_platform_selection_rejects_empty_duplicate_and_unknown(self):
+        for values in ([], ['macos', 'macos'], ['macos', 'other']):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                lifecycle.selected_platforms(values)
+        self.assertEqual(lifecycle.selected_platforms(), lifecycle.PLATFORMS)
+        self.assertEqual(lifecycle.selected_platforms(['linux', 'macos']), ('macos', 'linux'))
+        self.assertEqual(lifecycle.selected_platforms(['windows']), ('windows',))
+        self.assertEqual(lifecycle.selected_platforms(['linux']), ('linux',))
+
+    def test_detached_platform_selection_is_bound_to_original_report(self):
+        report = self.root/'selected.json'
+        with mock.patch.object(runner, 'ROOT', self.root), mock.patch.object(os, 'posix_spawn', return_value=12345) as spawn, contextlib.redirect_stdout(io.StringIO()):
+            runner.start_pipeline(None, report, platforms=['macos', 'linux'])
+        argv = spawn.call_args.args[1]
+        self.assertEqual(argv[argv.index('--platforms')+1:], ['macos', 'linux'])
+        report.write_text(json.dumps({'snapshot_id': self.manifest['snapshot_id'],
+                                     'verify_only': False, 'platforms': ['macos', 'linux'],
+                                     'state': 'failed'}))
+        with mock.patch.object(runner, 'ROOT', self.root), mock.patch.object(lifecycle, 'admit') as admit:
+            with self.assertRaisesRegex(ValueError, 'different inputs or mode'):
+                runner.run_pipeline(None, report, self.root/'target/release-slot')
+        admit.assert_not_called()
 
     def test_package_rejects_binary_change_during_copy(self):
         proof, current, _ = self.package_fixture()

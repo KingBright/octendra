@@ -10,6 +10,15 @@ import sys
 import source_snapshot
 
 COMPONENT = 'remote-hosts-three-platform'
+PLATFORMS = ('macos', 'linux', 'windows')
+
+
+def selected_platforms(values=None):
+    selected = PLATFORMS if values is None else tuple(values)
+    if (not selected or len(set(selected)) != len(selected)
+            or not set(selected).issubset(PLATFORMS)):
+        raise ValueError('invalid release platform selection')
+    return tuple(name for name in PLATFORMS if name in selected)
 
 
 def primary(root):
