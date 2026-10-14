@@ -238,12 +238,7 @@ fn build_catalog() -> Vec<Tool> {
         "Run one typed desktop operation using an explicitly authorized persistent owner/device/desktop capability. Each Open binds the current task and a short lease. Terminal/code permission does not grant desktop authority. Defaults unavailable.",
         json!({"device_id":string(),"task_id":string(),"capability_version":integer(1,9223372036854775807u64),
             "idempotency_key":string(),"request":{"type":"object","x-desktop-request":true,"description":"Strict tagged desktop protocol. Task/owner/device/desktop/epoch are checked again at admission.","oneOf":[{"type":"object","properties":{"operation":{"const":"open"},"identity":{"type":"object","properties":{"owner":{"type":"string"},"task_id":{"type":"string","format":"uuid"},"device_id":{"type":"string","format":"uuid"},"desktop_id":{"type":"string"}},"required":["owner","task_id","device_id","desktop_id"],"additionalProperties":false},"lease_ms":{"type":"integer","minimum":1,"maximum":30000}},"required":["operation","identity","lease_ms"],"additionalProperties":false},{"type":"object","properties":{"operation":{"enum":["observe","close"]},"binding":{"type":"object"}},"required":["operation","binding"],"additionalProperties":false},{"type":"object","properties":{"operation":{"const":"act"},"frame":{"type":"object"},"sequence":{"type":"integer","minimum":1},"actions":{"type":"array","minItems":1,"maxItems":16,"items":{"type":"object"}}},"required":["operation","frame","sequence","actions"],"additionalProperties":false},{"type":"object","properties":{"operation":{"const":"capabilities"}},"required":["operation"],"additionalProperties":false}]}}),
-        vec![
-            "device_id",
-            "task_id",
-            "capability_version",
-            "request",
-        ],
+        vec!["device_id", "task_id", "capability_version", "request"],
     );
     add(
         "desktop_frame",
