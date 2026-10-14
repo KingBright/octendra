@@ -121,6 +121,19 @@ fn lock(dir: &std::path::Path) -> Result<std::fs::File> {
 }
 #[tokio::main]
 async fn main() -> Result<()> {
+    #[cfg(windows)]
+    {
+        let args: Vec<_> = std::env::args().collect();
+        if args.get(1).is_some_and(|v| v == "desktop-window-target") {
+            ensure!(args.len() == 4, "window target requires PID and window ID");
+            let target = remote_hosts_code::computer_use::windows_target::window_target(
+                args[2].parse()?,
+                args[3].parse()?,
+            )?;
+            println!("{}", serde_json::to_string(&target)?);
+            return Ok(());
+        }
+    }
     #[cfg(target_os = "macos")]
     {
         let args: Vec<_> = std::env::args_os().collect();

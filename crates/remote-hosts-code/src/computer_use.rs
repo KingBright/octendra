@@ -6,6 +6,8 @@ pub(crate) mod lifecycle;
 pub mod macos_worker;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 pub(crate) mod transport;
+#[cfg(windows)]
+pub mod windows_target;
 #[cfg(test)]
 use uuid::Uuid;
 
