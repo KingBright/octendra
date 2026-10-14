@@ -3199,12 +3199,14 @@ version = "0.1.0"
 name = "remote-hosts-mcp"
 version = "0.1.0"
 dependencies = [
+ "remote-hosts-code",
  "remote-hosts-core",
  "remote-hosts-db",
  "remote-hosts-domain",
  "remote-hosts-sync",
  "remote-hosts-token-output",
  "remote-hosts-vault",
+ "reqwest",
  "rmcp",
  "schemars",
  "secrecy",
