@@ -1383,10 +1383,17 @@ pub async fn run_self_upgrade_watchdog(spec_path: &Path) -> Result<Value> {
                 .as_deref()
                 == Some("upgraded");
         if !preserve_existing_upgraded {
-            let _ = crate::write_private(
+            crate::write_private(
                 &spec.receipt_path,
                 serde_json::to_string_pretty(&busy_receipt)?.as_bytes(),
-            );
+            )
+            .with_context(|| {
+                format!(
+                    "failed to persist lock-contention upgrade receipt to {} (watchdog spec preserved at {})",
+                    spec.receipt_path.display(),
+                    spec_path.display()
+                )
+            })?;
         }
         return Ok(busy_receipt);
     }
@@ -1407,9 +1414,9 @@ pub async fn run_self_upgrade_watchdog(spec_path: &Path) -> Result<Value> {
             "staged candidate SHA-256 mismatch before cutover"
         );
 
-        // 2. Replace binary and restart service (in production mode)
+        // 2. Replace binary and restart service (in production mode).
+        // Keep `spec.staged_path` on disk until the final receipt is durably persisted.
         install_binary_atomic(&spec.staged_path, &spec.current_exe).await?;
-        let _ = tokio::fs::remove_file(&spec.staged_path).await;
         service_changed = true;
         let installed_bytes = tokio::fs::read(&spec.current_exe).await?;
         ensure!(
@@ -1485,11 +1492,16 @@ pub async fn run_self_upgrade_watchdog(spec_path: &Path) -> Result<Value> {
         }
     };
 
-    let _ = crate::write_private(
-        &spec.receipt_path,
-        serde_json::to_string_pretty(&final_receipt)?.as_bytes(),
-    );
-    let _ = tokio::fs::remove_file(spec_path).await;
+    let receipt_bytes = serde_json::to_vec_pretty(&final_receipt)?;
+    let persist_result =
+        crate::write_private(&spec.receipt_path, &receipt_bytes).with_context(|| {
+            format!(
+                "failed to persist final auto-upgrade receipt to {} (watchdog spec preserved at {})",
+                spec.receipt_path.display(),
+                spec_path.display()
+            )
+        });
+
     let _ = client
         .post(format!("{}/device/maintenance", spec.gateway_url))
         .bearer_auth(&spec.device_token)
@@ -1509,6 +1521,15 @@ pub async fn run_self_upgrade_watchdog(spec_path: &Path) -> Result<Value> {
         }))
         .send()
         .await;
+
+    persist_result?;
+    let _ = tokio::fs::remove_file(&spec.staged_path).await;
+    tokio::fs::remove_file(spec_path).await.with_context(|| {
+        format!(
+            "failed to remove completed watchdog spec {}",
+            spec_path.display()
+        )
+    })?;
 
     drop(lock_file);
     let _ = prune_agent_releases_and_logs(&spec.state_dir);
@@ -2023,7 +2044,121 @@ mod tests {
         assert_eq!(recovered["service_changed"], true);
         assert_eq!(recovered["gateway_verified"], true);
         assert!(!spec_path.exists());
+        assert!(!staged_path.exists());
         assert_eq!(fs::read(&current_exe).unwrap(), new_bytes);
+        let on_disk_upgraded: Value =
+            serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+        assert_eq!(on_disk_upgraded["state"], "upgraded");
+    }
+
+    #[tokio::test]
+    async fn watchdog_receipt_write_failure_preserves_spec_and_staged_binary_until_persisted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("state");
+        let version_dir = state_dir.join("releases/0.11.1");
+        fs::create_dir_all(&version_dir).unwrap();
+
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(300));
+        let seen_route = seen.clone();
+        let app = Router::new()
+            .route(
+                "/device/readiness",
+                get(move || {
+                    let seen_route = seen_route.clone();
+                    async move {
+                        let ts = seen_route.fetch_add(1, Ordering::SeqCst) + 1;
+                        Json(json!({
+                            "readiness_protocol": 1,
+                            "ready": true,
+                            "agent_version": "0.11.1",
+                            "session": "r".repeat(64),
+                            "last_seen": ts
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/device/maintenance",
+                post(|| async { Json(json!({"ok": true})) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let current_exe = tmp.path().join("remote-hosts-code");
+        let rollback_path = state_dir.join("releases/rollback/remote-hosts-code");
+        fs::create_dir_all(rollback_path.parent().unwrap()).unwrap();
+        let staged_path = version_dir.join("remote-hosts-code-macos-arm64.staged");
+        let receipt_path = version_dir.join("auto-upgrade-result.json");
+        let old_bytes = b"old-working-binary-0.11.0";
+        let new_bytes = b"verified-candidate-binary-0.11.1";
+        fs::write(&current_exe, old_bytes).unwrap();
+        fs::write(&rollback_path, old_bytes).unwrap();
+        fs::write(&staged_path, new_bytes).unwrap();
+
+        // Obstruct receipt persistence by placing a directory at `receipt_path`.
+        fs::create_dir_all(&receipt_path).unwrap();
+
+        let spec = WatchdogSpec {
+            target_version: "0.11.1".into(),
+            previous_version: "0.11.0".into(),
+            candidate_sha256: hash(new_bytes),
+            expected_installed_sha256: hash(new_bytes),
+            previous_sha256: hash(old_bytes),
+            staged_path: staged_path.clone(),
+            current_exe: current_exe.clone(),
+            rollback_path: rollback_path.clone(),
+            receipt_path: receipt_path.clone(),
+            state_dir: state_dir.clone(),
+            config_path: None,
+            gateway_url: format!("http://{addr}"),
+            device_id: uuid::Uuid::new_v4().to_string(),
+            device_token: "t".repeat(64),
+            lease_id: "l".repeat(64),
+            previous_pid: 0,
+            previous_session: Some("p".repeat(64)),
+            baseline_last_seen: 100,
+            failure_count: 0,
+            readiness_timeout_secs: 5,
+            required_samples: 2,
+            signing_metadata: None,
+        };
+        let spec_path = version_dir.join("watchdog-spec.json");
+        fs::write(&spec_path, serde_json::to_vec(&spec).unwrap()).unwrap();
+
+        let err = run_self_upgrade_watchdog(&spec_path)
+            .await
+            .expect_err("receipt persistence failure must return an explicit error");
+        let err_msg = format!("{err:#}");
+        assert!(
+            err_msg.contains("failed to persist final auto-upgrade receipt"),
+            "unexpected error: {err_msg}"
+        );
+        assert!(
+            spec_path.is_file(),
+            "watchdog-spec.json must be preserved when receipt persistence fails"
+        );
+        assert!(
+            staged_path.is_file(),
+            "staged candidate binary must be preserved when receipt persistence fails"
+        );
+        assert!(
+            rollback_path.is_file(),
+            "rollback backup binary must be preserved when receipt persistence fails"
+        );
+
+        // Clear the receipt persistence failure and retry recovery with the preserved spec.
+        fs::remove_dir_all(&receipt_path).unwrap();
+        let recovered = run_self_upgrade_watchdog(&spec_path).await.unwrap();
+        assert_eq!(recovered["state"], "upgraded");
+        assert!(
+            receipt_path.is_file(),
+            "receipt must be persisted on disk before spec is removed"
+        );
+        assert!(!spec_path.exists());
+        assert!(!staged_path.exists());
         let on_disk_upgraded: Value =
             serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
         assert_eq!(on_disk_upgraded["state"], "upgraded");
