@@ -25,6 +25,11 @@ enum Command {
         #[command(flatten)]
         args: remote_hosts_code::maintenance_tasks::ChildArgs,
     },
+    #[command(hide = true)]
+    SelfUpgradeWatchdog {
+        #[arg(long)]
+        spec: PathBuf,
+    },
     /// Serve OAuth, MCP and device relay behind a TLS reverse proxy.
     Gateway {
         #[arg(long)]
@@ -195,7 +200,13 @@ async fn main() -> Result<()> {
             console = (*foreground || !cfg!(windows)),
             "agent starting; bounded local logs enabled"
         );
-        let result = async { remote_hosts_code::agent::Agent::new(c).await?.run().await }.await;
+        let result = async {
+            remote_hosts_code::agent::Agent::new_with_config_path(c, config.clone())
+                .await?
+                .run()
+                .await
+        }
+        .await;
         if result.is_err() {
             tracing::error!("agent stopped with error; inspect preceding local diagnostics");
         }
@@ -262,6 +273,13 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&value)?);
             if failed {
                 std::process::exit(2);
+            }
+        }
+        Command::SelfUpgradeWatchdog { spec } => {
+            let receipt = remote_hosts_code::auto_upgrade::run_self_upgrade_watchdog(&spec).await?;
+            println!("{}", serde_json::to_string(&receipt)?);
+            if receipt.get("state").and_then(serde_json::Value::as_str) != Some("upgraded") {
+                std::process::exit(1);
             }
         }
         Command::Gateway { config } => {

@@ -23,12 +23,13 @@ mod liveness;
 #[derive(Clone)]
 pub struct Agent {
     pub config: Arc<AgentConfig>,
+    pub config_path: Option<PathBuf>,
     pub store: Store,
-    terminals: Terminals,
+    pub(crate) terminals: Terminals,
     #[cfg(any(target_os = "linux", target_os = "macos", test))]
     pub(crate) desktop_workers: crate::computer_use::transport::NativeWorkers,
     scheduler: Arc<Scheduler>,
-    active: Arc<ActiveJobs>,
+    pub(crate) active: Arc<ActiveJobs>,
     progress: Arc<crate::progress::Registry>,
     readiness: Arc<crate::readiness::Readiness>,
     liveness: Arc<liveness::Liveness>,
@@ -141,6 +142,7 @@ impl Agent {
             #[cfg(any(target_os = "linux", target_os = "macos", test))]
             desktop_workers,
             config: Arc::new(config),
+            config_path: None,
             store,
             terminals,
             scheduler: Arc::default(),
@@ -152,6 +154,11 @@ impl Agent {
             history_access: Arc::default(),
             legacy_feature_advertisement: Arc::default(),
         })
+    }
+    pub async fn new_with_config_path(config: AgentConfig, config_path: PathBuf) -> Result<Self> {
+        let mut agent = Self::new(config).await?;
+        agent.config_path = Some(config_path);
+        Ok(agent)
     }
     #[cfg(any(target_os = "linux", target_os = "macos", test))]
     pub async fn read_desktop_frame(&self, job: &Job) -> Result<Vec<u8>> {
@@ -806,6 +813,10 @@ impl Agent {
             while let Some(result) = workers.try_join_next() {
                 Self::worker_result(result);
             }
+            if lane != Lane::Control && crate::auto_upgrade::is_upgrade_draining() {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
+            }
             if workers.len() >= lane.limit() {
                 if let Some(result) = workers.join_next().await {
                     Self::worker_result(result);
@@ -998,9 +1009,8 @@ impl Agent {
                 && resp.status().is_success()
             {
                 crate::auto_upgrade::check_and_spawn_agent_upgrade(
-                    self.config.clone(),
-                    self.active.clone(),
-                    client.clone(),
+                    self,
+                    client,
                     resp.headers(),
                 );
                 acknowledged_terminal_fingerprint = fingerprint;
@@ -1140,9 +1150,8 @@ impl Agent {
             .into());
         }
         crate::auto_upgrade::check_and_spawn_agent_upgrade(
-            self.config.clone(),
-            self.active.clone(),
-            client.clone(),
+            self,
+            client,
             response.headers(),
         );
         let mut bytes = Vec::new();

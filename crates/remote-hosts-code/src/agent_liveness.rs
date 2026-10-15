@@ -145,6 +145,7 @@ impl Agent {
             failure.stage = "keepalive_http";
             return Err(failure.into());
         }
+        crate::auto_upgrade::check_and_spawn_agent_upgrade(self, client, response.headers());
         self.liveness.observed(contact_started);
         Ok(())
     }
