@@ -1349,17 +1349,47 @@ pub async fn run_self_upgrade_watchdog(spec_path: &Path) -> Result<Value> {
         .await
         .context("failed to read watchdog-spec.json")?;
     let spec: WatchdogSpec = serde_json::from_slice(&raw)?;
-    let _ = tokio::fs::remove_file(spec_path).await;
 
-    // Serialize upgrade operations via `<state_dir>/upgrade.lock`
+    // Acquire `<state_dir>/upgrade.lock` BEFORE deleting `spec_path`.
+    // When another process holds the lock, preserve `spec_path` and staged candidate files
+    // and write an explicit contention receipt so recovery can proceed once unlocked.
     fs::create_dir_all(&spec.state_dir)?;
     let lock_file = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(spec.state_dir.join("upgrade.lock"))?;
-    fs2::FileExt::try_lock_exclusive(&lock_file)
-        .context("another upgrade watchdog is already running")?;
+    if let Err(err) = fs2::FileExt::try_lock_exclusive(&lock_file) {
+        let busy_receipt = json!({
+            "version": spec.target_version,
+            "previous_version": spec.previous_version,
+            "candidate_sha256": spec.candidate_sha256,
+            "installed_sha256": spec.expected_installed_sha256,
+            "state": "updater_busy",
+            "phase": "upgrade_lock_contention",
+            "error": format!("another upgrade watchdog holds upgrade.lock: {err}"),
+            "spec_preserved": true,
+            "recovery_pending": true,
+            "failure_count": spec.failure_count,
+            "attempted_at": now(),
+            "next_retry_after": now(),
+            "service_changed": false
+        });
+        let preserve_existing_upgraded = spec.receipt_path.is_file()
+            && fs::read(&spec.receipt_path)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                .and_then(|v| v.get("state").and_then(Value::as_str).map(str::to_owned))
+                .as_deref()
+                == Some("upgraded");
+        if !preserve_existing_upgraded {
+            let _ = crate::write_private(
+                &spec.receipt_path,
+                serde_json::to_string_pretty(&busy_receipt)?.as_bytes(),
+            );
+        }
+        return Ok(busy_receipt);
+    }
 
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -1459,6 +1489,7 @@ pub async fn run_self_upgrade_watchdog(spec_path: &Path) -> Result<Value> {
         &spec.receipt_path,
         serde_json::to_string_pretty(&final_receipt)?.as_bytes(),
     );
+    let _ = tokio::fs::remove_file(spec_path).await;
     let _ = client
         .post(format!("{}/device/maintenance", spec.gateway_url))
         .bearer_auth(&spec.device_token)
@@ -1872,5 +1903,129 @@ mod tests {
         assert_eq!(result["failure_count"], 1);
         // Binary on disk must be restored to old_bytes!
         assert_eq!(fs::read(&current_exe).unwrap(), old_bytes);
+    }
+
+    #[tokio::test]
+    async fn watchdog_lock_contention_preserves_spec_writes_receipt_and_recovers_after_unlock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("state");
+        let version_dir = state_dir.join("releases/0.11.1");
+        fs::create_dir_all(&version_dir).unwrap();
+
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(200));
+        let seen_route = seen.clone();
+        let app = Router::new()
+            .route(
+                "/device/readiness",
+                get(move || {
+                    let seen_route = seen_route.clone();
+                    async move {
+                        let ts = seen_route.fetch_add(1, Ordering::SeqCst) + 1;
+                        Json(json!({
+                            "readiness_protocol": 1,
+                            "ready": true,
+                            "agent_version": "0.11.1",
+                            "session": "n".repeat(64),
+                            "last_seen": ts
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/device/maintenance",
+                post(|| async { Json(json!({"ok": true})) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let current_exe = tmp.path().join("remote-hosts-code");
+        let rollback_path = state_dir.join("releases/rollback/remote-hosts-code");
+        fs::create_dir_all(rollback_path.parent().unwrap()).unwrap();
+        let staged_path = version_dir.join("remote-hosts-code-macos-arm64.staged");
+        let receipt_path = version_dir.join("auto-upgrade-result.json");
+        let old_bytes = b"old-working-binary-0.11.0";
+        let new_bytes = b"verified-candidate-binary-0.11.1";
+        fs::write(&current_exe, old_bytes).unwrap();
+        fs::write(&rollback_path, old_bytes).unwrap();
+        fs::write(&staged_path, new_bytes).unwrap();
+
+        let spec = WatchdogSpec {
+            target_version: "0.11.1".into(),
+            previous_version: "0.11.0".into(),
+            candidate_sha256: hash(new_bytes),
+            expected_installed_sha256: hash(new_bytes),
+            previous_sha256: hash(old_bytes),
+            staged_path: staged_path.clone(),
+            current_exe: current_exe.clone(),
+            rollback_path,
+            receipt_path: receipt_path.clone(),
+            state_dir: state_dir.clone(),
+            config_path: None,
+            gateway_url: format!("http://{addr}"),
+            device_id: uuid::Uuid::new_v4().to_string(),
+            device_token: "t".repeat(64),
+            lease_id: "l".repeat(64),
+            previous_pid: 0,
+            previous_session: Some("p".repeat(64)),
+            baseline_last_seen: 100,
+            failure_count: 0,
+            readiness_timeout_secs: 5,
+            required_samples: 2,
+            signing_metadata: None,
+        };
+        let spec_path = version_dir.join("watchdog-spec.json");
+        fs::write(&spec_path, serde_json::to_vec(&spec).unwrap()).unwrap();
+
+        // Simulate another process holding `<state_dir>/upgrade.lock`.
+        let external_lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(state_dir.join("upgrade.lock"))
+            .unwrap();
+        fs2::FileExt::try_lock_exclusive(&external_lock).unwrap();
+
+        let busy = run_self_upgrade_watchdog(&spec_path).await.unwrap();
+        assert_eq!(busy["state"], "updater_busy");
+        assert_eq!(busy["phase"], "upgrade_lock_contention");
+        assert_eq!(busy["spec_preserved"], true);
+        assert_eq!(busy["recovery_pending"], true);
+        assert_eq!(busy["service_changed"], false);
+        assert!(
+            spec_path.is_file(),
+            "watchdog-spec.json must be preserved on lock contention"
+        );
+        assert!(
+            staged_path.is_file(),
+            "staged candidate must be preserved on lock contention"
+        );
+        assert!(
+            receipt_path.is_file(),
+            "explicit contention receipt must be written"
+        );
+        let on_disk_busy: Value =
+            serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+        assert_eq!(on_disk_busy["state"], "updater_busy");
+        assert_eq!(fs::read(&current_exe).unwrap(), old_bytes);
+
+        // Release lock contention and verify pruning still protects the pending spec before recovery.
+        drop(external_lock);
+        let _ = prune_agent_releases_and_logs(&state_dir);
+        assert!(spec_path.is_file());
+        assert!(staged_path.is_file());
+
+        // Recovery execution using the preserved spec must now complete the upgrade cleanly.
+        let recovered = run_self_upgrade_watchdog(&spec_path).await.unwrap();
+        assert_eq!(recovered["state"], "upgraded");
+        assert_eq!(recovered["service_changed"], true);
+        assert_eq!(recovered["gateway_verified"], true);
+        assert!(!spec_path.exists());
+        assert_eq!(fs::read(&current_exe).unwrap(), new_bytes);
+        let on_disk_upgraded: Value =
+            serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+        assert_eq!(on_disk_upgraded["state"], "upgraded");
     }
 }
