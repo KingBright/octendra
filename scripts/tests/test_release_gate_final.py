@@ -30,7 +30,7 @@ class FinalGateTests(unittest.TestCase):
             proof = {'state':'passed', 'functional_tests': {'passed':1, 'failed':0}}
 
             @contextlib.contextmanager
-            def lease(*_):
+            def lease(*args, **kwargs):
                 yield checkout
 
             def finish_stage(name, args, execution, directory, report, state, env, **kwargs):
@@ -39,6 +39,10 @@ class FinalGateTests(unittest.TestCase):
                 (directory/'verification.json').write_text(json.dumps(proof))
 
             with mock.patch.object(runner.source_snapshot, 'check', return_value=manifest), \
+                 mock.patch.object(runner.release_current, 'snapshot_evidence', return_value=manifest), \
+                 mock.patch.object(runner.release_current, 'check_inputs', return_value=manifest), \
+                 mock.patch.object(runner.release_current, 'preflight', return_value={'status':'ok'}), \
+                 mock.patch.object(runner.release_current, 'established_target', return_value=root/'target'), \
                  mock.patch.object(runner.source_snapshot, 'verifier', return_value=types.SimpleNamespace(receipt_current=lambda *_: True)), \
                  mock.patch.object(runner.build_slot, 'lease', side_effect=lease), \
                  mock.patch.object(runner.build_slot, 'synchronize', return_value={}), \

@@ -33,7 +33,7 @@ def check_source():
  current=provider(source)
  assert source_snapshot.identity(current,source_snapshot.executable_files(source,current))==m['snapshot_id'], 'main inputs changed; retain the original attempt'
 report=(args.report or source/'.integration-artifacts'/('scoped-release-'+args.version+'-'+args.platform+'.json')).absolute()
-base=report.parent;target=Path('/Users/jinliang/rust-target');assert target.is_dir() and shutil.disk_usage(target).free>8*2**30
+base=report.parent;target=Path.home()/'rust-target';assert target.is_dir() and shutil.disk_usage(target).free>8*2**30
 out=build_slot.no_links(source/'dist/current'/args.platform)
 if (out/'manifest.json').exists():
  previous=json.loads((out/'manifest.json').read_text())
@@ -66,8 +66,8 @@ threading.Thread(target=guard,daemon=True).start()
 try:
  with build_slot.lease(target/'.remote-hosts-code-release-slot',report,m['snapshot_id']):
   checkout=source
-  env=dict(os.environ,PATH='/Users/jinliang/.cargo/bin:'+os.environ.get('PATH',''),CARGO_TARGET_DIR=str(target),RUSTUP_TOOLCHAIN='1.94.1',CARGO_BUILD_JOBS='2',CARGO_INCREMENTAL='0',CARGO_TERM_COLOR='never',RUSTC='/Users/jinliang/.rustup/toolchains/1.94.1-aarch64-apple-darwin/bin/rustc')
-  prefix=['/Users/jinliang/.cargo/bin/rustup','run','1.94.1','cargo']
+  env=dict(os.environ,PATH=str(Path.home()/'.cargo/bin')+':'+os.environ.get('PATH',''),CARGO_TARGET_DIR=str(target),RUSTUP_TOOLCHAIN='1.94.1',CARGO_BUILD_JOBS='2',CARGO_INCREMENTAL='0',CARGO_TERM_COLOR='never',RUSTC=str(Path.home()/'.rustup/toolchains/1.94.1-aarch64-apple-darwin/bin/rustc'))
+  prefix=[str(Path.home()/'.cargo/bin/rustup'),'run','1.94.1','cargo']
   checks=([('clippy',None,0),('macos_worker','macos_worker',2),('desktop_protocol_and_transport','computer_use',29),('delivery','delivery',19),('job_receipts','job_receipts',8)] if args.platform=='macos' else [('clippy',None,0),('desktop_lifecycle_and_transport','computer_use',39),('payload_regressions','payload',23),('submission_fence','submission_fence',2),('job_receipts','job_receipts',8),('job_dispatch','job_dispatch',9)])
   if args.verification_scope=='capability':checks=[('clippy',None,0),('capability_current_authority','computer_use::transport::tests::capability_reports_',6)]
   if args.verification_scope=='input':checks=[('clippy',None,0),('macos_input_and_protocol_regression','computer_use',57)]
