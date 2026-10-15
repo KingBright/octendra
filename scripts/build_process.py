@@ -188,16 +188,21 @@ def run(argv, root, path, env, idle_timeout=900, on_update=None,
                             if lock_wait else 'observation_unavailable' if diagnostic
                             else 'quiet_not_proven_stalled')
                 publish(activity, size, delta, members, diagnostic, gate)
-                previous_cpu, previous_members = cpus, members
+                # A failed sample is not evidence of an empty process tree.
+                if not diagnostic:
+                    previous_cpu, previous_members = cpus, members
                 previous_log, previous_size = str(observed), size
                 if process.returncode is not None:
                     result.update(state='finished', exit_code=process.returncode,
                                   raw_exit_code=process.returncode)
                     break
                 idle = time.monotonic()-last_progress
-                if diagnostic and observer_error_since is not None and idle >= min(idle_timeout, 60):
+                observer_error_seconds = (time.monotonic()-observer_error_since
+                                          if observer_error_since is not None else 0)
+                if diagnostic and observer_error_seconds >= min(idle_timeout, 60):
                     result.update(state='supervision_failed', failure_type='ProcessObservationUnavailable',
-                                  stop_evidence={'idle_seconds': idle, 'observer_error': diagnostic})
+                                  stop_evidence={'idle_seconds': idle, 'observer_error': diagnostic,
+                                                 'observer_error_seconds': observer_error_seconds})
                     break
                 if not diagnostic and idle >= idle_timeout:
                     result.update(state='stalled', failure_type='ConfirmedBuildInactivity',

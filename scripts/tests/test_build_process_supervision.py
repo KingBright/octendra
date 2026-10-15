@@ -98,6 +98,71 @@ class SupervisionTests(unittest.TestCase):
         self.assertTrue(result['output_complete'])
         self.assertIn('unchanged_log_bytes', result['stop_evidence'])
 
+    def observer_fixture(self, samples):
+        samples = list(samples)
+        now = [0.0]
+        updates = []
+
+        class Child:
+            pid = 999999
+            returncode = None
+
+            def wait(self, timeout):
+                if samples:
+                    raise subprocess.TimeoutExpired('fixture-child', timeout)
+                self.returncode = 0
+                return 0
+
+            def poll(self):
+                return self.returncode
+
+        child = Child()
+
+        def observe():
+            if not samples:
+                return {}
+            now[0], cpu = samples.pop(0)
+            if isinstance(cpu, Exception):
+                raise cpu
+            return {child.pid: {'parent': os.getpid(), 'group': child.pid,
+                                'state': 'S', 'cpu': cpu, 'name': 'compiler'}}
+
+        def stop(process, groups):
+            process.returncode = -signal.SIGTERM
+            return {'state': 'complete', 'remaining_groups': [],
+                    'exit_code': process.returncode}
+
+        with mock.patch.object(build_process.subprocess, 'Popen', return_value=child), \
+             mock.patch.object(build_process, 'process_table', side_effect=observe), \
+             mock.patch.object(build_process, 'stop_owned', side_effect=stop) as cleanup, \
+             mock.patch.object(build_process, 'time', mock.Mock(monotonic=lambda: now[0])):
+            result = build_process.run(['fixture-compiler'], self.root, self.root/'observer.log',
+                                       dict(os.environ), idle_timeout=1800,
+                                       on_update=updates.append, poll_interval=3)
+        return result, updates, cleanup
+
+    def test_transient_observer_timeout_after_quiet_work_keeps_child(self):
+        result, updates, cleanup = self.observer_fixture([
+            (0, 1.0), (120, subprocess.TimeoutExpired('ps', 10)), (121, 2.0)])
+        self.assertEqual(result['state'], 'finished')
+        self.assertEqual(result['raw_exit_code'], 0)
+        cleanup.assert_not_called()
+        self.assertTrue(any(x['heartbeat']['error_type'] == 'TimeoutExpired' for x in updates))
+        self.assertTrue(any(x['activity'] == 'cpu_active' and x['cpu_delta_seconds'] == 1
+                            for x in updates))
+
+    def test_continuous_observer_failure_keeps_its_bounded_cleanup(self):
+        result, _, cleanup = self.observer_fixture([
+            (0, 1.0), (120, subprocess.TimeoutExpired('ps', 10)),
+            (180, subprocess.TimeoutExpired('ps', 10))])
+        self.assertEqual(result['state'], 'supervision_failed')
+        self.assertEqual(result['failure_type'], 'ProcessObservationUnavailable')
+        self.assertEqual(result['stage_elapsed_seconds'], 180)
+        self.assertEqual(result['stop_evidence']['observer_error_seconds'], 60)
+        self.assertEqual(result['raw_exit_code'], -signal.SIGTERM)
+        cleanup.assert_called_once()
+        self.assertEqual(cleanup.call_args.args[1], {result['process_group']})
+
     def test_start_claim_never_spawns_twice(self):
         snapshot = self.root/'snapshot';snapshot.mkdir()
         report = self.root/'report.json'
