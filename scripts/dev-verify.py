@@ -607,6 +607,8 @@ def main():
     parser.add_argument("--serve", action="store_true", help="run host build worker watching .local-deployment/dev-runner")
     parser.add_argument("--status", action="store_true", help="check host build worker status")
     parser.add_argument("--prune", action="store_true", help="prune superseded build artifacts and retired slot targets immediately")
+    parser.add_argument("--release", action="store_true", help="run full release-code.py packaging pipeline and prune build cache")
+    parser.add_argument("--deploy", type=Path, metavar="CONFIG_JSON", help="deploy verified current release to Gateway and observe Agent auto-upgrade convergence")
     parser.add_argument("--binary", type=Path, help="optional compiled remote-hosts-code binary for isolated CLI smoke tests")
     parser.add_argument("--exec", nargs=argparse.REMAINDER, help="execute an allowed build/test command directly or via host worker")
     args = parser.parse_args()
@@ -622,6 +624,35 @@ def main():
         return
     if args.prune:
         print(json.dumps(prune_workspace_Build_bloat(ROOT, established_target), indent=2))
+        return
+    if args.release:
+        report = ROOT / "target" / "dev-verify" / f"release-{int(time.time())}-{os.getpid()}.json"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        res = execute_step([sys.executable, str(ROOT / "scripts/release-code.py"), "--report", str(report)], ROOT, toolchain)
+        print(json.dumps({"release_report": str(report.relative_to(ROOT)), **res}, indent=2))
+        return
+    if args.deploy:
+        cfg = args.deploy.resolve(strict=True)
+        ver = tomllib.loads((ROOT / "crates/remote-hosts-code/Cargo.toml").read_text())["package"]["version"]
+        pkg = ROOT / "dist" / "remote-hosts-code-current"
+        rep_dir = ROOT / "target" / "dev-verify" / f"deploy-{ver}-{int(time.time())}"
+        res = execute_step(
+            [
+                sys.executable,
+                str(ROOT / "scripts/fleet-upgrade.py"),
+                "--version",
+                ver,
+                "--package",
+                str(pkg),
+                "--config",
+                str(cfg),
+                "--report-dir",
+                str(rep_dir),
+            ],
+            ROOT,
+            toolchain,
+        )
+        print(json.dumps({"deploy_report_dir": str(rep_dir.relative_to(ROOT)), **res}, indent=2))
         return
     if args.exec:
         res = execute_step(args.exec, ROOT, toolchain)

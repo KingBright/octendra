@@ -192,11 +192,37 @@ def main():
         ).strip().split('=', 1)[1]
         if int(pid_text) <= 1 or checksum(pathlib.Path('/proc') / pid_text / 'exe') != args.sha256:
             raise RuntimeError('running gateway executable checksum mismatch')
+        current_ptr = backup_root / 'current.json'
+        atomic_json_bytes = (json.dumps({'version': args.version, 'installed_sha256': args.sha256, 'updated_at': int(time.time())}, indent=2) + '\n').encode()
+        with tempfile.NamedTemporaryFile(dir=str(backup_root), delete=False) as ptr_tmp:
+            ptr_tmp_path = pathlib.Path(ptr_tmp.name)
+            ptr_tmp.write(atomic_json_bytes)
+            ptr_tmp.flush()
+            os.fsync(ptr_tmp.fileno())
+            os.replace(str(ptr_tmp_path), str(current_ptr))
+        reclaimed = 0
+        backups = sorted(
+            [p for p in backup_root.iterdir() if p.is_dir() and p.name.startswith('before-') and p != backup],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for old_b in backups:
+            shutil.rmtree(old_b, ignore_errors=True)
+            reclaimed += 1
+        version_dirs = sorted(
+            [p for p in backup_root.iterdir() if p.is_dir() and not p.name.startswith('before-') and p.name != args.version],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for old_v in version_dirs[1:]:
+            shutil.rmtree(old_v, ignore_errors=True)
+            reclaimed += 1
         record.update(
             state='upgraded',
             pid=int(pid_text),
             installed_sha256=checksum(binary),
             health=health,
+            pruned_old_dirs=reclaimed,
         )
     except Exception as error:
         record.update(state='failed', error=str(error))

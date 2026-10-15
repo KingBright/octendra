@@ -499,6 +499,7 @@ async fn agent_loop_with_timing(
     let policy = Policy::default();
     loop {
         let run = async {
+            let _ = crate::auto_upgrade::prune_agent_releases_and_logs(&config.state_dir);
             let store = maintenance_store(&config.state_dir).await?;
             let started = Instant::now();
             let report = sweep(&store,&config,&policy,crate::now(),&access).await?;

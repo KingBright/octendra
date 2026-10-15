@@ -273,11 +273,15 @@ def gateway_upgrade_ssh(config,package,manifest,version,directory):
     with rr.StepJournal(directory/'gateway-steps.json',binding) as journal:
         def stage():
             command(ssh+['umask 077; mkdir -p '+shlex.quote(remote)])
-            for name in ('remote-hosts-code-linux-amd64','upgrade-code-gateway.py','manifest.json'):
+            stage_names = ['remote-hosts-code-linux-amd64','upgrade-code-gateway.py','manifest.json']
+            for extra in ('remote-hosts-code-macos-arm64','remote-hosts-code-windows-amd64.exe'):
+                if (package/extra).is_file() and extra in manifest.get('artifacts', {}):
+                    stage_names.append(extra)
+            for name in stage_names:
                 command(scp+[str(package/name),gateway['ssh_host']+':'+remote+'/'+name],300)
                 got=command(ssh+['sha256sum '+shlex.quote(remote+'/'+name)]).split()[0]
                 if got!=rr.digest(package/name): raise RuntimeError('gateway staged artifact mismatch: '+name)
-            return {'state':'staged'}
+            return {'state':'staged','artifacts':stage_names}
         journal.step('stage',binding,stage)
         def upgrade():
             args=['python3',remote+'/upgrade-code-gateway.py','--candidate',remote+'/remote-hosts-code-linux-amd64',

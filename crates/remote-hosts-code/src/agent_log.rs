@@ -14,16 +14,27 @@ pub struct AgentLog {
 }
 impl AgentLog {
     pub fn open(state_dir: &Path) -> io::Result<Self> {
-        Self::with_limit(&state_dir.join("logs"), 4 * 1024 * 1024, 3)
+        Self::open_named(state_dir, "agent.log")
+    }
+    pub fn open_named(state_dir: &Path, file_name: &str) -> io::Result<Self> {
+        Self::with_limit_named(&state_dir.join("logs"), file_name, 4 * 1024 * 1024, 3)
     }
     fn with_limit(dir: &Path, limit: u64, backups: usize) -> io::Result<Self> {
+        Self::with_limit_named(dir, "agent.log", limit, backups)
+    }
+    fn with_limit_named(
+        dir: &Path,
+        file_name: &str,
+        limit: u64,
+        backups: usize,
+    ) -> io::Result<Self> {
         fs::create_dir_all(dir)?;
         if fs::symlink_metadata(dir)?.file_type().is_symlink() {
             return Err(io::Error::other(
                 "agent log directory must not be a symlink",
             ));
         }
-        let path = dir.join("agent.log");
+        let path = dir.join(file_name);
         let file = Self::append(&path)?;
         let bytes = file.metadata()?.len();
         Ok(Self {

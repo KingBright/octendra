@@ -290,6 +290,7 @@ impl Gateway {
         let admin = Router::new()
             .route("/admin/status", get(admin_status))
             .route("/admin/gateway-upgrade", post(gateway_upgrade))
+            .merge(crate::auto_upgrade::admin_routes(self.clone()))
             .with_state(self.clone())
             .route_layer(middleware::from_fn_with_state(
                 self.auth.clone(),
@@ -324,6 +325,7 @@ impl Gateway {
             .merge(crate::transfer_control::routes(self.clone()))
             .merge(crate::transfer_receiver::routes(self.clone()))
             .merge(crate::maintenance::routes(self.clone()))
+            .merge(crate::auto_upgrade::device_routes(self.clone()))
             .route(
                 "/healthz",
                 get(|| async {
@@ -1437,7 +1439,9 @@ async fn heartbeat(
     match updated {
         Ok(true) => {
             g.observation_changed.notify_waiters();
-            StatusCode::NO_CONTENT.into_response()
+            let mut resp = StatusCode::NO_CONTENT.into_response();
+            crate::auto_upgrade::attach_directive_header(&g, &request.hello, &mut resp);
+            resp
         }
         Ok(false) => StatusCode::CONFLICT.into_response(),
         Err(error) => crate::job_dispatch::storage_error("heartbeat_snapshot", &error),
@@ -1647,7 +1651,11 @@ async fn poll(
                 }
                 .await;
                 return match result {
-                    Ok(value) => Json(value).into_response(),
+                    Ok(value) => {
+                        let mut resp = Json(value).into_response();
+                        crate::auto_upgrade::attach_directive_header(&g, &online.hello, &mut resp);
+                        resp
+                    }
                     Err(error) => crate::job_dispatch::storage_error("poll_payload", &error),
                 };
             }
@@ -1655,13 +1663,19 @@ async fn poll(
             Err(error) => return crate::job_dispatch::storage_error("poll_claim", &error),
         }
         if Instant::now() >= deadline {
-            return Json(json!({"job":null})).into_response();
+            let mut resp = Json(json!({"job":null})).into_response();
+            crate::auto_upgrade::attach_directive_header(&g, &online.hello, &mut resp);
+            return resp;
         }
         tokio::select! {
             _ = notified => {},
             // A completion can release a client-side reservation. Return an
             // empty response so the agent rebuilds filters; never cancel a claim.
-            _ = completed, if filtered => return Json(json!({"job":null})).into_response(),
+            _ = completed, if filtered => {
+                let mut resp = Json(json!({"job":null})).into_response();
+                crate::auto_upgrade::attach_directive_header(&g, &online.hello, &mut resp);
+                return resp;
+            },
             _ = tokio::time::sleep_until(deadline.min(Instant::now() + RECOVERY_INTERVAL)) => {},
         }
     }

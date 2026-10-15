@@ -176,6 +176,7 @@ async fn main() -> Result<()> {
         use tracing_subscriber::fmt::writer::{BoxMakeWriter, MakeWriterExt};
         let c: AgentConfig = read_config(config)?;
         let _lock = lock(&c.state_dir)?;
+        let _ = remote_hosts_code::auto_upgrade::prune_agent_releases_and_logs(&c.state_dir);
         let file =
             std::sync::Mutex::new(remote_hosts_code::agent_log::AgentLog::open(&c.state_dir)?);
         let writer = if *foreground || !cfg!(windows) {
@@ -199,6 +200,43 @@ async fn main() -> Result<()> {
             tracing::error!("agent stopped with error; inspect preceding local diagnostics");
         }
         return result;
+    }
+    if let Command::Gateway { config } = &command {
+        use tracing_subscriber::fmt::writer::{BoxMakeWriter, MakeWriterExt};
+        let c: GatewayConfig = read_config(config)?;
+        let bind: SocketAddr = c.bind.parse()?;
+        ensure!(
+            bind.ip().is_loopback(),
+            "gateway must bind loopback behind Caddy"
+        );
+        let _lock = lock(&c.state_dir)?;
+        let file = std::sync::Mutex::new(remote_hosts_code::agent_log::AgentLog::open_named(
+            &c.state_dir,
+            "gateway.log",
+        )?);
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .with_writer(BoxMakeWriter::new(file.and(std::io::stderr)))
+            .init();
+        let gateway =
+            remote_hosts_code::gateway::Gateway::new_with_config_path(c, config.clone()).await?;
+        let _ = remote_hosts_code::auto_upgrade::prune_gateway_releases_and_logs(&gateway);
+        let listener = tokio::net::TcpListener::bind(bind).await?;
+        tracing::info!(%bind, "gateway listening; bounded logs and release retention enabled");
+        let router = gateway.router()?;
+        let serving = async {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = tokio::signal::ctrl_c().await;
+                })
+                .await
+        };
+        tokio::select! {
+            result = serving => result?,
+            result = gateway.maintain_history() => result?,
+        }
+        return Ok(());
     }
     tracing_subscriber::fmt()
         .with_env_filter(filter)

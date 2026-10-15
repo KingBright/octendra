@@ -307,6 +307,7 @@ pub(crate) async fn run(gateway: &Gateway) -> Result<()> {
             }
         }
         let started = std::time::Instant::now();
+        let _ = crate::auto_upgrade::prune_gateway_releases_and_logs(gateway);
         let report = bounded_tick(gateway, store, &policy, crate::now(), &mut scan).await;
         let mut delay = next_delay(&report);
         let status = json!({"protocol":2,"automatic":true,"observed_at":crate::now(),

@@ -3,6 +3,7 @@ mod activity;
 pub mod agent;
 pub mod agent_log;
 pub mod auth;
+pub mod auto_upgrade;
 mod capabilities;
 mod code_payload;
 mod payload_budget;
