@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-"""Local developer verification runner and workspace-queued host build bridge.
+"""Local developer verification runner, workspace-queued host build bridge, and build cache pruner.
 
-Why this exists:
-- Adding ~/.cargo, ~/.rustup, or ~/rust-target to Connected Folders can trigger
-  large workspace backups.
-- Running `/opt/homebrew/bin/python3 scripts/dev-verify.py --serve` once in a
-  normal local terminal starts a lightweight file-queue worker rooted at
-  `.local-deployment/dev-runner/` (which is gitignored and excluded from source
-  verification inputs).
-- When invoked inside the agent sandbox (`--mode quick`, `--mode full`, or
-  `--exec ...`), `dev-verify.py` automatically delegates Cargo/test commands to
-  the host worker if direct toolchain access is blocked by the sandbox.
+Key responsibilities:
+1. Reuse the single established `~/rust-target` (`CARGO_TARGET_DIR`) so builds never
+   create duplicate target trees inside the repository.
+2. Automatically prune superseded hashed binaries/rlibs/dSYMs in `deps/`, stale
+   sessions in `incremental/`, and retired slot `cargo-target`/`checkout` trees
+   after every build/test run (or via `--prune`), keeping only the minimal newest
+   artifacts required for fast incremental compilation.
+3. Provide a workspace-queued host worker (`--serve`) under `.local-deployment/dev-runner/`
+   so sandboxed agent sessions can trigger compilation, tests, and cache pruning
+   without adding large directories to Connected Folders.
 """
 import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -30,22 +31,32 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 QUEUE_DIR = ROOT / ".local-deployment" / "dev-runner"
 ALLOWED_EXEC_PREFIXES = ("cargo", "rustc", "rustup", "python3", sys.executable)
+HASHED_ARTIFACT_RE = re.compile(r"^(?P<stem>.+)-(?P<hash>[0-9a-f]{16})(?P<suffix>\..+)?$")
 
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def real_user_home() -> Path:
+    pw_home = Path("/Users") / os.environ.get("USER", "")
+    if pw_home.name and pw_home != Path("/Users"):
+        return pw_home
+    return Path(os.path.expanduser("~"))
+
+
 def find_toolchain():
     env = dict(os.environ)
+    user_home = real_user_home()
+    established_target = user_home / "rust-target"
+    env.setdefault("CARGO_TARGET_DIR", str(established_target))
+    env.setdefault("CARGO_TERM_COLOR", "never")
+    env.setdefault("PYTHONUNBUFFERED", "1")
+
     candidates = []
     if env.get("CARGO_HOME"):
         candidates.append(Path(env["CARGO_HOME"]) / "bin")
-    real_home = Path(os.path.expanduser("~"))
-    candidates.append(real_home / ".cargo" / "bin")
-    pw_home = Path("/Users") / os.environ.get("USER", "")
-    if pw_home.name:
-        candidates.append(pw_home / ".cargo" / "bin")
+    candidates.append(user_home / ".cargo" / "bin")
     candidates.extend([Path("/opt/homebrew/bin"), Path("/usr/local/bin")])
 
     blocked = []
@@ -67,8 +78,194 @@ def find_toolchain():
         "available": bool(cargo and rustc),
         "cargo": cargo,
         "rustc": rustc,
+        "cargo_target_dir": env["CARGO_TARGET_DIR"],
         "blocked_paths": blocked,
         "env": env,
+    }
+
+
+def remove_path(path: Path) -> int:
+    """Remove a file or directory tree and return approximate reclaimed bytes."""
+    try:
+        if path.is_symlink() or path.is_file():
+            size = path.lstat().st_size
+            path.unlink(missing_ok=True)
+            return size
+        if path.is_dir():
+            size = sum(
+                f.lstat().st_size
+                for f in path.rglob("*")
+                if f.is_file() or f.is_symlink()
+            )
+            shutil.rmtree(path, ignore_errors=True)
+            return size
+    except OSError:
+        return 0
+    return 0
+
+
+def prune_cargo_target_dir(target_dir: Path) -> dict:
+    """Keep only the newest hash per crate stem in deps/ and newest session in incremental/."""
+    reclaimed = 0
+    removed_entries = 0
+    try:
+        if not target_dir.is_dir():
+            return {"target_dir": str(target_dir), "accessible": False, "reclaimed_bytes": 0, "removed_entries": 0}
+    except PermissionError:
+        return {"target_dir": str(target_dir), "accessible": False, "reclaimed_bytes": 0, "removed_entries": 0}
+
+    profile_roots = [target_dir / "debug", target_dir / "release"]
+    try:
+        for child in target_dir.iterdir():
+            if child.is_dir() and child.name not in ("debug", "release", "tmp", ".rustc_info.json"):
+                for prof in ("debug", "release"):
+                    if (child / prof).is_dir():
+                        profile_roots.append(child / prof)
+    except OSError:
+        pass
+
+    for prof_dir in profile_roots:
+        # 1. Prune superseded hashed artifacts in deps/ (keep only newest hash per stem+kind)
+        deps_dir = prof_dir / "deps"
+        if deps_dir.is_dir():
+            groups: dict[tuple[str, str], dict[str, list[Path]]] = {}
+            for entry in deps_dir.iterdir():
+                m = HASHED_ARTIFACT_RE.match(entry.name)
+                if not m:
+                    continue
+                stem = m.group("stem")
+                h = m.group("hash")
+                suffix = m.group("suffix") or ""
+                # Group companion files (.d, .dSYM) with their binary/library kind
+                if suffix in ("", ".d", ".dSYM"):
+                    kind = "bin_or_test"
+                elif suffix in (".rlib", ".rmeta"):
+                    kind = suffix
+                elif suffix in (".dylib", ".so", ".dll"):
+                    kind = "dylib"
+                else:
+                    kind = suffix
+                groups.setdefault((stem, kind), {}).setdefault(h, []).append(entry)
+
+            for (_stem, kind), by_hash in groups.items():
+                if len(by_hash) <= 1:
+                    continue
+                ranked = sorted(
+                    by_hash.items(),
+                    key=lambda item: max((p.lstat().st_mtime for p in item[1] if p.exists()), default=0.0),
+                    reverse=True,
+                )
+                # Keep only the single newest hash revision for each crate stem + kind
+                for _old_hash, paths in ranked[1:]:
+                    for p in paths:
+                        reclaimed += remove_path(p)
+                        removed_entries += 1
+
+        # 2. Prune stale sessions in incremental/<crate>/s-<timestamp>-...
+        inc_dir = prof_dir / "incremental"
+        if inc_dir.is_dir():
+            for crate_dir in inc_dir.iterdir():
+                if not crate_dir.is_dir():
+                    continue
+                sessions = [s for s in crate_dir.iterdir() if s.is_dir()]
+                if len(sessions) > 1:
+                    sessions.sort(key=lambda p: p.lstat().st_mtime, reverse=True)
+                    for old_session in sessions[1:]:
+                        reclaimed += remove_path(old_session)
+                        removed_entries += 1
+
+        # 3. Prune stale build script output directories in build/<pkg>-<hash>
+        build_dir = prof_dir / "build"
+        if build_dir.is_dir():
+            bgroups: dict[str, dict[str, list[Path]]] = {}
+            for entry in build_dir.iterdir():
+                m = HASHED_ARTIFACT_RE.match(entry.name)
+                if not m:
+                    continue
+                bgroups.setdefault(m.group("stem"), {}).setdefault(m.group("hash"), []).append(entry)
+            for _stem, by_hash in bgroups.items():
+                if len(by_hash) <= 1:
+                    continue
+                ranked = sorted(
+                    by_hash.items(),
+                    key=lambda item: max((p.lstat().st_mtime for p in item[1] if p.exists()), default=0.0),
+                    reverse=True,
+                )
+                for _old_hash, paths in ranked[1:]:
+                    for p in paths:
+                        reclaimed += remove_path(p)
+                        removed_entries += 1
+
+    return {
+        "target_dir": str(target_dir),
+        "accessible": True,
+        "reclaimed_bytes": reclaimed,
+        "reclaimed_mib": round(reclaimed / (1024 * 1024), 2),
+        "removed_entries": removed_entries,
+    }
+
+
+def prune_workspace_Build_bloat(root: Path, established_target: Path | None = None) -> dict:
+    """Clean retired slot checkouts/cargo-targets in repo target/ and bound queue logs."""
+    sys.path.insert(0, str(root / "scripts"))
+    import build_slot
+
+    reclaimed = 0
+    actions = []
+    repo_target = root / "target"
+    if repo_target.is_dir():
+        # Clean retired slot checkouts and duplicate slot cargo-targets when owner PID is not alive
+        for slot_dir in sorted(repo_target.iterdir()):
+            if not slot_dir.is_dir():
+                continue
+            owner_file = slot_dir / "owner.json"
+            alive = False
+            if owner_file.is_file():
+                try:
+                    owner = json.loads(owner_file.read_text())
+                    alive = build_slot.process_alive(owner.get("pid"))
+                except Exception:
+                    alive = False
+            if alive:
+                continue
+
+            # Retired checkout copies inside slots are never needed (AGENTS.md)
+            checkout_dir = slot_dir / "checkout"
+            if checkout_dir.is_dir():
+                freed = remove_path(checkout_dir)
+                reclaimed += freed
+                actions.append({"removed": str(checkout_dir.relative_to(root)), "reclaimed_mib": round(freed / (1024 * 1024), 2)})
+
+            slot_cargo_target = slot_dir / "cargo-target"
+            if slot_cargo_target.is_dir():
+                if slot_dir.name == "admin-maintenance-task-slot":
+                    freed = remove_path(slot_cargo_target)
+                    reclaimed += freed
+                    actions.append({"removed": str(slot_cargo_target.relative_to(root)), "reclaimed_mib": round(freed / (1024 * 1024), 2)})
+                else:
+                    # Prune superseded hashed binaries/incremental sessions inside release-slot/cargo-target
+                    res = prune_cargo_target_dir(slot_cargo_target)
+                    reclaimed += res["reclaimed_bytes"]
+                    if res["reclaimed_bytes"] > 0:
+                        actions.append({"pruned": str(slot_cargo_target.relative_to(root)), "reclaimed_mib": res["reclaimed_mib"]})
+
+    # Bound dev-runner logs/results to the newest 10 jobs
+    for sub in ("logs", "results"):
+        d = QUEUE_DIR / sub
+        if d.is_dir():
+            files = sorted(d.iterdir(), key=lambda p: p.lstat().st_mtime, reverse=True)
+            for old in files[10:]:
+                reclaimed += remove_path(old)
+
+    target_prune = None
+    if established_target is not None:
+        target_prune = prune_cargo_target_dir(established_target)
+        reclaimed += target_prune["reclaimed_bytes"]
+
+    return {
+        "total_reclaimed_mib": round(reclaimed / (1024 * 1024), 2),
+        "workspace_actions": actions,
+        "established_target_prune": target_prune,
     }
 
 
@@ -85,6 +282,7 @@ def worker_status(queue_dir: Path = QUEUE_DIR):
             "pid": data.get("pid"),
             "cargo": data.get("cargo"),
             "rustc": data.get("rustc"),
+            "cargo_target_dir": data.get("cargo_target_dir"),
         }
     except Exception as error:
         return {"online": False, "reason": str(error)}
@@ -148,6 +346,7 @@ def serve_worker(queue_dir: Path = QUEUE_DIR, once: bool = False):
     for d in (req_dir, res_dir, log_dir):
         d.mkdir(parents=True, exist_ok=True)
 
+    established_target = Path(toolchain["cargo_target_dir"])
     hb_path = queue_dir / "worker.json"
     print(
         json.dumps(
@@ -157,6 +356,7 @@ def serve_worker(queue_dir: Path = QUEUE_DIR, once: bool = False):
                 "pid": os.getpid(),
                 "cargo": toolchain["cargo"],
                 "rustc": toolchain["rustc"],
+                "cargo_target_dir": str(established_target),
             }
         ),
         flush=True,
@@ -171,6 +371,7 @@ def serve_worker(queue_dir: Path = QUEUE_DIR, once: bool = False):
                         "updated_at": time.time(),
                         "cargo": toolchain["cargo"],
                         "rustc": toolchain["rustc"],
+                        "cargo_target_dir": str(established_target),
                     },
                     indent=2,
                 )
@@ -204,12 +405,14 @@ def serve_worker(queue_dir: Path = QUEUE_DIR, once: bool = False):
                             timeout=int(job.get("timeout", 1800)),
                             check=False,
                         )
+                    prune_report = prune_workspace_Build_bloat(ROOT, established_target)
                     result = {
                         "id": job_id,
                         "argv": argv,
                         "exit_code": proc.returncode,
                         "elapsed_seconds": round(time.time() - started, 3),
                         "log": str(log_path.relative_to(ROOT)),
+                        "cache_prune": prune_report,
                     }
                 res_tmp.write_text(json.dumps(result, indent=2) + "\n")
                 res_tmp.replace(res_path)
@@ -355,19 +558,20 @@ def run_binary_smoke(binary: Path, root: Path):
 def execute_step(argv: list[str], root: Path, toolchain: dict):
     if toolchain["available"]:
         subprocess.run(argv, cwd=root, env=toolchain["env"], check=True)
-        return {"via": "direct", "exit_code": 0}
+        prune = prune_workspace_Build_bloat(root, Path(toolchain["cargo_target_dir"]))
+        return {"via": "direct", "exit_code": 0, "cache_prune": prune}
     res = delegate_to_worker(argv)
     if res.get("exit_code") != 0:
         raise RuntimeError(f"worker command failed ({res.get('exit_code')}): {argv}")
-    return {"via": "worker", "exit_code": 0, "job_id": res.get("id")}
+    return {"via": "worker", "exit_code": 0, "job_id": res.get("id"), "cache_prune": res.get("cache_prune")}
 
 
 def run_cargo_checks(root: Path, toolchain: dict, mode: str):
     if mode == "full":
         report = root / "target" / "dev-verify" / f"proof-{int(time.time())}-{os.getpid()}.json"
         report.parent.mkdir(parents=True, exist_ok=True)
-        execute_step([sys.executable, str(root / "scripts/check-code-source.py"), "--report", str(report)], root, toolchain)
-        return {"mode": "full", "report": str(report.relative_to(root))}
+        step = execute_step([sys.executable, str(root / "scripts/check-code-source.py"), "--report", str(report)], root, toolchain)
+        return {"mode": "full", "report": str(report.relative_to(root)), "cache_prune": step.get("cache_prune")}
 
     commands = [
         ["cargo", "fmt", "-p", "remote-hosts-code", "-p", "remote-hosts-release", "--", "--check"],
@@ -390,9 +594,11 @@ def run_cargo_checks(root: Path, toolchain: dict, mode: str):
             "--test-threads=1",
         ],
     ]
+    last_prune = None
     for argv in commands:
-        execute_step(argv, root, toolchain)
-    return {"mode": "quick", "commands_completed": len(commands)}
+        step = execute_step(argv, root, toolchain)
+        last_prune = step.get("cache_prune")
+    return {"mode": "quick", "commands_completed": len(commands), "cache_prune": last_prune}
 
 
 def main():
@@ -400,9 +606,13 @@ def main():
     parser.add_argument("--mode", choices=["auto", "static", "quick", "full"], default="auto")
     parser.add_argument("--serve", action="store_true", help="run host build worker watching .local-deployment/dev-runner")
     parser.add_argument("--status", action="store_true", help="check host build worker status")
+    parser.add_argument("--prune", action="store_true", help="prune superseded build artifacts and retired slot targets immediately")
     parser.add_argument("--binary", type=Path, help="optional compiled remote-hosts-code binary for isolated CLI smoke tests")
     parser.add_argument("--exec", nargs=argparse.REMAINDER, help="execute an allowed build/test command directly or via host worker")
     args = parser.parse_args()
+
+    toolchain = find_toolchain()
+    established_target = Path(toolchain["cargo_target_dir"])
 
     if args.serve:
         serve_worker()
@@ -410,20 +620,26 @@ def main():
     if args.status:
         print(json.dumps(worker_status(), indent=2))
         return
-
-    toolchain = find_toolchain()
+    if args.prune:
+        print(json.dumps(prune_workspace_Build_bloat(ROOT, established_target), indent=2))
+        return
     if args.exec:
         res = execute_step(args.exec, ROOT, toolchain)
         print(json.dumps(res, indent=2))
         return
 
-    summary = {"static_contract": verify_static_contracts(ROOT), "python_fast_tests": run_python_fast_tests(ROOT)}
+    summary = {
+        "static_contract": verify_static_contracts(ROOT),
+        "python_fast_tests": run_python_fast_tests(ROOT),
+        "cache_prune": prune_workspace_Build_bloat(ROOT, established_target),
+    }
     worker = worker_status()
     summary["toolchain"] = {
         "direct_available": toolchain["available"],
         "worker_online": worker.get("online", False),
         "cargo": toolchain["cargo"] or worker.get("cargo"),
         "rustc": toolchain["rustc"] or worker.get("rustc"),
+        "cargo_target_dir": toolchain["cargo_target_dir"],
     }
 
     binary = args.binary
