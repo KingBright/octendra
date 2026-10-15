@@ -1008,11 +1008,7 @@ impl Agent {
             if let Ok(resp) = response
                 && resp.status().is_success()
             {
-                crate::auto_upgrade::check_and_spawn_agent_upgrade(
-                    self,
-                    client,
-                    resp.headers(),
-                );
+                crate::auto_upgrade::check_and_spawn_agent_upgrade(self, client, resp.headers());
                 acknowledged_terminal_fingerprint = fingerprint;
                 last_acknowledged = tokio::time::Instant::now();
                 self.liveness.observed(contact_started);
@@ -1149,11 +1145,7 @@ impl Agent {
             )
             .into());
         }
-        crate::auto_upgrade::check_and_spawn_agent_upgrade(
-            self,
-            client,
-            response.headers(),
-        );
+        crate::auto_upgrade::check_and_spawn_agent_upgrade(self, client, response.headers());
         let mut bytes = Vec::new();
         while let Some(chunk) = response
             .chunk()

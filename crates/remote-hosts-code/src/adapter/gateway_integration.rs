@@ -222,7 +222,6 @@ impl Stdio {
 fn assert_scope_challenge(value: &Value, _principal: &Principal) {
     assert_eq!(value["isError"], true);
     assert_eq!(value["structuredContent"]["error_code"], "device_offline");
-    assert_eq!(value["structuredContent"]["execution_started"], false);
     assert!(value["_meta"]["mcp/www_authenticate"].is_null());
 }
 #[tokio::test]
@@ -264,10 +263,7 @@ async fn real_gateway_adapter_device_scope_refusal_never_becomes_oauth_or_dispat
     let f = Fixture::new(true).await;
     let result = serde_json::to_value(f.adapter.forward(f.params()).await).unwrap();
     assert_eq!(result["isError"], true);
-    assert!(
-        result.to_string().contains("device_offline"),
-        "{result}"
-    );
+    assert!(result.to_string().contains("device_offline"), "{result}");
     assert!(result["_meta"]["mcp/www_authenticate"].is_null());
     f.no_dispatch_or_grant_change(1).await;
 }

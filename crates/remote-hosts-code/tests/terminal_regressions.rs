@@ -331,7 +331,17 @@ async fn terminal_capacity_is_released_after_cancellation() {
     let f = Fixture::new().await;
     let mut ids = Vec::new();
     for _ in 0..64 {
-        ids.push(f.start("sleep 30", false, 10).await);
+        let id = uuid::Uuid::new_v4().to_string();
+        f.terminals
+            .start(
+                &f.config,
+                &f.ws,
+                &json!({"command":"sleep 30","pty":false,"timeout_seconds":60,"wait_ms":0}),
+                &id,
+            )
+            .await
+            .unwrap();
+        ids.push(id);
     }
     let extra = uuid::Uuid::new_v4().to_string();
     let result = f

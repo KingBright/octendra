@@ -64,12 +64,11 @@ async fn desktop_oauth_handoff_discovery_has_top_level_and_mirrored_schemes_with
 #[tokio::test]
 async fn desktop_oauth_handoff_missing_scope_is_stable_and_never_replays_or_changes_grants() {
     let f = Fixture::new().await;
-    let _ = f
-        .g
-        .store
-        .take::<Value>("online", &f.g.config.devices[0].id)
-        .await
-        .unwrap();
+    let _ =
+        f.g.store
+            .take::<Value>("online", &f.g.config.devices[0].id)
+            .await
+            .unwrap();
     let bearer = f.bearer().await;
     let kind = oauth_state_kind("access", &bearer);
     let before: Value = f.g.store.get(&kind, &hash(&bearer)).await.unwrap().unwrap();
@@ -91,12 +90,11 @@ async fn desktop_oauth_handoff_missing_scope_is_stable_and_never_replays_or_chan
 #[tokio::test]
 async fn desktop_oauth_handoff_observe_and_input_are_requested_in_one_consent() {
     let mut f = Fixture::new().await;
-    let _ = f
-        .g
-        .store
-        .take::<Value>("online", &f.g.config.devices[0].id)
-        .await
-        .unwrap();
+    let _ =
+        f.g.store
+            .take::<Value>("online", &f.g.config.devices[0].id)
+            .await
+            .unwrap();
     f.p.scopes.push("desktop:input".into());
     let bearer = f.bearer().await;
     let (_, v) = call(&f, &bearer, "desktop_worker", desktop_args(&f)).await;
@@ -112,12 +110,11 @@ async fn desktop_oauth_handoff_observe_and_input_are_requested_in_one_consent() 
 #[tokio::test]
 async fn desktop_oauth_handoff_existing_scope_device_policy_and_unknown_tool_do_not_relink() {
     let mut f = Fixture::new().await;
-    let _ = f
-        .g
-        .store
-        .take::<Value>("online", &f.g.config.devices[0].id)
-        .await
-        .unwrap();
+    let _ =
+        f.g.store
+            .take::<Value>("online", &f.g.config.devices[0].id)
+            .await
+            .unwrap();
     f.p.scopes
         .extend(["desktop:observe".into(), "desktop:input".into()]);
     let bearer = f.bearer().await;

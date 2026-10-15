@@ -14,7 +14,7 @@ pub struct AgentLog {
 }
 impl AgentLog {
     pub fn open(state_dir: &Path) -> io::Result<Self> {
-        Self::open_named(state_dir, "agent.log")
+        Self::with_limit(&state_dir.join("logs"), 4 * 1024 * 1024, 3)
     }
     pub fn open_named(state_dir: &Path, file_name: &str) -> io::Result<Self> {
         Self::with_limit_named(&state_dir.join("logs"), file_name, 4 * 1024 * 1024, 3)

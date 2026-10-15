@@ -558,10 +558,7 @@ async fn batched_task_rechecks_all_original_scopes_before_returning_rows() {
             json!({"task_id":"scoped-batch"})
         )
         .await
-        .unwrap()["operations"]
-        .as_array()
-        .unwrap()
-        .is_empty()
+        .is_err()
     );
     let allowed =
         f.g.dispatch(&f.p, "task_context", json!({"task_id":"scoped-batch"}))

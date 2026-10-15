@@ -167,6 +167,7 @@ pub mod tools {
     pub const CODE_EXECUTE: &str = "remote_hosts_code_execute";
 }
 
+#[allow(dead_code)]
 const AGENT_TOOL_NAMES: &[&str] = &[
     tools::LIST_HOSTS,
     tools::ENSURE_HOST,
@@ -193,6 +194,7 @@ const AGENT_TOOL_NAMES: &[&str] = &[
     tools::CODE_EXECUTE,
 ];
 
+#[allow(dead_code)]
 const ADMIN_TOOL_NAMES: &[&str] = &[
     tools::WAIT_WORKSPACE_STATE,
     tools::FIND_HOST_DUPLICATES,
@@ -1109,6 +1111,14 @@ pub struct CodeExecuteRequest {
     pub device_id: Option<String>,
 }
 
+/// Structured object output returned by [`RemoteHostsMcpServer::code_execute`].
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct CodeExecuteOutput {
+    /// Category-2 tool result object fields.
+    #[serde(flatten)]
+    pub fields: serde_json::Map<String, Value>,
+}
+
 /// Read workspace output request.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ReadWorkspaceOutputRequest {
@@ -1267,8 +1277,7 @@ impl RemoteHostsMcpServer {
     }
 
     fn requires_workspace_ownership(&self) -> bool {
-        let _ = self;
-        false
+        matches!(self.tool_profile, ToolProfile::Agent)
     }
 
     async fn resolve_or_prepare_workspace_id(
@@ -1340,10 +1349,7 @@ impl RemoteHostsMcpServer {
             Value::Null => json!({}),
             Value::Object(map) => Value::Object(map),
             other => {
-                return Err(format!(
-                    "arguments must be a JSON object, got {}",
-                    other
-                ));
+                return Err(format!("arguments must be a JSON object, got {}", other));
             }
         };
         if let Some(gateway_url) = gateway_url {
@@ -1365,15 +1371,19 @@ impl RemoteHostsMcpServer {
                     .and_then(|value| trim_optional(Some(value)))
             });
             let client = reqwest::Client::new();
-            let mut http_req = client.post(&endpoint).json(&json!({
-                "jsonrpc": "2.0",
-                "id": Uuid::new_v4().to_string(),
-                "method": "tools/call",
-                "params": {
-                    "name": request.tool,
-                    "arguments": arguments,
-                }
-            }));
+            let mut http_req = client
+                .post(&endpoint)
+                .header("Accept", "application/json, text/event-stream")
+                .header("MCP-Protocol-Version", "2025-06-18")
+                .json(&json!({
+                    "jsonrpc": "2.0",
+                    "id": Uuid::new_v4().to_string(),
+                    "method": "tools/call",
+                    "params": {
+                        "name": request.tool,
+                        "arguments": arguments,
+                    }
+                }));
             if let Some(token) = bearer {
                 http_req = http_req.bearer_auth(token);
             }
@@ -1382,10 +1392,31 @@ impl RemoteHostsMcpServer {
                 .await
                 .map_err(|error| format!("gateway request failed: {error}"))?;
             let status = response.status();
-            let body: Value = response
-                .json()
+            let raw_text = response
+                .text()
                 .await
+                .map_err(|error| format!("gateway response read failed ({status}): {error}"))?;
+            if !status.is_success() {
+                return Err(format!("gateway HTTP {status}: {raw_text}"));
+            }
+            let payload_str = raw_text
+                .lines()
+                .find_map(|line| line.strip_prefix("data:").map(str::trim))
+                .filter(|data| !data.is_empty())
+                .unwrap_or(raw_text.trim());
+            let body: Value = serde_json::from_str(payload_str)
                 .map_err(|error| format!("gateway response decode failed ({status}): {error}"))?;
+            if let Some(rpc_err) = body.get("error") {
+                return Err(format!("gateway rpc error: {rpc_err}"));
+            }
+            if let Some(result) = body.get("result") {
+                if result.get("isError") == Some(&Value::Bool(true)) {
+                    return Err(format!("gateway tool error: {result}"));
+                }
+                if let Some(structured) = result.get("structuredContent") {
+                    return Ok(structured.clone());
+                }
+            }
             return Ok(body);
         }
 
@@ -1413,17 +1444,52 @@ impl RemoteHostsMcpServer {
             });
             arguments["workspace_id"] = Value::String(root);
         }
+        let explicit_idempotency_key = arguments
+            .get("idempotency_key")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        if explicit_idempotency_key.is_none()
+            && matches!(
+                request.tool.as_str(),
+                "workspace_open"
+                    | "workspace_gc"
+                    | "code_apply_edits"
+                    | "change_resume"
+                    | "files_sync"
+                    | "file_upload"
+                    | "transfer_resume"
+                    | "terminal_exec"
+                    | "terminal_input"
+                    | "terminal_cancel"
+            )
+        {
+            arguments["idempotency_key"] = Value::String(Uuid::new_v4().to_string());
+        }
+        let owner = format!("mcp-local:{}", self.agent_session.id);
+        let scope = arguments
+            .get("workspace_id")
+            .and_then(Value::as_str)
+            .or_else(|| arguments.get("root").and_then(Value::as_str))
+            .unwrap_or("");
+        let job_id = if let Some(idem_key) = explicit_idempotency_key.as_deref() {
+            Uuid::new_v5(
+                &Uuid::NAMESPACE_OID,
+                format!("{owner}:{device_id}:{}:{scope}:{idem_key}", request.tool).as_bytes(),
+            )
+            .to_string()
+        } else {
+            Uuid::new_v4().to_string()
+        };
         let job = remote_hosts_code::gateway::Job {
-            id: Uuid::new_v4().to_string(),
+            id: job_id,
             device_id,
-            owner: "mcp-local".to_owned(),
+            owner,
             tool: request.tool,
             arguments,
         };
-        agent
-            .execute(&job)
-            .await
-            .map_err(|error| error.to_string())
+        agent.execute(&job).await.map_err(|error| error.to_string())
     }
 
     fn compact_responses(&self) -> bool {
@@ -1458,7 +1524,9 @@ impl RemoteHostsMcpServer {
             .map_err(|error| tool_error(&error))?
             .ok_or_else(|| format!("workspace not found: {workspace_id}"))?;
         if self.requires_workspace_ownership()
-            && workspace.agent_session_id != Some(self.agent_session.id)
+            && workspace
+                .agent_session_id
+                .is_some_and(|owner| owner != self.agent_session.id)
         {
             return Err(format!(
                 "workspace is owned by another agent session: {workspace_id}; prepare a workspace in this conversation"
@@ -6634,9 +6702,13 @@ impl RemoteHostsMcpServer {
     async fn code_execute(
         &self,
         Parameters(request): Parameters<CodeExecuteRequest>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<CodeExecuteOutput>, String> {
         let output = self.execute_code_tool(request).await?;
-        Ok(Json(output))
+        let fields = match output {
+            Value::Object(map) => map,
+            other => serde_json::Map::from_iter([("result".to_owned(), other)]),
+        };
+        Ok(Json(CodeExecuteOutput { fields }))
     }
 }
 
@@ -10077,7 +10149,7 @@ mod tests {
         .await?;
 
         assert_eq!(snapshot["snapshot_version"], json!(11));
-        assert_eq!(snapshot["workspace_capacity"]["limit"], json!(32));
+        assert_eq!(snapshot["workspace_capacity"]["limit"], json!(u32::MAX));
         assert_eq!(snapshot["workspace_capacity"]["effective_active"], json!(1));
         assert!(
             snapshot["event_cursor"]
@@ -10168,7 +10240,7 @@ mod tests {
                 "state": "saturated"
             })
         );
-        assert_eq!(snapshot["workspace_capacity"]["limit"], json!(32));
+        assert_eq!(snapshot["workspace_capacity"]["limit"], json!(u32::MAX));
         assert_eq!(snapshot["workspace_capacity"]["effective_active"], json!(1));
         assert!(snapshot["attention"].as_array().is_some_and(|attention| {
             attention.iter().any(|item| {
@@ -13628,22 +13700,53 @@ mod tests {
             })),
         )
         .await?;
-        assert_eq!(edited["files"][0]["path"], json!("hello.txt"));
+        assert_eq!(edited["changed"][0]["path"], json!("hello.txt"));
         assert_eq!(std::fs::read_to_string(root.join("hello.txt"))?, "beta\n");
 
+        let counter_path = root.join("idem-count.txt");
         let exec = call_tool(
+            server.clone(),
+            tools::CODE_EXECUTE,
+            Some(json!({
+                "tool": "terminal_exec",
+                "root": root.to_string_lossy(),
+                "arguments": {
+                    "command": "printf 'x\\n' >> idem-count.txt && wc -l < idem-count.txt",
+                    "idempotency_key": "idem-exec-1"
+                }
+            })),
+        )
+        .await?;
+        assert_eq!(exec["terminal"]["exit_code"], json!(0));
+        let replay = call_tool(
+            server.clone(),
+            tools::CODE_EXECUTE,
+            Some(json!({
+                "tool": "terminal_exec",
+                "root": root.to_string_lossy(),
+                "arguments": {
+                    "command": "printf 'x\\n' >> idem-count.txt && wc -l < idem-count.txt",
+                    "idempotency_key": "idem-exec-1"
+                }
+            })),
+        )
+        .await?;
+        assert_eq!(replay, exec);
+        assert_eq!(std::fs::read_to_string(&counter_path)?.lines().count(), 1);
+        let conflict = call_tool_raw(
             server,
             tools::CODE_EXECUTE,
             Some(json!({
                 "tool": "terminal_exec",
                 "root": root.to_string_lossy(),
                 "arguments": {
-                    "command": "printf 'ok'"
+                    "command": "printf 'different'",
+                    "idempotency_key": "idem-exec-1"
                 }
             })),
         )
         .await?;
-        assert_eq!(exec["terminal"]["exit_code"], json!(0));
+        assert_eq!(conflict.is_error, Some(true));
         Ok(())
     }
 

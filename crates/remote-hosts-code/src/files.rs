@@ -667,7 +667,8 @@ pub fn apply(ws: &Workspace, v: &Value, journal: &Path) -> Result<Value> {
         let new = match edit.action.as_deref().unwrap_or("edit") {
             "create" => {
                 ensure!(
-                    (edit.expected_version.is_none() || old.is_none())
+                    old.is_none()
+                        && edit.expected_version.as_deref().unwrap_or("absent") == "absent"
                         && edit.edits.is_none()
                         && edit.patch.is_none(),
                     "create requires absent file and content only"

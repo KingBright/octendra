@@ -198,7 +198,7 @@ class SupervisionTests(unittest.TestCase):
             if worker_pid:
                 try:
                     os.killpg(worker_pid, signal.SIGKILL)
-                except ProcessLookupError:
+                except (ProcessLookupError, PermissionError):
                     pass
 
 

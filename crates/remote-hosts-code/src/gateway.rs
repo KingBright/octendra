@@ -50,7 +50,7 @@ pub struct Gateway {
     /// Full observation journaling is an explicit operator policy. Execution
     /// requests always retain their durable pre-dispatch recovery binding.
     pub audit_observations: bool,
-    config_path: Option<PathBuf>,
+    pub(crate) config_path: Option<PathBuf>,
     signals: Arc<HashMap<String, DeviceSignals>>,
     pub(crate) observation_changed: Arc<Notify>,
     pub(crate) transfer_limits: Arc<crate::scheduler::TransferLimits>,
@@ -290,8 +290,8 @@ impl Gateway {
         let admin = Router::new()
             .route("/admin/status", get(admin_status))
             .route("/admin/gateway-upgrade", post(gateway_upgrade))
-            .merge(crate::auto_upgrade::admin_routes(self.clone()))
             .with_state(self.clone())
+            .merge(crate::auto_upgrade::admin_routes(self.clone()))
             .route_layer(middleware::from_fn_with_state(
                 self.auth.clone(),
                 crate::auth::require_auth,

@@ -1,6 +1,6 @@
 //! Direct Gateway-to-Agent release distribution, out-of-process watchdog upgrade,
 //! post-restart 5-lane readiness verification, automatic rollback, and bounded retention.
-use crate::{AgentConfig, agent::Agent, gateway::DeviceHello, gateway::Gateway, hash, now};
+use crate::{agent::Agent, gateway::DeviceHello, gateway::Gateway, hash, now};
 use anyhow::{Context, Result, bail, ensure};
 use axum::{
     Json, Router,
@@ -243,6 +243,9 @@ pub(crate) fn device_routes(g: Gateway) -> Router {
 pub(crate) fn admin_routes(g: Gateway) -> Router {
     Router::new()
         .route("/admin/release-bundle", post(upload_release_bundle))
+        .layer(axum::extract::DefaultBodyLimit::max(
+            MAX_GATEWAY_RELEASE_DIR_BYTES as usize,
+        ))
         .with_state(g)
 }
 
@@ -483,7 +486,10 @@ async fn upload_release_bundle(
     }
 }
 
-pub fn extract_and_verify_bundle(bundle_path: &Path, release_dir: &Path) -> Result<ReleaseManifest> {
+pub fn extract_and_verify_bundle(
+    bundle_path: &Path,
+    release_dir: &Path,
+) -> Result<ReleaseManifest> {
     let status = std::process::Command::new("tar")
         .arg("-xzf")
         .arg(bundle_path)
@@ -545,6 +551,28 @@ pub fn prune_gateway_releases_and_logs(g: &Gateway) -> Value {
 }
 
 pub fn prune_agent_releases_and_logs(state_dir: &Path) -> Value {
+    let _ = fs::create_dir_all(state_dir);
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(state_dir.join("upgrade.lock"));
+    let Ok(lock_file) = lock_file else {
+        return json!({
+            "reclaimed_bytes": 0,
+            "skipped": "upgrade_lock_unavailable",
+            "max_release_bytes": MAX_AGENT_RELEASE_DIR_BYTES,
+            "max_log_bytes": MAX_LOG_DIR_BYTES
+        });
+    };
+    if fs2::FileExt::try_lock_exclusive(&lock_file).is_err() {
+        return json!({
+            "reclaimed_bytes": 0,
+            "skipped": "upgrade_in_progress",
+            "max_release_bytes": MAX_AGENT_RELEASE_DIR_BYTES,
+            "max_log_bytes": MAX_LOG_DIR_BYTES
+        });
+    }
     let mut reclaimed = 0u64;
     let current = env!("CARGO_PKG_VERSION");
     let agent_releases = state_dir.join("releases");
@@ -552,6 +580,7 @@ pub fn prune_agent_releases_and_logs(state_dir: &Path) -> Value {
     // inside `releases/<current>/`, keeping only the JSON receipts and `releases/rollback/`.
     let active_dir = agent_releases.join(current);
     if active_dir.join("auto-upgrade-result.json").is_file()
+        && !active_dir.join("watchdog-spec.json").is_file()
         && let Ok(entries) = fs::read_dir(&active_dir)
     {
         for entry in entries.flatten() {
@@ -621,23 +650,25 @@ pub fn prune_release_tree(
                 .and_then(|m| m.modified())
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
+                .map(|d| d.as_nanos())
                 .unwrap_or(0);
-            let is_active = keep_version.is_some_and(|v| name == v);
+            let has_pending_watchdog = path.join("watchdog-spec.json").is_file();
+            let is_active = keep_version.is_some_and(|v| name == v) || has_pending_watchdog;
             let is_rollback = name == "rollback";
-            dirs.push((is_active, is_rollback, mtime, path));
+            dirs.push((is_active, is_rollback, mtime, name, path));
         }
     }
-    // Sort active first, then rollback dir, then newest mtime first
+    // Sort active first, then rollback dir, then newest mtime/name first
     dirs.sort_by(|a, b| {
         b.0.cmp(&a.0)
             .then_with(|| b.1.cmp(&a.1))
             .then_with(|| b.2.cmp(&a.2))
+            .then_with(|| b.3.cmp(&a.3))
     });
 
     let mut retained_bytes = 0u64;
     let mut non_rollback_kept = 0usize;
-    for (is_active, is_rollback, _mtime, path) in dirs {
+    for (is_active, is_rollback, _mtime, _name, path) in dirs {
         if !is_active
             && !is_rollback
             && let Ok(sub) = fs::read_dir(&path)
@@ -734,11 +765,7 @@ fn remove_entry(path: &Path) -> u64 {
     size
 }
 
-pub fn check_and_spawn_agent_upgrade(
-    agent: &Agent,
-    client: &reqwest::Client,
-    headers: &HeaderMap,
-) {
+pub fn check_and_spawn_agent_upgrade(agent: &Agent, client: &reqwest::Client, headers: &HeaderMap) {
     let Some(raw) = headers.get(UPGRADE_HEADER).and_then(|v| v.to_str().ok()) else {
         return;
     };
@@ -757,23 +784,44 @@ pub fn check_and_spawn_agent_upgrade(
     let agent = agent.clone();
     let client = client.clone();
     tokio::spawn(async move {
-        let res = perform_agent_self_upgrade(&agent, &client, &directive).await;
-        if let Err(err) = res {
-            tracing::warn!(
-                ?err,
-                target_version = %directive.version,
-                "direct agent auto-upgrade deferred or aborted"
-            );
+        match perform_agent_self_upgrade(&agent, &client, &directive).await {
+            Ok(true) => {
+                // Detached watchdog owns service cutover and post-cutover pruning.
+                // Do not prune staged candidate files or clear flags in the outgoing process.
+                #[cfg(test)]
+                {
+                    draining_flag().store(false, Ordering::SeqCst);
+                    upgrade_flag().store(false, Ordering::SeqCst);
+                }
+            }
+            Ok(false) => {
+                draining_flag().store(false, Ordering::SeqCst);
+                upgrade_flag().store(false, Ordering::SeqCst);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    target_version = %directive.version,
+                    "direct agent auto-upgrade deferred or aborted"
+                );
+                draining_flag().store(false, Ordering::SeqCst);
+                let _ = prune_agent_releases_and_logs(&agent.config.state_dir);
+                upgrade_flag().store(false, Ordering::SeqCst);
+            }
         }
-        draining_flag().store(false, Ordering::SeqCst);
-        let _ = prune_agent_releases_and_logs(&agent.config.state_dir);
-        upgrade_flag().store(false, Ordering::SeqCst);
     });
 }
 
 /// Evaluates whether a previous receipt should block retrying `directive.artifact_sha256` right now.
-pub fn should_skip_for_receipt(receipt: &Value, directive: &UpgradeDirective, current_now: i64) -> Option<u32> {
-    let state = receipt.get("state").and_then(Value::as_str).unwrap_or_default();
+pub fn should_skip_for_receipt(
+    receipt: &Value,
+    directive: &UpgradeDirective,
+    current_now: i64,
+) -> Option<u32> {
+    let state = receipt
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let rec_cand = receipt
         .get("candidate_sha256")
         .and_then(Value::as_str)
@@ -875,90 +923,103 @@ pub fn sign_macos_candidate(
             signing_roots.push(parent.join("signing"));
         }
         if let Some(home) = std::env::var_os("HOME") {
-            signing_roots.push(
-                PathBuf::from(home).join(".local/share/remote-hosts-code/signing"),
-            );
+            signing_roots.push(PathBuf::from(home).join(".local/share/remote-hosts-code/signing"));
         }
         for root in signing_roots {
             let meta_path = root.join("identity.json");
             let keychain = root.join("remote-hosts-signing.keychain-db");
             let pw_path = root.join("keychain-password");
-            if meta_path.is_file() && keychain.is_file() && pw_path.is_file() {
-                if let Ok(meta_bytes) = fs::read(&meta_path)
-                    && let Ok(meta) = serde_json::from_slice::<Value>(&meta_bytes)
-                    && let Some(sha1) = meta.get("certificate_sha1").and_then(Value::as_str)
-                    && let Ok(pw) = fs::read_to_string(&pw_path)
-                {
-                    let pw = pw.trim();
-                    let _ = std::process::Command::new("/usr/bin/security")
-                        .args(["unlock-keychain", "-p", pw])
-                        .arg(&keychain)
-                        .status();
-                    let req = format!(
-                        "identifier \"com.remote-hosts.code-agent\" and certificate leaf = H\"{sha1}\""
-                    );
-                    let req_path = staged_path.with_extension("designated-req");
-                    let _ = fs::write(&req_path, format!("designated => {req}\n"));
-                    let status = std::process::Command::new("/usr/bin/codesign")
-                        .args([
-                            "--force",
-                            "--sign",
-                            sha1,
-                            "--keychain",
-                        ])
-                        .arg(&keychain)
-                        .args(["--identifier", "com.remote-hosts.code-agent", "--requirements"])
-                        .arg(&req_path)
-                        .args(["--timestamp=none"])
+            if meta_path.is_file()
+                && keychain.is_file()
+                && pw_path.is_file()
+                && let Ok(meta_bytes) = fs::read(&meta_path)
+                && let Ok(meta) = serde_json::from_slice::<Value>(&meta_bytes)
+                && let Some(sha1) = meta.get("certificate_sha1").and_then(Value::as_str)
+                && let Ok(pw) = fs::read_to_string(&pw_path)
+            {
+                let pw = pw.trim();
+                let _ = std::process::Command::new("/usr/bin/security")
+                    .args(["unlock-keychain", "-p", pw])
+                    .arg(&keychain)
+                    .status();
+                let req = format!(
+                    "identifier \"com.remote-hosts.code-agent\" and certificate leaf = H\"{sha1}\""
+                );
+                let req_path = staged_path.with_extension("designated-req");
+                let _ = fs::write(&req_path, format!("designated => {req}\n"));
+                let status = std::process::Command::new("/usr/bin/codesign")
+                    .args(["--force", "--sign", sha1, "--keychain"])
+                    .arg(&keychain)
+                    .args([
+                        "--identifier",
+                        "com.remote-hosts.code-agent",
+                        "--requirements",
+                    ])
+                    .arg(&req_path)
+                    .args(["--timestamp=none"])
+                    .arg(staged_path)
+                    .status();
+                let _ = fs::remove_file(&req_path);
+                if status.is_ok_and(|s| s.success())
+                    && std::process::Command::new("/usr/bin/codesign")
+                        .args(["--verify", "--strict", "--verbose=2"])
                         .arg(staged_path)
-                        .status();
-                    let _ = fs::remove_file(&req_path);
-                    if status.is_ok_and(|s| s.success()) {
-                        let verify = std::process::Command::new("/usr/bin/codesign")
-                            .args(["--verify", "--strict", "--verbose=2"])
-                            .arg(staged_path)
-                            .status();
-                        if verify.is_ok_and(|s| s.success()) {
-                            let signed_bytes = fs::read(staged_path)?;
-                            let signed_sha = hash(&signed_bytes);
-                            return Ok((
-                                signed_sha.clone(),
-                                Some(json!({
-                                    "state": "ready",
-                                    "root": root,
-                                    "certificate_name": "Remote Hosts Local Code Signing",
-                                    "certificate_sha1": sha1,
-                                    "code_identifier": "com.remote-hosts.code-agent",
-                                    "designated_requirement": req,
-                                    "installed_sha256": signed_sha
-                                })),
-                            ));
-                        }
-                    }
+                        .status()
+                        .is_ok_and(|s| s.success())
+                {
+                    let signed_bytes = fs::read(staged_path)?;
+                    let signed_sha = hash(&signed_bytes);
+                    return Ok((
+                        signed_sha.clone(),
+                        Some(json!({
+                            "state": "ready",
+                            "root": root,
+                            "certificate_name": "Remote Hosts Local Code Signing",
+                            "certificate_sha1": sha1,
+                            "code_identifier": "com.remote-hosts.code-agent",
+                            "designated_requirement": req,
+                            "installed_sha256": signed_sha
+                        })),
+                    ));
                 }
             }
         }
-        // Fallback for isolated test environments without a user keychain identity
-        let _ = std::process::Command::new("/usr/bin/codesign")
-            .args([
-                "--force",
-                "-s",
-                "-",
-                "--identifier",
-                "com.remote-hosts.code-agent",
-            ])
-            .arg(staged_path)
-            .status();
+        #[cfg(not(test))]
+        {
+            let _ = fs::remove_file(staged_path);
+            bail!(
+                "persistent macOS code-signing identity required; refusing ad-hoc fallback that would invalidate TCC permissions"
+            );
+        }
+        #[cfg(test)]
+        {
+            // Test-only fallback for isolated tempdir fixtures without a user keychain identity
+            let _ = std::process::Command::new("/usr/bin/codesign")
+                .args([
+                    "--force",
+                    "-s",
+                    "-",
+                    "--identifier",
+                    "com.remote-hosts.code-agent",
+                ])
+                .arg(staged_path)
+                .status();
+            let final_bytes = fs::read(staged_path)?;
+            Ok((hash(&final_bytes), None))
+        }
     }
-    let final_bytes = fs::read(staged_path)?;
-    Ok((hash(&final_bytes), None))
+    #[cfg(not(target_os = "macos"))]
+    {
+        let final_bytes = fs::read(staged_path)?;
+        Ok((hash(&final_bytes), None))
+    }
 }
 
 async fn perform_agent_self_upgrade(
     agent: &Agent,
     client: &reqwest::Client,
     directive: &UpgradeDirective,
-) -> Result<()> {
+) -> Result<bool> {
     let config = &agent.config;
     // 1. Pre-flight cleanup of stale `.part` / old cached releases before writing new bytes
     let _ = prune_agent_releases_and_logs(&config.state_dir);
@@ -975,7 +1036,7 @@ async fn perform_agent_self_upgrade(
         && let Ok(existing) = serde_json::from_slice::<Value>(&bytes)
     {
         match should_skip_for_receipt(&existing, directive, now()) {
-            None => return Ok(()),
+            None => return Ok(false),
             Some(count) => prev_failures = count,
         }
     }
@@ -1125,7 +1186,9 @@ async fn perform_agent_self_upgrade(
     {
         (
             val.get("last_seen").and_then(Value::as_i64).unwrap_or(0),
-            val.get("session").and_then(Value::as_str).map(str::to_owned),
+            val.get("session")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
         )
     } else {
         (0, None)
@@ -1219,7 +1282,7 @@ async fn perform_agent_self_upgrade(
     #[cfg(test)]
     {
         run_self_upgrade_watchdog(&spec_path).await?;
-        return Ok(());
+        Ok(true)
     }
     #[cfg(not(test))]
     {
@@ -1228,12 +1291,33 @@ async fn perform_agent_self_upgrade(
             target_version = %directive.version,
             "spawned detached self-upgrade watchdog for service cutover and readiness verification"
         );
-        Ok(())
+        Ok(true)
     }
 }
 
 #[cfg(not(test))]
 fn spawn_detached_watchdog(watchdog_exe: &Path, spec_path: &Path) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let unit = format!("remote-hosts-code-upgrade-{}-{}", std::process::id(), now());
+        let status = std::process::Command::new("systemd-run")
+            .args([
+                "--user",
+                "--collect",
+                "--no-block",
+                &format!("--unit={unit}"),
+            ])
+            .arg(watchdog_exe)
+            .args(["self-upgrade-watchdog", "--spec"])
+            .arg(spec_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if status.is_ok_and(|s| s.success()) {
+            return Ok(());
+        }
+    }
     let mut cmd = std::process::Command::new(watchdog_exe);
     cmd.args(["self-upgrade-watchdog", "--spec"])
         .arg(spec_path)
@@ -1253,7 +1337,8 @@ fn spawn_detached_watchdog(watchdog_exe: &Path, spec_path: &Path) -> Result<()> 
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
-    cmd.spawn().context("failed to spawn detached self-upgrade-watchdog")?;
+    cmd.spawn()
+        .context("failed to spawn detached self-upgrade-watchdog")?;
     Ok(())
 }
 
@@ -1394,6 +1479,7 @@ pub async fn run_self_upgrade_watchdog(spec_path: &Path) -> Result<Value> {
         .send()
         .await;
 
+    drop(lock_file);
     let _ = prune_agent_releases_and_logs(&spec.state_dir);
     Ok(final_receipt)
 }
@@ -1434,7 +1520,7 @@ async fn install_binary_atomic(source: &Path, target: &Path) -> Result<()> {
 async fn restart_platform_agent_service(spec: &WatchdogSpec) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        let uid = unsafe { libc::geteuid() };
+        let uid = unsafe { nix::libc::geteuid() };
         let service = format!("gui/{uid}/com.remote-hosts.code-agent");
         let status = tokio::process::Command::new("launchctl")
             .args(["kickstart", "-k", &service])
@@ -1472,7 +1558,7 @@ async fn restart_platform_agent_service(spec: &WatchdogSpec) -> Result<()> {
     #[cfg(unix)]
     if spec.previous_pid > 1 {
         unsafe {
-            libc::kill(spec.previous_pid as i32, libc::SIGTERM);
+            nix::libc::kill(spec.previous_pid as i32, nix::libc::SIGTERM);
         }
     }
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1506,12 +1592,9 @@ async fn verify_post_upgrade_readiness(
     let mut last_seen = spec.baseline_last_seen;
 
     while tokio::time::Instant::now() < deadline {
-        let local_ok = check_local_sqlite_readiness(
-            &spec.state_dir,
-            &spec.target_version,
-            cutover_started,
-        )
-        .await;
+        let local_ok =
+            check_local_sqlite_readiness(&spec.state_dir, &spec.target_version, cutover_started)
+                .await;
         let resp = client
             .get(format!("{}/device/readiness", spec.gateway_url))
             .bearer_auth(&spec.device_token)
@@ -1537,7 +1620,12 @@ async fn verify_post_upgrade_readiness(
                 .previous_session
                 .as_deref()
                 .is_none_or(|prev| prev != sess);
-            if ready && ver == spec.target_version && seen >= last_seen && session_changed && local_ok {
+            if ready
+                && ver == spec.target_version
+                && seen >= last_seen
+                && session_changed
+                && local_ok
+            {
                 if observed_session.as_deref() == Some(sess) {
                     consecutive_samples += 1;
                 } else {

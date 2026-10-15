@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, Weak},
 };
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -76,11 +76,11 @@ impl KeyedLocks {
     }
 }
 
-/// Non-blocking write scope tracker: does not artificially serialize operations
-/// across nested or overlapping directories.
+/// Serializes writes whose workspace roots overlap (`a` is an ancestor or descendant of `b`).
 #[derive(Default)]
 pub(crate) struct WriteScopes {
     held: Mutex<HashMap<String, PathBuf>>,
+    changed: Notify,
 }
 pub(crate) struct WriteGuard {
     scopes: Arc<WriteScopes>,
@@ -98,15 +98,26 @@ impl WriteScopes {
     }
     pub async fn acquire(self: &Arc<Self>, root: &Path) -> Result<WriteGuard> {
         let id = crate::random();
-        let mut held = self
-            .held
-            .lock()
-            .map_err(|_| anyhow::anyhow!("write scope lock poisoned"))?;
-        held.insert(id.clone(), root.to_owned());
-        Ok(WriteGuard {
-            scopes: self.clone(),
-            id,
-        })
+        loop {
+            let notified = self.changed.notified();
+            {
+                let mut held = self
+                    .held
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("write scope lock poisoned"))?;
+                if !held
+                    .values()
+                    .any(|p| p.starts_with(root) || root.starts_with(p))
+                {
+                    held.insert(id.clone(), root.to_owned());
+                    return Ok(WriteGuard {
+                        scopes: self.clone(),
+                        id,
+                    });
+                }
+            }
+            notified.await;
+        }
     }
 }
 impl Drop for WriteGuard {
@@ -114,6 +125,7 @@ impl Drop for WriteGuard {
         if let Ok(mut held) = self.scopes.held.lock() {
             held.remove(&self.id);
         }
+        self.scopes.changed.notify_waiters();
     }
 }
 
@@ -294,13 +306,22 @@ mod tests {
         let _permit = scheduler.acquire(Lane::Transfer).await.unwrap();
     }
     #[tokio::test]
-    async fn overlapping_roots_do_not_block_concurrent_writes() {
+    async fn overlapping_roots_serialize_but_sibling_roots_do_not() {
         let scopes = Arc::new(WriteScopes::default());
-        let _held = scopes.acquire(Path::new("/project/a")).await.unwrap();
+        let held = scopes.acquire(Path::new("/project/a")).await.unwrap();
         let _sibling = scopes.acquire(Path::new("/project/b")).await.unwrap();
         for root in ["/project", "/project/a", "/project/a/nested"] {
-            scopes.acquire(Path::new(root)).await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), scopes.acquire(Path::new(root)))
+                    .await
+                    .is_err()
+            );
         }
+        drop(held);
+        scopes
+            .acquire(Path::new("/project/a/nested"))
+            .await
+            .unwrap();
     }
     #[tokio::test]
     async fn keyed_locks_serialize_only_the_same_resource_and_are_pruned() {

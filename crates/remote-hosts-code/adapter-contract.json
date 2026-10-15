@@ -1,9 +1,9 @@
 {
-  "adapter_tools_sha256": "c94bbe45afcedb7ae4f5ec1a1935ddaaaf6623a6e956103ed6a9c75769111c34",
+  "adapter_tools_sha256": "b3954a50086b095dc8d8a2bf7e4e2905e37b0a4c098ffd9a826f6f0e4888ef76",
   "boundary": "Adapter-sent catalog is not proof of final host exposure. No final host report means unknown.",
   "protocol": 1,
-  "server_tools_sha256": "c94bbe45afcedb7ae4f5ec1a1935ddaaaf6623a6e956103ed6a9c75769111c34",
-  "skill_revision": "6aa3bdbdd86135c9db72bcf2ab8bb8f9017af48fc5c701de898866a7ed1afdc1",
+  "server_tools_sha256": "b3954a50086b095dc8d8a2bf7e4e2905e37b0a4c098ffd9a826f6f0e4888ef76",
+  "skill_revision": "decaf9bdc698f67a2afc15ba8bccb10eef185ef9416e60c1e2be04d1d1f54142",
   "tools": [
     {
       "_meta": {
@@ -322,12 +322,12 @@
         ]
       },
       "annotations": {
-        "destructiveHint": true,
+        "destructiveHint": false,
         "idempotentHint": true,
         "openWorldHint": false,
-        "readOnlyHint": false
+        "readOnlyHint": true
       },
-      "description": "Explicitly resume an owner-bound task-policy rejection after its authorization version changes. Supply exactly one original request_id or operation_id. Only durable not-started requests and never-dispatched queued jobs are eligible. Keeps the original arguments, CAS versions and idempotency identity. Never resumes unknown, running, completed, platform-denied, or source-policy-rejected work.",
+      "description": "Legacy compatibility: observe one original request_id or operation_id. Task authorization is retired; this tool never renews authorization, dispatches or replays work. Pre-upgrade queued bindings remain held for explicit resolution.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -653,7 +653,7 @@
             "type": "integer"
           },
           "max_bytes": {
-            "maximum": 65536,
+            "maximum": 1048576,
             "minimum": 1024,
             "type": "integer"
           },
@@ -723,7 +723,7 @@
             "type": "integer"
           },
           "max_bytes": {
-            "maximum": 65536,
+            "maximum": 1048576,
             "minimum": 1024,
             "type": "integer"
           },
@@ -991,7 +991,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Resolve an existing mutation whose durable agent result is outcome_unknown. This never replays work. resolution=verified_not_applied clears the semantic guard so a later deliberate new operation may run; verified_applied records completion evidence and also clears the guard. Inspect scoped evidence first; the original operation_id and owner must match.",
+      "description": "Resolve an existing mutation whose durable agent result is outcome_unknown. This never replays work. resolution=verified_not_applied clears the semantic guard so a later deliberate new operation may run; verified_applied records completion evidence and also clears the guard. Inspect scoped evidence first; the original operation_id and owner must match. resolution=close_not_enqueued instead requires workspace_id and original_idempotency_key, with no operation_id: atomically seal a code_apply_edits submission key only when no operation exists. A delayed old request then cannot enqueue; an existing operation is returned unchanged.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1007,10 +1007,14 @@
           "operation_id": {
             "type": "string"
           },
+          "original_idempotency_key": {
+            "type": "string"
+          },
           "resolution": {
             "enum": [
               "verified_not_applied",
-              "verified_applied"
+              "verified_applied",
+              "close_not_enqueued"
             ],
             "type": "string"
           },
@@ -1025,6 +1029,9 @@
           },
           "task_id": {
             "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
+            "type": "string"
+          },
+          "workspace_id": {
             "type": "string"
           }
         },
@@ -1219,7 +1226,7 @@
             "type": "boolean"
           },
           "max_bytes": {
-            "maximum": 65536,
+            "maximum": 1048576,
             "minimum": 1024,
             "type": "integer"
           },
@@ -1278,7 +1285,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Start a command in the bound workspace. Default pty=false uses real pipes with stdin EOF and combined stdout/stderr; use pty=true only for interactive input. Shell has local-user authority outside code roots. Write-capable action. By default waits up to 1000 ms so short commands can return exit/output in one call; long commands return the same durable terminal_id. wait_ms may be 0..2000 and never stops the command. Follow the returned cursor; never replay uncertain execution. action=maintenance_task uses fixed argv and the shared ordinary-user maintenance core: prepare requires maintenance_action and a canonical maintenance_request_id; run requires the same ID and plan_sha256; approve records one short-lived approval bound to that plan and authenticated owner/workspace/device; cancel requires the same ID and plan_sha256; verify uses the same ID. A running or unknown request must be recovered through its original operation. Command/PTY fields are forbidden for maintenance; privileged execution remains unavailable. No root grant.",
+      "description": "Execute using the connection's existing account/device and local-user permissions. This server adds no per-command business approval; host confirmations remain host-controlled. Default pty=false uses real pipes with stdin EOF and combined stdout/stderr; use pty=true only for interactive input. Shell has local-user authority outside code roots. Write-capable action. By default waits up to 2000 ms so short commands can return exit/output in one call; long commands return the same durable terminal_id. wait_ms may be 0..60000 and never stops the command.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1347,18 +1354,23 @@
             "minimum": 5,
             "type": "integer"
           },
+          "sudo": {
+            "default": false,
+            "description": "Use device-local OS sudo credentials; noninteractive shell only. Never send a password.",
+            "type": "boolean"
+          },
           "task_id": {
             "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
             "type": "string"
           },
           "timeout_seconds": {
-            "maximum": 7200,
+            "maximum": 86400,
             "minimum": 1,
             "type": "integer"
           },
           "wait_ms": {
-            "default": 1000,
-            "maximum": 2000,
+            "default": 2000,
+            "maximum": 60000,
             "minimum": 0,
             "type": "integer"
           },
@@ -1391,7 +1403,7 @@
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
-        "openWorldHint": true,
+        "openWorldHint": false,
         "readOnlyHint": true
       },
       "description": "Read bounded terminal output. Non-PTY output defaults to token-optimized compact view; PTY defaults full. compact preserves unknown/error text while collapsing known build/test noise and returns measured savings. Cursor always advances over the durable full log; use output_mode=full with raw_cursor_start to inspect source bytes. Poll the same terminal; never rerun.",
@@ -1410,7 +1422,7 @@
             "type": "integer"
           },
           "max_bytes": {
-            "maximum": 65536,
+            "maximum": 1048576,
             "minimum": 1024,
             "type": "integer"
           },
@@ -1612,7 +1624,7 @@
             "type": "string"
           },
           "max_bytes": {
-            "maximum": 131072,
+            "maximum": 4194304,
             "minimum": 4096,
             "type": "integer"
           },
@@ -1650,7 +1662,7 @@
           },
           "wait_ms": {
             "default": 1200,
-            "maximum": 5000,
+            "maximum": 60000,
             "minimum": 0,
             "type": "integer"
           }

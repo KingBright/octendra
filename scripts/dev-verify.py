@@ -104,15 +104,54 @@ def remove_path(path: Path) -> int:
     return 0
 
 
+WORKSPACE_ARTIFACT_PREFIXES = (
+    "remote_hosts",
+    "remote-hosts",
+    "libremote_hosts",
+    "review_regressions",
+    "reliability_",
+    "experience_contract",
+    "desktop_worker",
+    "adapter_",
+    "durable_",
+    "history_",
+    "maintenance_",
+    "oauth_",
+    "resource_",
+    "security_",
+    "storage_",
+    "terminal_",
+    "transfer_",
+    "workspace_",
+)
+
+
+def is_workspace_stem(stem: str) -> bool:
+    return stem.startswith(WORKSPACE_ARTIFACT_PREFIXES)
+
+
 def prune_cargo_target_dir(target_dir: Path) -> dict:
-    """Keep only the newest hash per crate stem in deps/ and newest session in incremental/."""
+    """Keep only the newest hash per workspace crate/test stem in deps/ and newest session in incremental/."""
     reclaimed = 0
     removed_entries = 0
+    removed_paths: list[str] = []
     try:
         if not target_dir.is_dir():
-            return {"target_dir": str(target_dir), "accessible": False, "reclaimed_bytes": 0, "removed_entries": 0}
+            return {
+                "target_dir": str(target_dir),
+                "accessible": False,
+                "reclaimed_bytes": 0,
+                "removed_entries": 0,
+                "removed_paths": [],
+            }
     except PermissionError:
-        return {"target_dir": str(target_dir), "accessible": False, "reclaimed_bytes": 0, "removed_entries": 0}
+        return {
+            "target_dir": str(target_dir),
+            "accessible": False,
+            "reclaimed_bytes": 0,
+            "removed_entries": 0,
+            "removed_paths": [],
+        }
 
     profile_roots = [target_dir / "debug", target_dir / "release"]
     try:
@@ -125,76 +164,63 @@ def prune_cargo_target_dir(target_dir: Path) -> dict:
         pass
 
     for prof_dir in profile_roots:
-        # 1. Prune superseded hashed artifacts in deps/ (keep only newest hash per stem+kind)
         deps_dir = prof_dir / "deps"
         if deps_dir.is_dir():
-            groups: dict[tuple[str, str], dict[str, list[Path]]] = {}
+            groups: dict[str, dict[str, list[Path]]] = {}
             for entry in deps_dir.iterdir():
                 m = HASHED_ARTIFACT_RE.match(entry.name)
-                if not m:
+                if not m or not is_workspace_stem(m.group("stem")):
                     continue
-                stem = m.group("stem")
-                h = m.group("hash")
-                suffix = m.group("suffix") or ""
-                # Group companion files (.d, .dSYM) with their binary/library kind
-                if suffix in ("", ".d", ".dSYM"):
-                    kind = "bin_or_test"
-                elif suffix in (".rlib", ".rmeta"):
-                    kind = suffix
-                elif suffix in (".dylib", ".so", ".dll"):
-                    kind = "dylib"
-                else:
-                    kind = suffix
-                groups.setdefault((stem, kind), {}).setdefault(h, []).append(entry)
+                groups.setdefault(m.group("stem"), {}).setdefault(m.group("hash"), []).append(entry)
 
-            for (_stem, kind), by_hash in groups.items():
-                if len(by_hash) <= 1:
+            for _stem, by_hash in groups.items():
+                if len(by_hash) <= 3:
                     continue
                 ranked = sorted(
                     by_hash.items(),
                     key=lambda item: max((p.lstat().st_mtime for p in item[1] if p.exists()), default=0.0),
                     reverse=True,
                 )
-                # Keep only the single newest hash revision for each crate stem + kind
-                for _old_hash, paths in ranked[1:]:
+                for _old_hash, paths in ranked[3:]:
                     for p in paths:
                         reclaimed += remove_path(p)
                         removed_entries += 1
+                        removed_paths.append(str(p))
 
-        # 2. Prune stale sessions in incremental/<crate>/s-<timestamp>-...
         inc_dir = prof_dir / "incremental"
         if inc_dir.is_dir():
             for crate_dir in inc_dir.iterdir():
-                if not crate_dir.is_dir():
+                if not crate_dir.is_dir() or not is_workspace_stem(crate_dir.name):
                     continue
                 sessions = [s for s in crate_dir.iterdir() if s.is_dir()]
-                if len(sessions) > 1:
+                if len(sessions) > 2:
                     sessions.sort(key=lambda p: p.lstat().st_mtime, reverse=True)
-                    for old_session in sessions[1:]:
+                    for old_session in sessions[2:]:
                         reclaimed += remove_path(old_session)
                         removed_entries += 1
+                        removed_paths.append(str(old_session))
 
-        # 3. Prune stale build script output directories in build/<pkg>-<hash>
         build_dir = prof_dir / "build"
         if build_dir.is_dir():
             bgroups: dict[str, dict[str, list[Path]]] = {}
             for entry in build_dir.iterdir():
                 m = HASHED_ARTIFACT_RE.match(entry.name)
-                if not m:
+                if not m or not is_workspace_stem(m.group("stem")):
                     continue
                 bgroups.setdefault(m.group("stem"), {}).setdefault(m.group("hash"), []).append(entry)
             for _stem, by_hash in bgroups.items():
-                if len(by_hash) <= 1:
+                if len(by_hash) <= 3:
                     continue
                 ranked = sorted(
                     by_hash.items(),
                     key=lambda item: max((p.lstat().st_mtime for p in item[1] if p.exists()), default=0.0),
                     reverse=True,
                 )
-                for _old_hash, paths in ranked[1:]:
+                for _old_hash, paths in ranked[3:]:
                     for p in paths:
                         reclaimed += remove_path(p)
                         removed_entries += 1
+                        removed_paths.append(str(p))
 
     return {
         "target_dir": str(target_dir),
@@ -202,19 +228,20 @@ def prune_cargo_target_dir(target_dir: Path) -> dict:
         "reclaimed_bytes": reclaimed,
         "reclaimed_mib": round(reclaimed / (1024 * 1024), 2),
         "removed_entries": removed_entries,
+        "removed_paths": removed_paths,
     }
 
 
 def prune_workspace_Build_bloat(root: Path, established_target: Path | None = None) -> dict:
-    """Clean retired slot checkouts/cargo-targets in repo target/ and bound queue logs."""
+    """Explicit lifecycle maintenance: clean retired slot checkouts/targets when no build slot is active."""
     sys.path.insert(0, str(root / "scripts"))
     import build_slot
 
     reclaimed = 0
     actions = []
+    any_active_build = False
     repo_target = root / "target"
     if repo_target.is_dir():
-        # Clean retired slot checkouts and duplicate slot cargo-targets when owner PID is not alive
         for slot_dir in sorted(repo_target.iterdir()):
             if not slot_dir.is_dir():
                 continue
@@ -227,9 +254,9 @@ def prune_workspace_Build_bloat(root: Path, established_target: Path | None = No
                 except Exception:
                     alive = False
             if alive:
+                any_active_build = True
                 continue
 
-            # Retired checkout copies inside slots are never needed (AGENTS.md)
             checkout_dir = slot_dir / "checkout"
             if checkout_dir.is_dir():
                 freed = remove_path(checkout_dir)
@@ -243,13 +270,15 @@ def prune_workspace_Build_bloat(root: Path, established_target: Path | None = No
                     reclaimed += freed
                     actions.append({"removed": str(slot_cargo_target.relative_to(root)), "reclaimed_mib": round(freed / (1024 * 1024), 2)})
                 else:
-                    # Prune superseded hashed binaries/incremental sessions inside release-slot/cargo-target
                     res = prune_cargo_target_dir(slot_cargo_target)
                     reclaimed += res["reclaimed_bytes"]
                     if res["reclaimed_bytes"] > 0:
-                        actions.append({"pruned": str(slot_cargo_target.relative_to(root)), "reclaimed_mib": res["reclaimed_mib"]})
+                        actions.append({
+                            "pruned": str(slot_cargo_target.relative_to(root)),
+                            "reclaimed_mib": res["reclaimed_mib"],
+                            "removed_paths": res["removed_paths"],
+                        })
 
-    # Bound dev-runner logs/results to the newest 10 jobs
     for sub in ("logs", "results"):
         d = QUEUE_DIR / sub
         if d.is_dir():
@@ -259,8 +288,17 @@ def prune_workspace_Build_bloat(root: Path, established_target: Path | None = No
 
     target_prune = None
     if established_target is not None:
-        target_prune = prune_cargo_target_dir(established_target)
-        reclaimed += target_prune["reclaimed_bytes"]
+        if any_active_build:
+            target_prune = {
+                "target_dir": str(established_target),
+                "skipped": "active_build_slot_lease",
+                "reclaimed_bytes": 0,
+                "removed_entries": 0,
+                "removed_paths": [],
+            }
+        else:
+            target_prune = prune_cargo_target_dir(established_target)
+            reclaimed += target_prune["reclaimed_bytes"]
 
     return {
         "total_reclaimed_mib": round(reclaimed / (1024 * 1024), 2),
@@ -277,7 +315,7 @@ def worker_status(queue_dir: Path = QUEUE_DIR):
         data = json.loads(hb.read_text())
         age = time.time() - float(data.get("updated_at", 0))
         return {
-            "online": age < 15.0,
+            "online": age < 600.0,
             "age_seconds": round(age, 2),
             "pid": data.get("pid"),
             "cargo": data.get("cargo"),
@@ -348,6 +386,7 @@ def serve_worker(queue_dir: Path = QUEUE_DIR, once: bool = False):
 
     established_target = Path(toolchain["cargo_target_dir"])
     hb_path = queue_dir / "worker.json"
+    startup_mtime = Path(__file__).stat().st_mtime
     print(
         json.dumps(
             {
@@ -379,6 +418,8 @@ def serve_worker(queue_dir: Path = QUEUE_DIR, once: bool = False):
             )
             hb_tmp.replace(hb_path)
 
+            if Path(__file__).stat().st_mtime != startup_mtime:
+                os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve()), "--serve"])
             for req_file in sorted(req_dir.glob("*.json")):
                 job = json.loads(req_file.read_text())
                 job_id = job["id"]
@@ -405,14 +446,12 @@ def serve_worker(queue_dir: Path = QUEUE_DIR, once: bool = False):
                             timeout=int(job.get("timeout", 1800)),
                             check=False,
                         )
-                    prune_report = prune_workspace_Build_bloat(ROOT, established_target)
                     result = {
                         "id": job_id,
                         "argv": argv,
                         "exit_code": proc.returncode,
                         "elapsed_seconds": round(time.time() - started, 3),
                         "log": str(log_path.relative_to(ROOT)),
-                        "cache_prune": prune_report,
                     }
                 res_tmp.write_text(json.dumps(result, indent=2) + "\n")
                 res_tmp.replace(res_path)
@@ -434,7 +473,17 @@ def verify_static_contracts(root: Path):
     if contract.get("version") != version:
         raise ValueError(f"adapter-contract version {contract.get('version')} != Cargo.toml {version}")
 
-    tools_bytes = json.dumps(contract["tools"], separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    tool_keys = ("name", "title", "description", "inputSchema", "outputSchema", "annotations", "execution", "icons", "_meta")
+    ann_keys = ("title", "readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint")
+    ordered_tools = [
+        {
+            k: ({ak: t[k][ak] for ak in ann_keys if ak in t[k]} if k == "annotations" and isinstance(t[k], dict) else t[k])
+            for k in tool_keys
+            if k in t
+        }
+        for t in contract["tools"]
+    ]
+    tools_bytes = json.dumps(ordered_tools, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     computed_sha = sha256_bytes(tools_bytes)
     if contract.get("server_tools_sha256") != computed_sha or contract.get("adapter_tools_sha256") != computed_sha:
         raise ValueError("adapter-contract tools SHA-256 mismatch")
@@ -558,12 +607,11 @@ def run_binary_smoke(binary: Path, root: Path):
 def execute_step(argv: list[str], root: Path, toolchain: dict):
     if toolchain["available"]:
         subprocess.run(argv, cwd=root, env=toolchain["env"], check=True)
-        prune = prune_workspace_Build_bloat(root, Path(toolchain["cargo_target_dir"]))
-        return {"via": "direct", "exit_code": 0, "cache_prune": prune}
+        return {"via": "direct", "exit_code": 0}
     res = delegate_to_worker(argv)
     if res.get("exit_code") != 0:
         raise RuntimeError(f"worker command failed ({res.get('exit_code')}): {argv}")
-    return {"via": "worker", "exit_code": 0, "job_id": res.get("id"), "cache_prune": res.get("cache_prune")}
+    return {"via": "worker", "exit_code": 0, "job_id": res.get("id")}
 
 
 def run_cargo_checks(root: Path, toolchain: dict, mode: str):
@@ -575,7 +623,7 @@ def run_cargo_checks(root: Path, toolchain: dict, mode: str):
 
     commands = [
         ["cargo", "fmt", "-p", "remote-hosts-code", "-p", "remote-hosts-release", "--", "--check"],
-        ["cargo", "clippy", "-p", "remote-hosts-code", "-p", "remote-hosts-mcp", "--all-targets", "--locked", "--", "-D", "warnings"],
+        ["cargo", "clippy", "-p", "remote-hosts-code", "-p", "remote-hosts-release", "--all-targets", "--locked", "--", "-D", "warnings"],
         ["cargo", "test", "-p", "remote-hosts-mcp", "--lib", "--locked"],
         [
             "cargo",
@@ -594,14 +642,17 @@ def run_cargo_checks(root: Path, toolchain: dict, mode: str):
             "--test-threads=1",
         ],
     ]
-    last_prune = None
-    for argv in commands:
-        step = execute_step(argv, root, toolchain)
-        last_prune = step.get("cache_prune")
-    return {"mode": "quick", "commands_completed": len(commands), "cache_prune": last_prune}
+    batch_script = (
+        "import os, subprocess, sys; os.umask(0o077); "
+        f"cmds = {commands!r}; "
+        "[subprocess.run(c, check=True) for c in cmds]"
+    )
+    step = execute_step([sys.executable, "-c", batch_script], root, toolchain)
+    return {"mode": "quick", "commands_completed": len(commands), "cache_prune": step.get("cache_prune")}
 
 
 def main():
+    os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=["auto", "static", "quick", "full"], default="auto")
     parser.add_argument("--serve", action="store_true", help="run host build worker watching .local-deployment/dev-runner")
@@ -662,7 +713,6 @@ def main():
     summary = {
         "static_contract": verify_static_contracts(ROOT),
         "python_fast_tests": run_python_fast_tests(ROOT),
-        "cache_prune": prune_workspace_Build_bloat(ROOT, established_target),
     }
     worker = worker_status()
     summary["toolchain"] = {

@@ -423,10 +423,9 @@ async fn connection_and_device_scope_revocation_still_block_execution() {
         owner: "other".into(),
         scopes: vec!["code:read".into()],
     };
-    let result = receipts::invoke(&f.g, &limited, "terminal_exec", args.clone(), &request_id())
-        .await
-        .unwrap();
-    assert!(result.get("error").is_some(), "{result}");
+    let result =
+        receipts::invoke(&f.g, &limited, "terminal_exec", args.clone(), &request_id()).await;
+    assert!(result.is_err());
     std::sync::Arc::make_mut(&mut f.g.config).devices.clear();
     let result = call(&f, "terminal_exec", args).await;
     assert!(result.get("error").is_some(), "{result}");

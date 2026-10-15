@@ -270,10 +270,7 @@ mod tests {
         }
         let e = exposure(&h, &p);
         assert_eq!(e["connector_catalog"]["status"], "reported_match");
-        assert_eq!(
-            e["current_session_exposure"]["status"],
-            "reported_match"
-        );
+        assert_eq!(e["current_session_exposure"]["status"], "reported_match");
     }
     #[test]
     fn full_scope_hashes_keep_existing_catalog_headers_compatible() {

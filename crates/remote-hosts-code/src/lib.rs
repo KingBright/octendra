@@ -289,6 +289,14 @@ pub fn read_config<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_slice(&std::fs::read(path)?).context("invalid config")
 }
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_private_with_owner_target(path, bytes, None)
+}
+
+fn write_private_with_owner_target(
+    path: &Path,
+    bytes: &[u8],
+    owner_override: Option<(u32, u32)>,
+) -> Result<()> {
     use std::io::Write;
     let existing = match std::fs::symlink_metadata(path) {
         Ok(meta) => {
@@ -312,17 +320,69 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
             .map(|meta| meta.permissions().mode() & 0o700)
             .filter(|mode| *mode != 0)
             .unwrap_or(0o600);
-        file.as_file()
-            .set_permissions(std::fs::Permissions::from_mode(mode))?;
-        if let Some(meta) = &existing {
-            fchown(file.as_file(), Some(meta.uid()), Some(meta.gid()))
+        if let Some((uid, gid)) =
+            owner_override.or_else(|| existing.as_ref().map(|meta| (meta.uid(), meta.gid())))
+        {
+            fchown(file.as_file(), Some(uid), Some(gid))
                 .context("preserve existing private file ownership")?;
         }
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(mode))?;
     }
     file.write_all(bytes)?;
     file.as_file().sync_all()?;
     file.persist(path)?;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn enroll_device(
+    gateway_config: &Path,
+    agent_config: &Path,
+    name: String,
+    state_dir: PathBuf,
+    root: Vec<PathBuf>,
+    allow_write: bool,
+    allow_exec: bool,
+    shell: PathBuf,
+) -> Result<String> {
+    ensure!(
+        !agent_config.exists(),
+        "refusing to overwrite device identity"
+    );
+    let mut g: GatewayConfig = read_config(gateway_config)?;
+    ensure!(
+        !g.devices.iter().any(|d| d.name == name),
+        "device name already enrolled"
+    );
+    let id = uuid::Uuid::new_v4().to_string();
+    let token = random();
+    let mut scopes = vec!["code:read".into()];
+    if allow_write {
+        scopes.push("code:write".into());
+    }
+    if allow_exec {
+        scopes.push("terminal:exec".into());
+    }
+    g.devices.push(DeviceRegistration {
+        id: id.clone(),
+        name,
+        token_hash: hash(&token),
+        scopes,
+    });
+    let a = AgentConfig {
+        gateway_url: g.public_url.clone(),
+        device_id: id.clone(),
+        device_token: token,
+        state_dir,
+        roots: root,
+        allow_write,
+        allow_exec,
+        shell,
+    };
+    write_private(agent_config, &serde_json::to_vec_pretty(&a)?)?;
+    write_private(gateway_config, &serde_json::to_vec_pretty(&g)?)?;
+    Ok(id)
 }
 pub fn validate_url(value: &str) -> Result<reqwest::Url> {
     let url = reqwest::Url::parse(value)?;
@@ -343,7 +403,7 @@ pub fn validate_url(value: &str) -> Result<reqwest::Url> {
 #[cfg(all(test, unix))]
 mod private_file_tests {
     use super::*;
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, chown};
 
     #[test]
     fn write_private_preserves_existing_private_mode_and_owner_on_update() {
@@ -358,5 +418,91 @@ mod private_file_tests {
         assert_eq!(after.uid(), before.uid());
         assert_eq!(after.gid(), before.gid());
         assert_eq!(std::fs::read(&path).unwrap(), b"{\"v\":2}");
+    }
+
+    #[test]
+    fn enroll_device_preserves_gateway_owner_group_and_private_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let gw_path = dir.path().join("gateway.json");
+        let ag_path = dir.path().join("agent.json");
+        let project_root = dir.path().join("workspace");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let gw = GatewayConfig {
+            forge_browser: None,
+            public_url: "https://mcp.example.com:8443".into(),
+            bind: "127.0.0.1:18787".into(),
+            state_dir: dir.path().join("gw-state"),
+            owner: "owner".into(),
+            password_hash: "argon2-fixture".into(),
+            devices: vec![],
+            redirect_uris: vec!["https://chatgpt.com/connector_platform_oauth_redirect".into()],
+            allowed_origins: default_mcp_client_origins(),
+        };
+        write_private(&gw_path, &serde_json::to_vec_pretty(&gw).unwrap()).unwrap();
+        let initial_meta = std::fs::symlink_metadata(&gw_path).unwrap();
+        let mut gids = [0 as nix::libc::gid_t; 64];
+        let count = unsafe { nix::libc::getgroups(gids.len() as i32, gids.as_mut_ptr()) };
+        if count > 0 {
+            for &gid in &gids[..count as usize] {
+                if gid != initial_meta.gid()
+                    && chown(&gw_path, Some(initial_meta.uid()), Some(gid)).is_ok()
+                {
+                    break;
+                }
+            }
+        }
+        let before = std::fs::symlink_metadata(&gw_path).unwrap();
+        let enrolled_id = enroll_device(
+            &gw_path,
+            &ag_path,
+            "prod-workstation".into(),
+            dir.path().join("ag-state"),
+            vec![project_root],
+            true,
+            true,
+            PathBuf::from("/bin/zsh"),
+        )
+        .unwrap();
+        let after = std::fs::symlink_metadata(&gw_path).unwrap();
+        let ag_meta = std::fs::symlink_metadata(&ag_path).unwrap();
+        assert_eq!(after.permissions().mode() & 0o777, 0o600);
+        assert_eq!(ag_meta.permissions().mode() & 0o777, 0o600);
+        assert_eq!(after.uid(), before.uid());
+        assert_eq!(after.gid(), before.gid());
+        let updated_gw: GatewayConfig = read_config(&gw_path).unwrap();
+        let created_ag: AgentConfig = read_config(&ag_path).unwrap();
+        assert_eq!(created_ag.device_id, enrolled_id);
+        assert_eq!(updated_gw.devices.len(), 1);
+        assert_eq!(updated_gw.devices[0].id, enrolled_id);
+        assert_eq!(
+            updated_gw.devices[0].token_hash,
+            hash(&created_ag.device_token)
+        );
+    }
+
+    #[test]
+    fn write_private_cross_user_chown_failure_aborts_without_clobbering_gateway_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway.json");
+        write_private(&path, b"{\"original\":true}").unwrap();
+        let before = std::fs::symlink_metadata(&path).unwrap();
+        if unsafe { nix::libc::geteuid() } != 0 {
+            let foreign_uid = before.uid().saturating_add(10_000);
+            let err = write_private_with_owner_target(
+                &path,
+                b"{\"clobbered\":true}",
+                Some((foreign_uid, before.gid())),
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("preserve existing private file ownership")
+            );
+            let after = std::fs::symlink_metadata(&path).unwrap();
+            assert_eq!(after.uid(), before.uid());
+            assert_eq!(after.gid(), before.gid());
+            assert_eq!(after.permissions().mode() & 0o777, 0o600);
+            assert_eq!(std::fs::read(&path).unwrap(), b"{\"original\":true}");
+        }
     }
 }

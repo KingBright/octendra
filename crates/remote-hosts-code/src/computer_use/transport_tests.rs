@@ -52,6 +52,16 @@ pub(crate) fn identity() -> Identity {
     }
 }
 pub(crate) fn fixture(path: &Path, lock_path: &Path, id: &Identity, mode: &str) -> NativeWorkers {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::create_dir_all(path);
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+        if let Some(parent) = lock_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+    }
     let mut workers = NativeWorkers::disabled(path);
     workers.lock_path = lock_path.into();
     let a = LaunchApproval {

@@ -413,6 +413,12 @@ pub fn resolve_operation_coordination_scope(
 }
 
 /// Resolves one or more exact resource scopes.
+///
+/// # Errors
+///
+/// Returns [`WorkspaceOperationError::InvalidCoordinationScope`] when both singular and plural
+/// scope fields are provided, when `coordination_scopes` is outside `1..=16`, or when any scope
+/// entry is malformed.
 pub fn resolve_operation_coordination_scopes(
     workspace: &AgentWorkspace,
     requested_scope: Option<&str>,

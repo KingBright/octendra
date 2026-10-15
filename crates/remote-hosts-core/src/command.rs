@@ -448,7 +448,9 @@ fn validate_shell_profile(profile: &CommandProfile) -> Result<(), CommandValidat
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandClass, CommandProfile, CommandProfileCatalog, CommandProfileResolutionError};
+    use super::{
+        CommandClass, CommandProfile, CommandProfileCatalog, CommandProfileResolutionError,
+    };
     use crate::ServerProtectionPolicy;
 
     fn readonly_profile(program: &str, args: Vec<String>) -> CommandProfile {

@@ -317,7 +317,7 @@ async fn unchanged_wait_is_bounded_and_does_not_renew_job() {
 }
 #[tokio::test]
 async fn permission_checks_cover_every_id_before_batch_output() {
-    let (_d, g, mut p, _) = fixture().await;
+    let (_d, g, p, _) = fixture().await;
     let read = insert(&g, "code_read", Some(json!({"private":"data"}))).await;
     let write = insert(&g, "code_apply_edits", None).await;
     let mut foreign = p.clone();

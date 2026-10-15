@@ -299,10 +299,7 @@ fn catalog_schema_rejects_nested_unknown_fields_types_and_bounds() {
         .remove("expected_version");
     assert!(validate("code_apply_edits", &optional_version).is_ok());
     let mut bad = valid;
-    bad["files"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("path");
+    bad["files"][0].as_object_mut().unwrap().remove("path");
     assert!(validate("code_apply_edits", &bad).is_err());
     for limit in [json!(0), json!(501), json!("10"), json!(1.5), Value::Null] {
         assert!(validate("code_list", &json!({"workspace_id":"w","limit":limit})).is_err());

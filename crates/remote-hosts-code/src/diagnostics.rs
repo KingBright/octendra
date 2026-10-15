@@ -259,7 +259,7 @@ pub(crate) fn error(tool: &str, message: &str, operation: Option<&str>, stage: &
     };
     json!({"error":"tool_failed","error_code":code,"message":code,
         "stage":stage,"failure_boundary":failure_boundary,"last_confirmed_stage":last_confirmed_stage,
-        "execution_state":execution_state,"outcome":outcome,"recovery_action":recovery,
+        "execution_state":execution_state,"execution_started":execution_state != "not_started","outcome":outcome,"recovery_action":recovery,
         "retry_policy":retry_policy,"user_action":user_action,"observed_at":now(),
         "evidence":{"error_code":code,"sanitized":true},
         "automatic_replay_safe":false,"operation_id":operation,"tool":tool,"diagnostic_protocol":2})

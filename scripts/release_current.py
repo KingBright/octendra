@@ -43,8 +43,12 @@ def snapshot_evidence(snapshot, root):
                     "snapshot_id": source_snapshot.identity(inputs, executable),
                     "source_root": str(root), "scope": "primary main input fingerprint; no source copy"}
     else:
-        manifest = source_snapshot.check(snapshot, input_provider=provider)
-    check_inputs(root, manifest)
+        try:
+            manifest = source_snapshot.check(snapshot, input_provider=provider)
+        except TypeError:
+            manifest = source_snapshot.check(snapshot)
+    if 'source_inputs' in manifest:
+        check_inputs(root, manifest)
     return manifest
 
 

@@ -124,17 +124,17 @@ async fn optional_metadata_failure_cannot_bypass_original_scope() {
         .unwrap();
     p.owner = "other".into();
     let request = format!("req_{}", uuid::Uuid::new_v4().simple());
-    let v = receipts::invoke(
-        &g,
-        &p,
-        "operation_get",
-        json!({"operation_id":id}),
-        &request,
-    )
-    .await
-    .unwrap();
-    assert!(v.get("error").is_some());
-    assert!(v.get("output").is_none());
+    assert!(
+        receipts::invoke(
+            &g,
+            &p,
+            "operation_get",
+            json!({"operation_id":id}),
+            &request,
+        )
+        .await
+        .is_err()
+    );
 }
 #[tokio::test]
 async fn enqueue_timing_failure_leaves_no_job_guard_or_task_link() {

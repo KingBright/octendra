@@ -2,9 +2,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
-use remote_hosts_code::{
-    AgentConfig, DeviceRegistration, GatewayConfig, hash, random, read_config, write_private,
-};
+use remote_hosts_code::{AgentConfig, GatewayConfig, random, read_config, write_private};
 use std::{fs::OpenOptions, net::SocketAddr, path::PathBuf};
 
 #[derive(Parser)]
@@ -353,42 +351,16 @@ async fn main() -> Result<()> {
             allow_exec,
             shell,
         } => {
-            ensure!(
-                !agent_config.exists(),
-                "refusing to overwrite device identity"
-            );
-            let mut g: GatewayConfig = read_config(&gateway_config)?;
-            ensure!(
-                !g.devices.iter().any(|d| d.name == name),
-                "device name already enrolled"
-            );
-            let id = uuid::Uuid::new_v4().to_string();
-            let token = random();
-            let mut scopes = vec!["code:read".into()];
-            if allow_write {
-                scopes.push("code:write".into())
-            }
-            if allow_exec {
-                scopes.push("terminal:exec".into())
-            }
-            g.devices.push(DeviceRegistration {
-                id: id.clone(),
+            let id = remote_hosts_code::enroll_device(
+                &gateway_config,
+                &agent_config,
                 name,
-                token_hash: hash(&token),
-                scopes,
-            });
-            let a = AgentConfig {
-                gateway_url: g.public_url.clone(),
-                device_id: id.clone(),
-                device_token: token,
                 state_dir,
-                roots: root,
+                root,
                 allow_write,
                 allow_exec,
                 shell,
-            };
-            write_private(&agent_config, &serde_json::to_vec_pretty(&a)?)?;
-            write_private(&gateway_config, &serde_json::to_vec_pretty(&g)?)?;
+            )?;
             println!("Enrolled device {id}; reload gateway configuration before connecting.");
         }
         Command::RegisterOauthClient {

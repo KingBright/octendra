@@ -183,8 +183,14 @@ mod tests {
         let (_d, s) = fixture().await;
         let worker = add(&s, "desktop_worker").await;
         add(&s, "desktop_frame").await;
+        let mut non_transfer = selection();
+        non_transfer.lanes = r#"["read","write","terminal","control"]"#;
         assert_eq!(
-            claim(&s, &selection(), crate::now()).await.unwrap().unwrap().0,
+            claim(&s, &non_transfer, crate::now())
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
             worker
         );
         let mut frame = selection();
@@ -354,11 +360,7 @@ mod tests {
         let mut limited = selection();
         limited.scopes = r#"["code:read"]"#;
         assert_eq!(
-            claim(&s, &limited, crate::now())
-                .await
-                .unwrap()
-                .unwrap()
-                .0,
+            claim(&s, &limited, crate::now()).await.unwrap().unwrap().0,
             id
         );
     }

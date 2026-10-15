@@ -153,17 +153,17 @@ async fn observation_rechecks_scope_and_device_permission() {
     let id = f.job(0, "done", Some(terminal("exited", now()))).await;
     let mut limited = f.p.clone();
     limited.owner = "other".into();
-    let value = receipts::invoke(
-        &f.g,
-        &limited,
-        "operation_get",
-        json!({"operation_id":id,"wait_ms":0}),
-        &request_id(),
-    )
-    .await
-    .unwrap();
-    assert!(value.get("error").is_some());
-    assert!(value.get("output").is_none());
+    assert!(
+        receipts::invoke(
+            &f.g,
+            &limited,
+            "operation_get",
+            json!({"operation_id":id,"wait_ms":0}),
+            &request_id(),
+        )
+        .await
+        .is_err()
+    );
     std::sync::Arc::make_mut(&mut f.g.config).devices.clear();
     let value = receipts::invoke(
         &f.g,
