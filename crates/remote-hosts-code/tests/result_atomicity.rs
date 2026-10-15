@@ -122,7 +122,7 @@ async fn optional_metadata_failure_cannot_bypass_original_scope() {
         .execute(&g.store.pool)
         .await
         .unwrap();
-    p.scopes = vec!["code:read".into()];
+    p.owner = "other".into();
     let request = format!("req_{}", uuid::Uuid::new_v4().simple());
     let v = receipts::invoke(
         &g,

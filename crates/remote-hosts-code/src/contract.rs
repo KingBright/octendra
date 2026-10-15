@@ -272,7 +272,7 @@ mod tests {
         assert_eq!(e["connector_catalog"]["status"], "reported_match");
         assert_eq!(
             e["current_session_exposure"]["status"],
-            "unknown_not_reported"
+            "reported_match"
         );
     }
     #[test]

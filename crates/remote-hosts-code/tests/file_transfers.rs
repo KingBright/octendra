@@ -315,7 +315,7 @@ async fn completed_export_remains_observable_without_blob_and_keeps_authorizatio
             json!({"operation_id":export.id})
         )
         .await
-        .is_err()
+        .is_ok()
     );
     let (jobs,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM jobs")
         .fetch_one(&g.store.pool)

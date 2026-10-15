@@ -289,14 +289,34 @@ pub fn read_config<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 }
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
+    let existing = match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            ensure!(
+                meta.is_file() && !meta.file_type().is_symlink(),
+                "refusing to replace non-regular private file"
+            );
+            Some(meta)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
     let parent = path.parent().context("file needs parent")?;
     std::fs::create_dir_all(parent)?;
     let mut file = tempfile::NamedTempFile::new_in(parent)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, fchown};
+        let mode = existing
+            .as_ref()
+            .map(|meta| meta.permissions().mode() & 0o700)
+            .filter(|mode| *mode != 0)
+            .unwrap_or(0o600);
         file.as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            .set_permissions(std::fs::Permissions::from_mode(mode))?;
+        if let Some(meta) = &existing {
+            fchown(file.as_file(), Some(meta.uid()), Some(meta.gid()))
+                .context("preserve existing private file ownership")?;
+        }
     }
     file.write_all(bytes)?;
     file.as_file().sync_all()?;
@@ -317,4 +337,25 @@ pub fn validate_url(value: &str) -> Result<reqwest::Url> {
     );
     ensure!(!value.ends_with('/'), "omit trailing slash from public URL");
     Ok(url)
+}
+
+#[cfg(all(test, unix))]
+mod private_file_tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    #[test]
+    fn write_private_preserves_existing_private_mode_and_owner_on_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway.json");
+        write_private(&path, b"{\"v\":1}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let before = std::fs::symlink_metadata(&path).unwrap();
+        write_private(&path, b"{\"v\":2}").unwrap();
+        let after = std::fs::symlink_metadata(&path).unwrap();
+        assert_eq!(after.permissions().mode() & 0o777, 0o600);
+        assert_eq!(after.uid(), before.uid());
+        assert_eq!(after.gid(), before.gid());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\"v\":2}");
+    }
 }

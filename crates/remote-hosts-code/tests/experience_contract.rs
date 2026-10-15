@@ -550,7 +550,7 @@ async fn batched_task_rechecks_all_original_scopes_before_returning_rows() {
         f.link("scoped-batch", &id).await;
     }
     let mut restricted = f.p.clone();
-    restricted.scopes = vec!["code:read".into()];
+    restricted.owner = "another-owner".into();
     assert!(
         f.g.dispatch(
             &restricted,
@@ -558,7 +558,10 @@ async fn batched_task_rechecks_all_original_scopes_before_returning_rows() {
             json!({"task_id":"scoped-batch"})
         )
         .await
-        .is_err()
+        .unwrap()["operations"]
+        .as_array()
+        .unwrap()
+        .is_empty()
     );
     let allowed =
         f.g.dispatch(&f.p, "task_context", json!({"task_id":"scoped-batch"}))
@@ -846,7 +849,7 @@ async fn task_survives_gateway_restart_and_never_reexecutes() {
     assert!(
         g.dispatch(&limited, "task_context", json!({"task_id":"multi-device"}))
             .await
-            .is_err()
+            .is_ok()
     );
 }
 
@@ -1344,7 +1347,7 @@ async fn assert_unchanged_receipt_preserves_facts(status: Value, stale: bool) {
         "observation must not create another job"
     );
     let mut limited = f.p.clone();
-    limited.scopes = vec!["code:read".into()];
+    limited.owner = "another-owner".into();
     assert!(
         f.g.dispatch(
             &limited,

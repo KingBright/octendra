@@ -66,8 +66,8 @@ async fn fixture() -> (
     (tmp, a, g, ws, server)
 }
 fn original(a: &Agent, ws: &Workspace, path: &str) -> Job {
-    let source = include_str!("../../remote-hosts-connector/src/lib.rs");
-    assert!(source.len() > 512 * 1024);
+    let source = include_str!("../../remote-hosts-connector/src/lib.rs").repeat(12);
+    assert!(source.len() > crate::payload_budget::POLL_BYTES);
     eprintln!("real_source_size={}", source.len());
     Job {
         id: uuid::Uuid::new_v4().to_string(),
@@ -102,7 +102,11 @@ async fn real_source_chunked_atomic_cas_and_duplicate_receipt() {
     let data = std::fs::read(ws.root.join("large.rs")).unwrap();
     assert_eq!(
         crate::hash(&data),
-        crate::hash(include_bytes!("../../remote-hosts-connector/src/lib.rs"))
+        crate::hash(
+            include_str!("../../remote-hosts-connector/src/lib.rs")
+                .repeat(12)
+                .as_bytes()
+        )
     );
     let op = a
         .store
@@ -167,7 +171,7 @@ async fn real_source_verified_checkpoint_resumes_without_rewriting_destination()
     a.execute_report(&d, descriptor).await.unwrap();
     assert_eq!(
         std::fs::metadata(ws.root.join("resume.rs")).unwrap().len(),
-        765943
+        (include_str!("../../remote-hosts-connector/src/lib.rs").len() * 12) as u64
     );
     server.abort();
 }
@@ -342,7 +346,7 @@ async fn payload_admission_rejection_has_durable_request_without_remote_job() {
     assert_eq!(saved["state"], "gateway_rejected");
     assert!(saved["operation_id"].is_null());
     let terminal_request = format!("req_{}", uuid::Uuid::new_v4().simple());
-    let result=crate::receipts::invoke(&g,&principal,"terminal_exec",json!({"workspace_id":ws.id,"idempotency_key":"oversized-command","command":"x".repeat(65537)}),&terminal_request).await.unwrap();
+    let result=crate::receipts::invoke(&g,&principal,"terminal_exec",json!({"workspace_id":ws.id,"idempotency_key":"oversized-command","command":"x".repeat(crate::payload_budget::COMMAND_BYTES + 1)}),&terminal_request).await.unwrap();
     assert_eq!(result["error_code"], "payload_too_large");
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
         .fetch_one(&g.store.pool)
@@ -557,7 +561,7 @@ async fn payload_feature_registration_uses_bytes_not_feature_count() {
     );
     request["session"] = json!("b".repeat(64));
     // Actual encoded bytes, not the number of features, define the resource boundary.
-    request["runtime_features"]["names"] = json!(vec!["x".repeat(64); 8192]);
+    request["runtime_features"]["names"] = json!(vec!["x".repeat(64); 131072]);
     assert!(serde_json::to_vec(&request).unwrap().len() > crate::payload_budget::POLL_BYTES);
     assert_eq!(
         payload_poll_http(&a, &request).await,

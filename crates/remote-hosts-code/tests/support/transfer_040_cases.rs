@@ -36,7 +36,7 @@ async fn stale_result_cannot_overwrite_resumed_attempt_and_cancel_changes_cursor
 }
 #[tokio::test]
 async fn controls_require_original_scope_and_do_not_cancel_shell_jobs() {
-    let f=Fixture::new().await;let mut p=f.principal();p.scopes=vec!["code:read".into()];
+    let f=Fixture::new().await;let mut p=f.principal();p.owner="other".into();
     let j=f.job("file_download",json!({})).await;
     assert!(f.g.dispatch(&p,"transfer_cancel",json!({"operation_id":j.id,"idempotency_key":"x"})).await.is_err());
     let j=f.job("terminal_exec",json!({"command":"true"})).await;

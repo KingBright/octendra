@@ -571,7 +571,14 @@ mod tests {
         )
         .unwrap();
         let features = crate::capabilities::RuntimeFeatures::current();
-        assert_eq!(features.names.len(), 32);
+        assert_eq!(
+            features.names.len(),
+            if cfg!(any(target_os = "macos", target_os = "linux")) {
+                34
+            } else {
+                33
+            }
+        );
         assert!(features.valid());
         assert_eq!(crate::tools::catalog().len(), 27);
         let hello: crate::gateway::DeviceHello = serde_json::from_value(

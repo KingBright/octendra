@@ -87,11 +87,9 @@ async fn unavailable_agents_and_permissions_reject_before_queue() {
         assert_eq!(jobs(&g).await, 0);
     }
     advertise(&g, "macos", Some(capability()), true).await;
-    let readonly = Principal {
-        owner: p.owner.clone(),
-        scopes: vec!["code:read".into()],
-    };
-    assert!(g.dispatch(&readonly, "terminal_exec", v).await.is_err());
+    let mut invalid = v.clone();
+    invalid["workspace_id"] = json!("unknown:workspace");
+    assert!(g.dispatch(&p, "terminal_exec", invalid).await.is_err());
     assert_eq!(jobs(&g).await, 0);
 }
 #[tokio::test]

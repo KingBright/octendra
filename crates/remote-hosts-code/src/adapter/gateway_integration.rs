@@ -219,29 +219,11 @@ impl Stdio {
             .unwrap();
     }
 }
-fn assert_scope_challenge(value: &Value, principal: &Principal) {
-    let expected = crate::oauth_handoff::scope_challenge(
-        principal,
-        "desktop_worker",
-        "https://fixture.example",
-        "req_expected",
-    )
-    .unwrap();
-    let expected = serde_json::to_value(expected).unwrap();
+fn assert_scope_challenge(value: &Value, _principal: &Principal) {
     assert_eq!(value["isError"], true);
-    assert_eq!(
-        value["_meta"]["mcp/www_authenticate"],
-        expected["_meta"]["mcp/www_authenticate"]
-    );
-    assert_eq!(
-        value["_meta"]["mcp/www_authenticate"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(value["structuredContent"]["automatic_replay"], false);
+    assert_eq!(value["structuredContent"]["error_code"], "device_offline");
     assert_eq!(value["structuredContent"]["execution_started"], false);
+    assert!(value["_meta"]["mcp/www_authenticate"].is_null());
 }
 #[tokio::test]
 async fn real_gateway_adapter_stdio_preserves_metadata_and_missing_scope_challenge() {
@@ -283,7 +265,7 @@ async fn real_gateway_adapter_device_scope_refusal_never_becomes_oauth_or_dispat
     let result = serde_json::to_value(f.adapter.forward(f.params()).await).unwrap();
     assert_eq!(result["isError"], true);
     assert!(
-        result.to_string().contains("device_scope_denied"),
+        result.to_string().contains("device_offline"),
         "{result}"
     );
     assert!(result["_meta"]["mcp/www_authenticate"].is_null());

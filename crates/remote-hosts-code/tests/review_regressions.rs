@@ -292,11 +292,17 @@ fn catalog_schema_rejects_nested_unknown_fields_types_and_bounds() {
     let mut bad = valid.clone();
     bad["files"][0]["unexpected"] = json!(true);
     assert!(validate("code_apply_edits", &bad).is_err());
+    let mut optional_version = valid.clone();
+    optional_version["files"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("expected_version");
+    assert!(validate("code_apply_edits", &optional_version).is_ok());
     let mut bad = valid;
     bad["files"][0]
         .as_object_mut()
         .unwrap()
-        .remove("expected_version");
+        .remove("path");
     assert!(validate("code_apply_edits", &bad).is_err());
     for limit in [json!(0), json!(501), json!("10"), json!(1.5), Value::Null] {
         assert!(validate("code_list", &json!({"workspace_id":"w","limit":limit})).is_err());

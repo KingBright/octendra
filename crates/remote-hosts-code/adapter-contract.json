@@ -1,8 +1,8 @@
 {
-  "adapter_tools_sha256": "a3010f9f607f92f41f536d8ded0a2f02acec7b354c76c27935ed35cfd0922f73",
+  "adapter_tools_sha256": "c94bbe45afcedb7ae4f5ec1a1935ddaaaf6623a6e956103ed6a9c75769111c34",
   "boundary": "Adapter-sent catalog is not proof of final host exposure. No final host report means unknown.",
   "protocol": 1,
-  "server_tools_sha256": "a3010f9f607f92f41f536d8ded0a2f02acec7b354c76c27935ed35cfd0922f73",
+  "server_tools_sha256": "c94bbe45afcedb7ae4f5ec1a1935ddaaaf6623a6e956103ed6a9c75769111c34",
   "skill_revision": "6aa3bdbdd86135c9db72bcf2ab8bb8f9017af48fc5c701de898866a7ed1afdc1",
   "tools": [
     {
@@ -877,7 +877,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Apply precise replacements, a unified patch, or full content. expected_version is optional: when omitted, edits/creates/deletes apply directly without CAS; when supplied, literal absent is required for create and the current file SHA-256 for edit/delete. Return compact diffs.",
+      "description": "Apply precise replacements, a unified patch, or full content only. Optional expected_version: omit to apply without CAS, or supply expected_version=\"absent\" for create and the current file SHA-256 for edit/delete. Return compact diffs.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -923,7 +923,7 @@
                   "type": "array"
                 },
                 "expected_version": {
-                  "description": "Optional CAS version: literal absent for create; current file SHA-256 for edit/delete. Omit to apply without CAS check.",
+                  "description": "Optional CAS version: literal absent for create; current file SHA-256 for edit/delete; empty string is not a missing-file marker. Omit to apply without CAS check.",
                   "type": "string"
                 },
                 "patch": {
@@ -1668,6 +1668,14 @@
       "_meta": {
         "openai/fileParams": [
           "file"
+        ],
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:write"
+            ],
+            "type": "oauth2"
+          }
         ]
       },
       "annotations": {
@@ -1981,6 +1989,14 @@
       "_meta": {
         "openai/fileParams": [
           "file"
+        ],
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:write"
+            ],
+            "type": "oauth2"
+          }
         ]
       },
       "annotations": {

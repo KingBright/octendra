@@ -259,7 +259,7 @@ mod tests {
     }
     #[test]
     fn large_text_uses_small_envelope_with_exact_identity() {
-        let original = job("文\n\"".repeat(160000));
+        let original = job("文\n\"".repeat(1_600_000));
         assert!(admit(&original, false).is_err());
         admit(&original, true).unwrap();
         let data = serde_json::to_vec(&original.arguments).unwrap();

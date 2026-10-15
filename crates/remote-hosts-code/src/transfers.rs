@@ -1668,9 +1668,17 @@ mod tests {
         drop(file);
         stage.publish().unwrap();
         assert_eq!(std::fs::read(ws.root.join("assets/a.bin")).unwrap(), bytes);
-        assert!(Staged::new(&ws, &json!({"path":"assets/a.bin"})).is_err());
+        assert!(Staged::new(&ws, &json!({"path":"assets/a.bin"})).is_ok());
+        assert!(
+            Staged::new(
+                &ws,
+                &json!({"path":"assets/a.bin","expected_version":"absent"})
+            )
+            .is_err()
+        );
         assert!(Staged::new(&ws, &json!({"path":"../outside"})).is_err());
-        let (stage, mut file) = Staged::new(&ws, &json!({"path":"new.bin"})).unwrap();
+        let (stage, mut file) =
+            Staged::new(&ws, &json!({"path":"new.bin","expected_version":"absent"})).unwrap();
         file.write_all(bytes).unwrap();
         drop(file);
         std::fs::write(ws.root.join("new.bin"), b"concurrent").unwrap();

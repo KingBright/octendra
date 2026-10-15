@@ -152,7 +152,7 @@ async fn observation_rechecks_scope_and_device_permission() {
     let mut f = Fixture::new().await;
     let id = f.job(0, "done", Some(terminal("exited", now()))).await;
     let mut limited = f.p.clone();
-    limited.scopes = vec!["code:read".into()];
+    limited.owner = "other".into();
     let value = receipts::invoke(
         &f.g,
         &limited,
@@ -164,7 +164,7 @@ async fn observation_rechecks_scope_and_device_permission() {
     .unwrap();
     assert!(value.get("error").is_some());
     assert!(value.get("output").is_none());
-    std::sync::Arc::make_mut(&mut f.g.config).devices[0].scopes = vec!["code:read".into()];
+    std::sync::Arc::make_mut(&mut f.g.config).devices.clear();
     let value = receipts::invoke(
         &f.g,
         &f.p,
@@ -256,9 +256,15 @@ async fn failing_error_audit_does_not_turn_denial_into_success() {
     assert_eq!(okay["receipt"]["evidence_complete"], true);
     let mut limited = f.p.clone();
     limited.scopes.clear();
-    let value = receipts::invoke(&f.g, &limited, "devices_list", json!({}), &request_id())
-        .await
-        .unwrap();
+    let value = receipts::invoke(
+        &f.g,
+        &limited,
+        "devices_list",
+        json!({"known_tools_sha256":"invalid"}),
+        &request_id(),
+    )
+    .await
+    .unwrap();
     assert!(value.get("error").is_some());
     assert_eq!(value["receipt"]["durable"], false);
     assert_eq!(

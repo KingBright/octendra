@@ -78,7 +78,11 @@ async fn actual_poll_classifies_http_body_and_recovers_without_executing_work() 
                     )
                         .into_response(),
                     1 => (StatusCode::OK, "bad-json token=never-publish").into_response(),
-                    2 => (StatusCode::OK, "x".repeat(512 * 1024 + 1)).into_response(),
+                    2 => (
+                        StatusCode::OK,
+                        "x".repeat(crate::payload_budget::POLL_BYTES + 1),
+                    )
+                        .into_response(),
                     _ => axum::Json(json!({"job":null})).into_response(),
                 }
             }

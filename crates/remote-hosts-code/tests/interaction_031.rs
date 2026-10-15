@@ -268,7 +268,7 @@ fn new_read_and_wait_options_are_schema_checked() {
     assert!(
         tools::validate(
             "terminal_exec",
-            &json!({"workspace_id":"w","idempotency_key":"a","command":"true","wait_ms":2001})
+            &json!({"workspace_id":"w","idempotency_key":"a","command":"true","wait_ms":60001})
         )
         .is_err()
     );

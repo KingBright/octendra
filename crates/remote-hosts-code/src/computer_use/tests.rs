@@ -82,7 +82,7 @@ async fn typed_gateway_ack_to_four_k_existing_chunk_artifact_and_close() {
             .await
             .unwrap_err()
             .to_string()
-            .contains("insufficient_scope")
+            .contains("device_offline")
     );
     assert!(crate::tools::validate("desktop_worker", &public).is_ok());
     public["task_id"] = json!(Uuid::new_v4());
@@ -523,7 +523,7 @@ fn production_default_and_catalog_remain_unavailable() {
         }),
         Err(ErrorCode::Unavailable)
     );
-    assert_eq!(crate::SCOPES, "code:read code:write terminal:exec");
+    assert_eq!(crate::SCOPES, crate::SUPPORTED_SCOPES);
     for tool in [
         "computer_use_mock",
         "computer_use_open",
@@ -1187,7 +1187,7 @@ async fn private_transport_unknown_journal_and_default_gate_do_not_replay() {
         agent.execute(&disabled).await.unwrap()["error"],
         "unavailable"
     );
-    assert_eq!(crate::SCOPES, "code:read code:write terminal:exec");
+    assert_eq!(crate::SCOPES, crate::SUPPORTED_SCOPES);
     assert_eq!(crate::tools::scope("desktop_worker"), Some("desktop:input"));
     agent.desktop_workers = super::transport::tests::fixture(
         state.path(),

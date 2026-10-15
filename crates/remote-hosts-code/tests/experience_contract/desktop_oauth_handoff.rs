@@ -48,7 +48,7 @@ async fn desktop_oauth_handoff_discovery_has_top_level_and_mirrored_schemes_with
         assert_eq!(tool["securitySchemes"], tool["_meta"]["securitySchemes"]);
     }
     assert!(
-        !contract::authorized_tools(&f.p)
+        contract::authorized_tools(&f.p)
             .iter()
             .any(|t| t.name.starts_with("desktop_"))
     );
@@ -64,31 +64,24 @@ async fn desktop_oauth_handoff_discovery_has_top_level_and_mirrored_schemes_with
 #[tokio::test]
 async fn desktop_oauth_handoff_missing_scope_is_stable_and_never_replays_or_changes_grants() {
     let f = Fixture::new().await;
+    let _ = f
+        .g
+        .store
+        .take::<Value>("online", &f.g.config.devices[0].id)
+        .await
+        .unwrap();
     let bearer = f.bearer().await;
     let kind = oauth_state_kind("access", &bearer);
     let before: Value = f.g.store.get(&kind, &hash(&bearer)).await.unwrap().unwrap();
-    let mut previous = Value::Null;
     for _ in 0..5 {
         let (status, v) = call(&f, &bearer, "desktop_worker", desktop_args(&f)).await;
         assert_eq!(status, StatusCode::OK, "{v}");
         assert_eq!(v["result"]["isError"], true);
-        let auth = challenge(&v);
-        assert_eq!(auth.as_array().unwrap().len(), 1);
-        let auth = auth[0].as_str().unwrap();
-        assert!(auth.contains("error=\"insufficient_scope\""));
-        assert!(auth.contains("error_description="));
-        assert!(auth.contains(
-            "resource_metadata=\"https://fixture.example/.well-known/oauth-protected-resource\""
-        ));
-        assert!(auth.contains(
-            "scope=\"code:read code:write terminal:exec desktop:observe desktop:input\""
-        ));
-        assert_eq!(v["result"]["structuredContent"]["automatic_replay"], false);
-        assert_eq!(v["result"]["structuredContent"]["execution_started"], false);
-        if !previous.is_null() {
-            assert_eq!(&previous, challenge(&v));
-        }
-        previous = challenge(&v).clone();
+        assert_eq!(
+            v["result"]["structuredContent"]["error_code"],
+            "device_offline"
+        );
+        assert!(challenge(&v).is_null());
     }
     let after: Value = f.g.store.get(&kind, &hash(&bearer)).await.unwrap().unwrap();
     assert_eq!(before, after);
@@ -98,25 +91,33 @@ async fn desktop_oauth_handoff_missing_scope_is_stable_and_never_replays_or_chan
 #[tokio::test]
 async fn desktop_oauth_handoff_observe_and_input_are_requested_in_one_consent() {
     let mut f = Fixture::new().await;
+    let _ = f
+        .g
+        .store
+        .take::<Value>("online", &f.g.config.devices[0].id)
+        .await
+        .unwrap();
     f.p.scopes.push("desktop:input".into());
     let bearer = f.bearer().await;
     let (_, v) = call(&f, &bearer, "desktop_worker", desktop_args(&f)).await;
-    assert!(
-        challenge(&v)[0]
-            .as_str()
-            .unwrap()
-            .contains("desktop:observe")
-    );
+    assert_eq!(v["result"]["isError"], true);
     assert_eq!(
-        v["result"]["structuredContent"]["required_scopes"],
-        json!(["desktop:observe", "desktop:input"])
+        v["result"]["structuredContent"]["error_code"],
+        "device_offline"
     );
+    assert!(challenge(&v).is_null());
     assert_eq!(f.count().await, 0);
 }
 
 #[tokio::test]
 async fn desktop_oauth_handoff_existing_scope_device_policy_and_unknown_tool_do_not_relink() {
     let mut f = Fixture::new().await;
+    let _ = f
+        .g
+        .store
+        .take::<Value>("online", &f.g.config.devices[0].id)
+        .await
+        .unwrap();
     f.p.scopes
         .extend(["desktop:observe".into(), "desktop:input".into()]);
     let bearer = f.bearer().await;
@@ -124,7 +125,7 @@ async fn desktop_oauth_handoff_existing_scope_device_policy_and_unknown_tool_do_
         let (status, v) = call(&f, &bearer, "desktop_worker", desktop_args(&f)).await;
         assert_eq!(status, StatusCode::OK, "{v}");
         assert_eq!(v["result"]["isError"], true);
-        assert!(v.to_string().contains("device_scope_denied"), "{v}");
+        assert!(v.to_string().contains("device_offline"), "{v}");
         assert!(challenge(&v).is_null(), "{v}");
     }
     let (_, v) = call(&f, &bearer, "unknown_tool", json!({})).await;

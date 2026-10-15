@@ -320,11 +320,16 @@ async fn permission_checks_cover_every_id_before_batch_output() {
     let (_d, g, mut p, _) = fixture().await;
     let read = insert(&g, "code_read", Some(json!({"private":"data"}))).await;
     let write = insert(&g, "code_apply_edits", None).await;
-    p.scopes = vec!["code:read".into()];
+    let mut foreign = p.clone();
+    foreign.owner = "other".into();
     assert!(
-        g.dispatch(&p, "operation_get", json!({"operation_ids":[read,write]}))
-            .await
-            .is_err()
+        g.dispatch(
+            &foreign,
+            "operation_get",
+            json!({"operation_ids":[read,write]})
+        )
+        .await
+        .is_err()
     );
     assert!(
         g.dispatch(

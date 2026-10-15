@@ -330,7 +330,7 @@ async fn exited_shell_does_not_leave_output_holding_descendants() {
 async fn terminal_capacity_is_released_after_cancellation() {
     let f = Fixture::new().await;
     let mut ids = Vec::new();
-    for _ in 0..8 {
+    for _ in 0..64 {
         ids.push(f.start("sleep 30", false, 10).await);
     }
     let extra = uuid::Uuid::new_v4().to_string();

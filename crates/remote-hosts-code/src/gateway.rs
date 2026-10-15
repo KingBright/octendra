@@ -654,7 +654,18 @@ impl Gateway {
             {
                 crate::payload_budget::command(command)?;
             }
-            let _ = &semantic;
+            if let Some(semantic) = &semantic
+                && let Some((existing_id, state)) = sqlx::query_as::<_, (String, String)>(
+                    "SELECT operation_id,state FROM semantic_guards WHERE semantic=?",
+                )
+                .bind(semantic)
+                .fetch_optional(&self.store.pool)
+                .await?
+            {
+                anyhow::bail!(
+                    "semantic_operation_guarded: operation_id={existing_id} state={state}"
+                );
+            }
             let maintenance = crate::maintenance::view(self, device).await?;
             ensure!(
                 maintenance["state"] != "draining"
@@ -735,7 +746,18 @@ impl Gateway {
                 crate::submission_fence::require_open(&mut transaction, &idem).await?;
             }
             if let Some(semantic) = &semantic {
-                sqlx::query("INSERT OR REPLACE INTO semantic_guards VALUES(?,?,'active',?)")
+                if let Some((existing_id, state)) = sqlx::query_as::<_, (String, String)>(
+                    "SELECT operation_id,state FROM semantic_guards WHERE semantic=?",
+                )
+                .bind(semantic)
+                .fetch_optional(&mut *transaction)
+                .await?
+                {
+                    anyhow::bail!(
+                        "semantic_operation_guarded: operation_id={existing_id} state={state}"
+                    );
+                }
+                sqlx::query("INSERT INTO semantic_guards VALUES(?,?,'active',?)")
                     .bind(semantic)
                     .bind(&id)
                     .bind(now())

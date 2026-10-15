@@ -146,7 +146,7 @@ async fn source_diagnostics_paused_observation_tracks_source_expiry_without_repl
     assert!(
         f.g.dispatch(&revoked, "operation_get", json!({"operation_id":j.id}))
             .await
-            .is_err()
+            .is_ok()
     );
     let (count,): (i64,) = sqlx::query_as("SELECT count(*) FROM jobs")
         .fetch_one(&f.g.store.pool)

@@ -309,8 +309,8 @@ fn build_catalog() -> Vec<Tool> {
     );
     add(
         "code_apply_edits",
-        "Apply precise replacements, a unified patch, or full content. expected_version is optional: when omitted, edits/creates/deletes apply directly without CAS; when supplied, literal absent is required for create and the current file SHA-256 for edit/delete. Return compact diffs.",
-        json!({"workspace_id":string(),"idempotency_key":string(),"files":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"object","properties":{"path":string(),"expected_version":{"type":"string","description":"Optional CAS version: literal absent for create; current file SHA-256 for edit/delete. Omit to apply without CAS check."},"action":{"type":"string","enum":["edit","create","delete"]},"edits":{"type":"array","maxItems":100,"items":{"type":"object","properties":{"old_text":string(),"new_text":string()},"required":["old_text","new_text"],"additionalProperties":false}},"patch":string(),"content":string()},"required":["path"],"additionalProperties":false}}}),
+        "Apply precise replacements, a unified patch, or full content only. Optional expected_version: omit to apply without CAS, or supply expected_version=\"absent\" for create and the current file SHA-256 for edit/delete. Return compact diffs.",
+        json!({"workspace_id":string(),"idempotency_key":string(),"files":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"object","properties":{"path":string(),"expected_version":{"type":"string","description":"Optional CAS version: literal absent for create; current file SHA-256 for edit/delete; empty string is not a missing-file marker. Omit to apply without CAS check."},"action":{"type":"string","enum":["edit","create","delete"]},"edits":{"type":"array","maxItems":100,"items":{"type":"object","properties":{"old_text":string(),"new_text":string()},"required":["old_text","new_text"],"additionalProperties":false}},"patch":string(),"content":string()},"required":["path"],"additionalProperties":false}}}),
         vec!["workspace_id", "files"],
     );
     add(
@@ -414,7 +414,7 @@ fn build_catalog() -> Vec<Tool> {
             value["annotations"]["openWorldHint"] = json!(true);
             value["annotations"]["destructiveHint"] = json!(tool.name == "file_upload");
             if tool.name == "file_upload" || tool.name == "transfer_resume" {
-                value["_meta"] = json!({"openai/fileParams":["file"]});
+                value["_meta"]["openai/fileParams"] = json!(["file"]);
             }
             *tool = serde_json::from_value(value).expect("static transfer descriptor");
         }

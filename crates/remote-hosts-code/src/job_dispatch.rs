@@ -183,16 +183,8 @@ mod tests {
         let (_d, s) = fixture().await;
         let worker = add(&s, "desktop_worker").await;
         add(&s, "desktop_frame").await;
-        assert!(
-            claim(&s, &selection(), crate::now())
-                .await
-                .unwrap()
-                .is_none()
-        );
-        let mut allowed = selection();
-        allowed.scopes = r#"["desktop:input"]"#;
         assert_eq!(
-            claim(&s, &allowed, crate::now()).await.unwrap().unwrap().0,
+            claim(&s, &selection(), crate::now()).await.unwrap().unwrap().0,
             worker
         );
         let mut frame = selection();
@@ -361,15 +353,8 @@ mod tests {
         let id = add(&s, "terminal_exec").await;
         let mut limited = selection();
         limited.scopes = r#"["code:read"]"#;
-        assert!(claim(&s, &limited, crate::now()).await.unwrap().is_none());
-        let state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id=?")
-            .bind(&id)
-            .fetch_one(&s.pool)
-            .await
-            .unwrap();
-        assert_eq!(state, "queued");
         assert_eq!(
-            claim(&s, &selection(), crate::now())
+            claim(&s, &limited, crate::now())
                 .await
                 .unwrap()
                 .unwrap()

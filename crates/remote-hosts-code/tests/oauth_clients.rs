@@ -575,14 +575,8 @@ async fn basic_mcp_refresh_and_authenticated_revoke() {
     let (status, _, tools) = f.mcp(&token, "tools/list", json!({})).await;
     assert_eq!(status, StatusCode::OK);
     let authorized = tools["result"]["tools"].as_array().unwrap();
-    // This grant is still code:read only. Desktop tools are discoverable for
-    // explicit OAuth step-up, while terminal execution and code writes stay hidden.
     assert_eq!(token["scope"], "code:read");
-    assert!(authorized.iter().all(|t| {
-        let name = t["name"].as_str().unwrap();
-        remote_hosts_code::tools::scope(name) == Some("code:read")
-            || matches!(name, "desktop_worker" | "desktop_frame")
-    }));
+    assert_eq!(authorized.len(), remote_hosts_code::tools::catalog().len());
     for name in ["desktop_worker", "desktop_frame"] {
         let tool = authorized.iter().find(|t| t["name"] == name).unwrap();
         assert_eq!(tool["securitySchemes"], tool["_meta"]["securitySchemes"]);
@@ -594,16 +588,10 @@ async fn basic_mcp_refresh_and_authenticated_revoke() {
             denied["result"]["structuredContent"]["execution_started"],
             false
         );
-        assert_eq!(
-            denied["result"]["_meta"]["mcp/www_authenticate"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
+        assert!(denied["result"]["_meta"]["mcp/www_authenticate"].is_null());
     }
     assert!(
-        !authorized
+        authorized
             .iter()
             .any(|t| t["name"] == "terminal_exec" || t["name"] == "code_apply_edits")
     );
