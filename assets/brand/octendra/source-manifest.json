@@ -1,0 +1,295 @@
+{
+  "source_archive": "product-brand-final-20261016.zip",
+  "archive_sha256": "c0e896f466d1b0b2e859208f76b01ff0b8173fcfc517646275973f509ca37c6f",
+  "selection": "Octendra only; unchanged approved bytes",
+  "files": [
+    {
+      "file": "AppIcon.icns",
+      "sha256": "e847fe8caf5e07aeca786e448515abf13e50722eb6b3da988c6a0046825db8c7",
+      "bytes": 244792,
+      "pixels": null
+    },
+    {
+      "file": "android-adaptive-icon.xml",
+      "sha256": "93bc01a651390812703f363d20639130cf26ff074c21ca3ff19bd3509f94db7d",
+      "bytes": 319,
+      "pixels": null
+    },
+    {
+      "file": "android-colors.xml",
+      "sha256": "6bb709016528048720fa07a2f03f0d5e41e47480a6ee65cb83c030fa3326cb8c",
+      "bytes": 75,
+      "pixels": null
+    },
+    {
+      "file": "android-foreground.png",
+      "sha256": "ca40b64f057db9ff01f500f35de6b1b14f4e06932ce0505098be5284165d278a",
+      "bytes": 8939,
+      "pixels": [
+        432,
+        432
+      ]
+    },
+    {
+      "file": "android-foreground.svg",
+      "sha256": "380a8d8bfcbabe841a0c0a94d0ede98238d78c60b29aea9039dd364f95f380d9",
+      "bytes": 832,
+      "pixels": null
+    },
+    {
+      "file": "android-monochrome.png",
+      "sha256": "8211ca671b0325d0097acf6ecea992ccde091bc9d57acaad413637dcce4e1967",
+      "bytes": 9619,
+      "pixels": [
+        432,
+        432
+      ]
+    },
+    {
+      "file": "android-monochrome.svg",
+      "sha256": "8166ba94c0c127a6344be7c284a3371fe44deb5b7191caf632cfcadd1f3ed881",
+      "bytes": 832,
+      "pixels": null
+    },
+    {
+      "file": "app-square.svg",
+      "sha256": "45d8b10e3d815c6fe557b3506dc75119ae6cdca130d7f4afb212eaa200f6f23c",
+      "bytes": 878,
+      "pixels": null
+    },
+    {
+      "file": "favicon.ico",
+      "sha256": "8aed5f3b29c885f254c08bef76dac1827d43cc88d105d086752ba71faded5066",
+      "bytes": 47235,
+      "pixels": null
+    },
+    {
+      "file": "icon-1024.png",
+      "sha256": "bf294ae8aa5845f1231e10de0483fc34c652d6316b8aa84e48fbf44a54372d34",
+      "bytes": 52299,
+      "pixels": [
+        1024,
+        1024
+      ]
+    },
+    {
+      "file": "icon-128.png",
+      "sha256": "43d0094b51e244902a647ef84f537a3d01a3b0dd648db89d91d5c4c58bc84616",
+      "bytes": 6623,
+      "pixels": [
+        128,
+        128
+      ]
+    },
+    {
+      "file": "icon-16.png",
+      "sha256": "84e8f0bb69baba4f69e8c0af5e028debd4bc977092d0c4f264244c93bd51addf",
+      "bytes": 738,
+      "pixels": [
+        16,
+        16
+      ]
+    },
+    {
+      "file": "icon-180.png",
+      "sha256": "43969be183bbe95144f1b586dac52f6205a7ab2ae88c5254d816507a8aa0fa35",
+      "bytes": 7783,
+      "pixels": [
+        180,
+        180
+      ]
+    },
+    {
+      "file": "icon-192.png",
+      "sha256": "3ae4182ca09176b302a99d84aedf4068bd10fae56ddf44371f5b7a3e3c7f8825",
+      "bytes": 8387,
+      "pixels": [
+        192,
+        192
+      ]
+    },
+    {
+      "file": "icon-20.png",
+      "sha256": "4d0bbb6594f05fd3ea252ebe6ee9c9a976bf13cd225d42ca506a4a7cedf63f13",
+      "bytes": 987,
+      "pixels": [
+        20,
+        20
+      ]
+    },
+    {
+      "file": "icon-24.png",
+      "sha256": "8840dc569d7892b680709f16750dbfa7923d3b8e54e9131c7e8f45678d9aefcb",
+      "bytes": 1156,
+      "pixels": [
+        24,
+        24
+      ]
+    },
+    {
+      "file": "icon-256.png",
+      "sha256": "4bf346762273f1adfa7f3712dbfc0ec113a45923ed9c4c1d2e802edcdc710711",
+      "bytes": 11520,
+      "pixels": [
+        256,
+        256
+      ]
+    },
+    {
+      "file": "icon-32.png",
+      "sha256": "d95efacdae3081760c9aa32d01f8ddb6689f8ae6c0fc048755b6f6ade54a160f",
+      "bytes": 1669,
+      "pixels": [
+        32,
+        32
+      ]
+    },
+    {
+      "file": "icon-40.png",
+      "sha256": "f6b3a24c99909704ec2632a76aa0adc26661d4b55e05eaea1bd23f5877e5fc80",
+      "bytes": 2032,
+      "pixels": [
+        40,
+        40
+      ]
+    },
+    {
+      "file": "icon-48.png",
+      "sha256": "565a7b0d6f48d91c92a6e5dcc8156a29396360a47cb7f88a82c0076c30f6bff5",
+      "bytes": 2480,
+      "pixels": [
+        48,
+        48
+      ]
+    },
+    {
+      "file": "icon-512.png",
+      "sha256": "f4efdcba1890a5471ce779bf7316f99be7f1bcc5791f4e2a8e781578d639a806",
+      "bytes": 24665,
+      "pixels": [
+        512,
+        512
+      ]
+    },
+    {
+      "file": "icon-64.png",
+      "sha256": "cf1bc09efdba63bdf5e0b9be05c7b26efae64a55afbfcf6cc7b9de033a2ef2dc",
+      "bytes": 3316,
+      "pixels": [
+        64,
+        64
+      ]
+    },
+    {
+      "file": "macos-icon-1024.png",
+      "sha256": "0201f83a917585df5e4ce87934d2ef4f3ed389eed503c4bb5c2f139ac0641511",
+      "bytes": 120107,
+      "pixels": [
+        1024,
+        1024
+      ]
+    },
+    {
+      "file": "manifest-icons.json",
+      "sha256": "9a5241ecb5aab534a34486a3dc7b358d6300459d9297ec0f9f2d3f9114027e44",
+      "bytes": 533,
+      "pixels": null
+    },
+    {
+      "file": "mark-dark.png",
+      "sha256": "cde98d64e89ff0dbf74b1c56013bca018d2f755d6da5c8b5ea411a1428b3fa69",
+      "bytes": 22940,
+      "pixels": [
+        512,
+        512
+      ]
+    },
+    {
+      "file": "mark-dark.svg",
+      "sha256": "28067679e42d99b35e50abc39fc30daa972e3fe6d40fd79c4f5d9aed998213a3",
+      "bytes": 824,
+      "pixels": null
+    },
+    {
+      "file": "mark-light.png",
+      "sha256": "9e8a697d7fc3321562995c0caf922f89917c87a54e35b3de13a69f086139fea4",
+      "bytes": 23118,
+      "pixels": [
+        512,
+        512
+      ]
+    },
+    {
+      "file": "mark-light.svg",
+      "sha256": "9afcb2af5f4fd29f6deb70550eada5597a5de2d4538befa03b94d97849804128",
+      "bytes": 824,
+      "pixels": null
+    },
+    {
+      "file": "mark-mono.png",
+      "sha256": "770a22fec5f7ad7a5f5248d1d39a13a7c72e2770cdc779e2536d4dd2ef1326bc",
+      "bytes": 17859,
+      "pixels": [
+        512,
+        512
+      ]
+    },
+    {
+      "file": "mark-mono.svg",
+      "sha256": "0bff185fd99f5d3ac1a327b688a1d31626f61dfb34311eb96d56d78fd38185f0",
+      "bytes": 824,
+      "pixels": null
+    },
+    {
+      "file": "maskable-192.png",
+      "sha256": "027f66952d44a975e643cd80576c57d288228fe2069fb5b43ab1c1c39d220da2",
+      "bytes": 6294,
+      "pixels": [
+        192,
+        192
+      ]
+    },
+    {
+      "file": "maskable-512.png",
+      "sha256": "af986640bae854f27077f486d5e8c0bfaf93a00cb44c3c80239438b0478ef7aa",
+      "bytes": 18664,
+      "pixels": [
+        512,
+        512
+      ]
+    },
+    {
+      "file": "maskable.svg",
+      "sha256": "28fb8d48dcb8af7bd8503c97aac3c85bc5b34cf40bbbc7263efeff94a390ba99",
+      "bytes": 915,
+      "pixels": null
+    },
+    {
+      "file": "optical-16.svg",
+      "sha256": "a2955fd5baa3a64465285018050aefe0dbfb1ee54d476a603bb32db9436f8555",
+      "bytes": 877,
+      "pixels": null
+    },
+    {
+      "file": "optical-32.svg",
+      "sha256": "19bd7a7c8976cae12bf1bbb34f9b40f35ce5f3288314e07d059e60c3a4cf7038",
+      "bytes": 877,
+      "pixels": null
+    },
+    {
+      "file": "tile.png",
+      "sha256": "e2303d55ff39030477570219088853f1f91e2d9c36beaff6f280405ef7f44ac3",
+      "bytes": 29548,
+      "pixels": [
+        512,
+        512
+      ]
+    },
+    {
+      "file": "tile.svg",
+      "sha256": "a981fe35cfe23ad0c9d272ee20521abf6f7d0ca1ca4f267e2252171cdf240862",
+      "bytes": 879,
+      "pixels": null
+    }
+  ]
+}

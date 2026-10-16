@@ -1,4 +1,6 @@
-# 🐙 Octendra
+<img src="assets/brand/octendra/icon-128.png" alt="Octendra" width="96" height="96">
+
+# Octendra
 
 **中文** | [English](README_EN.md)
 

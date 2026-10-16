@@ -1,8 +1,12 @@
-# Remote Hosts
+<img src="assets/brand/octendra/icon-128.png" alt="Octendra" width="96" height="96">
+
+# Octendra
 
 [中文 README](README.md) | **English**
 
-Remote Hosts is a remote-operation and code-collaboration platform designed for AI agents and human operators. It combines a reusable SSH control plane with a separate, authenticated ChatGPT code gateway so an agent can work across your own computers without turning every product or device into a bespoke integration.
+> Octendra uses the approved friendly octopus identity and prioritizes simplicity, efficiency, stability, and reliability. Branding migration is in progress: the `remote-hosts` commands, package names, and repository links below remain the actual current entry points. Renamed packages and a new domain have not been published. See the [one-time migration plan](docs/octendra-migration.md).
+
+Octendra (formerly Remote Hosts) is a remote-operation and code-collaboration platform designed for AI agents and human operators. It combines a reusable SSH control plane with a separate, authenticated ChatGPT code gateway so an agent can work across your own computers without turning every product or device into a bespoke integration.
 
 The project optimizes for four things: **low interaction cost, recoverable execution, explicit isolation, and verifiable delivery**. Long-running work is durable, retries do not silently replay side effects, file transfers are resumable, release evidence is tied to fixed source inputs, and each device remains an explicit target rather than an automatic failover destination.
 
