@@ -24,7 +24,7 @@ pub fn relative(path: &str) -> Result<&Path> {
             && path.len() <= 4096
             && !path.chars().any(char::is_control)
             && p.components().all(|c| matches!(c, Component::Normal(_))),
-        "path must be a non-empty relative path without . or .."
+        "invalid_arguments: path must be a non-empty relative path without . or .."
     );
     Ok(p)
 }
@@ -884,6 +884,51 @@ mod tests {
             );
             assert!(!journal.exists());
         }
+    }
+    #[test]
+    fn read_path_validation_is_not_an_unknown_execution() {
+        let (_d, w) = fixture();
+        for path in ["/tmp/a", "../secret", "a/../secret", ""] {
+            let error = read(
+                &w,
+                &json!({"requests":[{"path":path,"start_line":1,"end_line":1}]}),
+            )
+            .unwrap_err();
+            let receipt = crate::diagnostics::error(
+                "code_read",
+                &error.to_string(),
+                Some("original"),
+                "agent_execute",
+            );
+            assert_eq!(receipt["error_code"], "invalid_arguments");
+            assert_eq!(receipt["outcome"], "not_executed");
+            assert_eq!(receipt["execution_state"], "not_started");
+            assert_eq!(
+                receipt["retry_policy"],
+                "retry_only_after_correcting_arguments"
+            );
+            assert_eq!(receipt["automatic_replay_safe"], false);
+            assert_eq!(receipt["operation_id"], "original");
+        }
+        let denied = crate::diagnostics::error(
+            "code_read",
+            "insufficient_scope",
+            Some("denied"),
+            "gateway_dispatch",
+        );
+        assert_eq!(denied["error_code"], "account_scope_denied");
+        assert_eq!(denied["retry_policy"], "do_not_replay_or_expand_authority");
+        let unknown = crate::diagnostics::error(
+            "code_read",
+            "unexpected execution interruption",
+            Some("unknown"),
+            "agent_execute",
+        );
+        assert_eq!(unknown["outcome"], "unknown");
+        assert_eq!(
+            unknown["retry_policy"],
+            "do_not_replay_until_original_outcome_is_observed"
+        );
     }
     #[test]
     fn budget_and_traversal() {
