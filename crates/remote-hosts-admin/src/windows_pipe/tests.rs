@@ -1,4 +1,59 @@
 use super::*;
+
+fn native_input<'a>(p: &'a Policy, o: Observation) -> crate::windows_caller::AssessmentInput<'a> {
+    crate::windows_caller::AssessmentInput {
+        policy: p,
+        request: request(p),
+        observation: o,
+        grant: Grant::Verified,
+        previous: None,
+        outcome_unknown: false,
+        now: 10,
+    }
+}
+#[test]
+fn native_adapter_replaces_claimed_matching_identity_with_collected_mismatch() {
+    let p = policy();
+    let o = observation(&p, &request(&p));
+    let mut kernel = o.caller.clone().unwrap();
+    kernel.user_sid = sid("S-1-5-21-10-20-30-1002");
+    let a =
+        crate::windows_caller::assess_with_collector(native_input(&p, o), || Ok(kernel)).unwrap();
+    assert!(!a.offline_policy_checks_passed);
+    assert!(a.denials.contains(&Denial::CallerIdentity));
+    assert!(!a.native_peer_authenticated && !a.grants_authority);
+}
+#[test]
+fn native_adapter_query_failure_never_uses_claimed_identity_or_success_flags() {
+    let p = policy();
+    let o = observation(&p, &request(&p));
+    assert!(evaluate(&p, &o).offline_policy_checks_passed);
+    let result = crate::windows_caller::assess_with_collector(native_input(&p, o), || {
+        anyhow::bail!("OpenThreadToken failed")
+    });
+    assert!(result.is_err());
+}
+#[test]
+fn native_adapter_uses_collected_identity_but_never_authenticates_other_boundary_claims() {
+    let p = policy();
+    let mut o = observation(&p, &request(&p));
+    let kernel = o.caller.clone().unwrap();
+    o.caller = None;
+    o.impersonation_succeeded = false;
+    o.revert_succeeded = false;
+    let a =
+        crate::windows_caller::assess_with_collector(native_input(&p, o), || Ok(kernel)).unwrap();
+    assert!(a.offline_policy_checks_passed);
+    assert!(
+        !a.native_peer_authenticated && !a.grants_authority && !a.plan.observed.execution_available
+    );
+}
+#[test]
+fn obsolete_identification_policy_version_is_not_silently_migrated() {
+    let mut p = policy();
+    p.protocol = 1;
+    assert!(p.validate().is_err());
+}
 use crate::protocol::{Plan, Snapshot, State};
 const DEVICE: &str = "ba3bf113-2390-466e-88bc-40d5b4f02884";
 const REQUEST: &str = "15ed57df-a740-4d56-935c-950d146b39ba";
@@ -7,7 +62,7 @@ fn sid(value: &str) -> Sid {
 }
 fn policy() -> Policy {
     Policy {
-        protocol: 1,
+        protocol: 2,
         device_id: DEVICE.into(),
         grant_id: "3f5b1f70-e600-414f-95bf-9f86c04be0e4".into(),
         enabled: true,
@@ -52,7 +107,7 @@ fn observation(p: &Policy, r: &PlanRequest) -> Observation {
         revert_succeeded: true,
         caller: Some(CallerToken {
             source: TokenSource::PipeImpersonation,
-            level: ImpersonationLevel::Identification,
+            level: ImpersonationLevel::Impersonation,
             user_sid: p.caller_sid.clone(),
             logon_sid: p.logon_sid.clone(),
             logon_group_enabled: true,
@@ -162,7 +217,7 @@ fn policy_is_closed_and_only_fixed_restart_profile_exists() {
     for i in 0..5 {
         let mut p = policy();
         match i {
-            0 => p.protocol = 2,
+            0 => p.protocol = 3,
             1 => p.device_id = "not_uuid".into(),
             2 => p.grant_id = "not_uuid".into(),
             3 => p.helper_sha256 = "A".repeat(64),
@@ -260,7 +315,7 @@ fn primary_process_token_impersonation_and_revert_failure_never_fall_back() {
             1 => o.revert_succeeded = false,
             2 => o.caller.as_mut().unwrap().source = TokenSource::ProcessPrimary,
             3 => o.caller.as_mut().unwrap().level = ImpersonationLevel::Anonymous,
-            4 => o.caller.as_mut().unwrap().level = ImpersonationLevel::Impersonation,
+            4 => o.caller.as_mut().unwrap().level = ImpersonationLevel::Identification,
             _ => o.caller.as_mut().unwrap().level = ImpersonationLevel::Delegation,
         }
         denied(&o, Denial::CallerIdentity);

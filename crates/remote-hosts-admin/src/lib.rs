@@ -31,4 +31,6 @@ pub mod settlement;
 pub mod tasks;
 #[cfg(unix)]
 pub mod transport;
+#[cfg(any(windows, test))]
+pub mod windows_caller;
 pub mod windows_pipe;

@@ -13,6 +13,9 @@ serde_json.workspace = true
 sha2.workspace = true
 uuid.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+remote-hosts-admin-win32 = { path = "../remote-hosts-admin-win32" }
+
 [target.'cfg(unix)'.dependencies]
 fs2 = "0.4.3"
 nix = { version = "0.30.1", features = ["dir", "fs", "process", "signal", "user"] }

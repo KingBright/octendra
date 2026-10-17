@@ -93,7 +93,7 @@ pub struct Policy {
 }
 impl Policy {
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.protocol == 1, "unsupported_windows_policy_protocol");
+        ensure!(self.protocol == 2, "unsupported_windows_policy_protocol");
         valid_id(&self.device_id)?;
         valid_id(&self.grant_id)?;
         ensure!(
@@ -304,7 +304,7 @@ pub fn assess(
             if !observed.impersonation_succeeded
                 || !observed.revert_succeeded
                 || c.source != TokenSource::PipeImpersonation
-                || c.level != ImpersonationLevel::Identification
+                || c.level != ImpersonationLevel::Impersonation
                 || c.user_sid != policy.caller_sid
                 || c.logon_sid != policy.logon_sid
                 || !c.logon_group_enabled

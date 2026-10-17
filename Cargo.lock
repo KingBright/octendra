@@ -3007,12 +3007,21 @@ dependencies = [
  "clap",
  "fs2",
  "nix 0.30.1",
+ "remote-hosts-admin-win32",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "remote-hosts-admin-win32"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
