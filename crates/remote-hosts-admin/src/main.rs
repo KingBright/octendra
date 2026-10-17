@@ -115,10 +115,16 @@ mod unix_cli {
 #[cfg(unix)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if remote_hosts_admin::privilege_cli::try_run()? {
+        return Ok(());
+    }
     unix_cli::run().await
 }
 #[cfg(not(unix))]
-fn main() {
+fn main() -> anyhow::Result<()> {
+    if remote_hosts_admin::privilege_cli::try_run()? {
+        return Ok(());
+    }
     eprintln!(
         "remote-hosts-admin 0.1 supports macOS/Linux only; no Windows privilege changes are made."
     );
