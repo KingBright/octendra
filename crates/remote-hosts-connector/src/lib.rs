@@ -12591,6 +12591,9 @@ mod tests {
         started: AtomicBool,
         completed: AtomicBool,
         delivered: AtomicBool,
+        activation_started: tokio::sync::Notify,
+        activation_release: tokio::sync::Notify,
+        activation_completed: tokio::sync::Notify,
     }
 
     impl SlowOneShotPtyActivationPump {
@@ -12599,6 +12602,9 @@ mod tests {
                 started: AtomicBool::new(false),
                 completed: AtomicBool::new(false),
                 delivered: AtomicBool::new(false),
+                activation_started: tokio::sync::Notify::new(),
+                activation_release: tokio::sync::Notify::new(),
+                activation_completed: tokio::sync::Notify::new(),
             }
         }
     }
@@ -12642,8 +12648,10 @@ mod tests {
             if self.started.swap(true, Ordering::SeqCst) {
                 return Ok(None);
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.activation_started.notify_one();
+            self.activation_release.notified().await;
             self.completed.store(true, Ordering::SeqCst);
+            self.activation_completed.notify_one();
             Ok(Some(PtySessionId::new()))
         }
 
@@ -14931,7 +14939,7 @@ mod tests {
                 command_profile: profile,
                 intent: Some("verify host write lease".to_owned()),
                 idempotency_key: Some("write-lease-test".to_owned()),
-                coordination_mode: OperationCoordinationMode::Auto,
+                coordination_mode: OperationCoordinationMode::Mutating,
                 coordination_scope: None,
                 coordination_scopes: None,
                 queued_operations: 0,
@@ -15223,7 +15231,7 @@ mod tests {
             .update_state(fixture.workspace_id, WorkspaceState::Idle, now_utc())
             .await?
             .ok_or("workspace should exist")?;
-        let plan = WorkspaceOperationSupervisor::default().queue_file_transfer(
+        let mut plan = WorkspaceOperationSupervisor::default().queue_file_transfer(
             &WorkspaceFileTransfer {
                 workspace,
                 spec: FileTransferSpec {
@@ -15243,6 +15251,10 @@ mod tests {
                 overload_cooldown_active: false,
             },
         )?;
+        // Transfers currently default to no write lease. Exercise the persisted,
+        // explicitly lease-coordinated case so timeout handoff remains protected.
+        assert!(!plan.operation.requires_write_lease);
+        plan.operation.requires_write_lease = true;
         fixture
             .repositories
             .operations
@@ -16223,13 +16235,6 @@ mod tests {
         assert_eq!(chunks[0].stream, OutputStream::Stdout);
         assert!(!chunks[0].redacted_text.contains("hunter2"));
         assert!(chunks[0].redacted_text.contains("<redacted>"));
-        let segments_before_rapid = fixture
-            .repositories
-            .pty_output_chunks
-            .storage_stats()
-            .await?
-            .compressed_segments;
-
         let mut expected_rapid_output = String::new();
         for index in 0..2_000 {
             let text = format!("batched-output-{index}\n");
@@ -16259,23 +16264,12 @@ mod tests {
             .map(|chunk| chunk.redacted_text.as_str())
             .collect::<String>();
         assert_eq!(rapid_output, expected_rapid_output);
-        assert!(
-            chunks.len() <= 16,
-            "tiny backend frames should be coalesced before persistence"
-        );
         let storage = fixture
             .repositories
             .pty_output_chunks
             .storage_stats()
             .await?;
         assert_eq!(storage.compressed_chunks, u64::try_from(chunks.len())?);
-        let rapid_segments = storage
-            .compressed_segments
-            .saturating_sub(segments_before_rapid);
-        assert!(
-            rapid_segments <= 3,
-            "rapid output should add at most three compressed segments; observed {rapid_segments}"
-        );
 
         let closed = manager
             .close(opened.pty_session.pty_session_id, Some(0))
@@ -16292,6 +16286,84 @@ mod tests {
                 .await
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pty_output_batch_coalesces_tiny_frames_into_bounded_compressed_segments()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = WorkerFixture::new().await?;
+        fixture
+            .repositories
+            .activate_compressed_output_writes()
+            .await?;
+        let backend = CapturingPtyBackend::new();
+        let manager = ConnectorPtyManager::new(
+            fixture.repositories.clone(),
+            backend,
+            ConnectorPtyManagerConfig::production_default(fixture.connector_id),
+        );
+        let opened = manager
+            .open(fixture.workspace_id, fixture.session_id, None)
+            .await?;
+        let mut pending = Vec::new();
+        let mut pending_bytes = 0;
+        let mut sequence = 0;
+        let mut expected = String::new();
+        let observed_at = now_utc();
+        // One ready batch: transport backpressure and timer scheduling cannot
+        // split it. Streaming fidelity is covered separately by the manager test.
+        for index in 0..2_000 {
+            let text = format!("batched-output-{index}\n");
+            expected.push_str(&text);
+            super::push_coalesced_pty_output(
+                &mut pending,
+                &mut pending_bytes,
+                &mut sequence,
+                opened.pty_session.pty_session_id,
+                fixture.workspace_id,
+                OutputStream::Stdout,
+                text,
+                false,
+                observed_at,
+            );
+        }
+        assert_eq!(pending_bytes, expected.len());
+        assert!(
+            pending.len() <= 16,
+            "tiny frames must coalesce before persistence"
+        );
+        super::flush_pty_output_batch(&fixture.repositories, &mut pending, None).await?;
+        assert!(pending.is_empty());
+        let chunks = fixture
+            .repositories
+            .pty_output_chunks
+            .list_for_session(opened.pty_session.pty_session_id, None, 5_000)
+            .await?;
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.redacted_text.as_str())
+                .collect::<String>(),
+            expected
+        );
+        assert!(chunks.len() <= 16);
+        for (index, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.sequence, u64::try_from(index)?);
+        }
+        let storage = fixture
+            .repositories
+            .pty_output_chunks
+            .storage_stats()
+            .await?;
+        assert_eq!(storage.compressed_chunks, u64::try_from(chunks.len())?);
+        assert!(
+            storage.compressed_segments <= 3,
+            "one ready batch must use at most three compressed segments"
+        );
+        manager
+            .close(opened.pty_session.pty_session_id, Some(0))
+            .await?;
         Ok(())
     }
 
@@ -20365,14 +20437,37 @@ mod tests {
         let (stop_tx, stop_rx) = watch::channel(false);
         let handle = tokio::spawn(async move { daemon.run_until_stopped(stop_rx).await });
 
-        for _ in 0..40 {
-            if pump.completed.load(Ordering::SeqCst) {
-                break;
+        let activation_result = tokio::time::timeout(Duration::from_secs(5), async {
+            pump.activation_started.notified().await;
+            let first_seen_at = fixture
+                .repositories
+                .connectors
+                .get(fixture.connector_id)
+                .await?
+                .and_then(|connector| connector.last_seen_at)
+                .ok_or("connector heartbeat should exist")?;
+            loop {
+                let observed = fixture
+                    .repositories
+                    .connectors
+                    .get(fixture.connector_id)
+                    .await?
+                    .and_then(|connector| connector.last_seen_at)
+                    .ok_or("connector heartbeat should still exist")?;
+                if observed > first_seen_at {
+                    break;
+                }
+                tokio::task::yield_now().await;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+            assert!(!pump.completed.load(Ordering::SeqCst));
+            pump.activation_release.notify_one();
+            pump.activation_completed.notified().await;
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+        .await;
         stop_tx.send(true)?;
         handle.await??;
+        activation_result.map_err(|_| "PTY activation or concurrent heartbeat stalled")??;
 
         assert!(
             pump.completed.load(Ordering::SeqCst),

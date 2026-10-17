@@ -1174,25 +1174,24 @@ mod tests {
     }
 
     #[test]
-    fn denies_open_when_persistent_pty_limit_is_reached() -> Result<(), Box<dyn std::error::Error>>
+    fn opens_session_beyond_legacy_persistent_pty_quota() -> Result<(), Box<dyn std::error::Error>>
     {
         let supervisor = PtySessionSupervisor::default();
         let workspace = workspace(WorkspaceState::Idle);
         let connection = connection(&workspace, EntityState::Connected);
-        let error = supervisor
-            .open_session(
-                &workspace,
-                &connection,
-                8,
-                PtySessionOpenCommand {
-                    session_id: connection.session_id,
-                    cwd: None,
-                    coordination_scopes: None,
-                },
-            )
-            .err()
-            .ok_or("pty limit should reject new session")?;
-        assert!(error.to_string().contains("policy"));
+        let session = supervisor.open_session(
+            &workspace,
+            &connection,
+            8,
+            PtySessionOpenCommand {
+                session_id: connection.session_id,
+                cwd: None,
+                coordination_scopes: None,
+            },
+        )?;
+        assert_eq!(session.workspace_id, workspace.id);
+        assert_eq!(session.session_id, connection.session_id);
+        assert!(session.input_allowed);
         Ok(())
     }
 

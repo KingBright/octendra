@@ -1156,17 +1156,31 @@ pub async fn decorate(g: &Gateway, job: &Job, result: &mut Value) -> Result<()> 
 // Desktop bodies recheck the epoch and their original deadline for every bounded
 // read. A removed path does not revoke an already-open file descriptor.
 fn desktop_body(g: Gateway, job: Job, file: tokio::fs::File, bytes: u64, deadline: u64) -> Body {
+    desktop_body_with_clock(g, job, file, bytes, deadline, || crate::now_ms() as u64)
+}
+
+fn desktop_body_with_clock<F>(
+    g: Gateway,
+    job: Job,
+    file: tokio::fs::File,
+    bytes: u64,
+    deadline: u64,
+    clock: F,
+) -> Body
+where
+    F: Fn() -> u64 + Send + 'static,
+{
     let reader = ReaderStream::with_capacity(file.take(bytes), 64 * 1024);
     let stream = futures_util::stream::try_unfold(
-        (reader, g, job),
-        move |(mut reader, g, job)| async move {
+        (reader, g, job, clock),
+        move |(mut reader, g, job, clock)| async move {
             let denied = || {
                 std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     "desktop artifact revoked or expired",
                 )
             };
-            if crate::now_ms() as u64 >= deadline {
+            if clock() >= deadline {
                 return Err(denied());
             }
             desktop_artifact(&g, &job).await.map_err(|_| denied())?;
@@ -1174,11 +1188,11 @@ fn desktop_body(g: Gateway, job: Job, file: tokio::fs::File, bytes: u64, deadlin
                 return Ok(None);
             };
             let chunk = chunk?;
-            if crate::now_ms() as u64 >= deadline {
+            if clock() >= deadline {
                 return Err(denied());
             }
             desktop_artifact(&g, &job).await.map_err(|_| denied())?;
-            Ok::<_, std::io::Error>(Some((chunk, (reader, g, job))))
+            Ok::<_, std::io::Error>(Some((chunk, (reader, g, job, clock))))
         },
     );
     Body::from_stream(stream)
@@ -1464,31 +1478,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn desktop_slow_stream_deadline_stops_existing_descriptor() {
-        let (_dir, g, export, key) = desktop_stream_fixture().await;
-        let observed = export.arguments["observed_operation_id"].as_str().unwrap();
-        let deadline = crate::now_ms() as u64 + 250;
-        sqlx::query(
-            "UPDATE jobs SET result=json_set(result,'$.frame_artifact.expires_at_ms',?) WHERE id=?",
-        )
-        .bind(deadline as i64)
-        .bind(observed)
-        .execute(&g.store.pool)
-        .await
-        .unwrap();
-        let response = serve_file(
-            State(g.clone()),
-            HttpPath((key, "frame.raw".into())),
-            HeaderMap::new(),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let mut stream = response.into_body().into_data_stream();
+    async fn desktop_stream_original_deadline_stops_existing_descriptor() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        };
+
+        let (_dir, g, export, _key) = desktop_stream_fixture().await;
+        let file = tokio::fs::File::open(blob_path(&g, &export.id))
+            .await
+            .unwrap();
+        let bytes = file.metadata().await.unwrap().len();
+        let clock = Arc::new(AtomicU64::new(99));
+        let body_clock = Arc::clone(&clock);
+        let mut stream =
+            desktop_body_with_clock(g.clone(), export.clone(), file, bytes, 100, move || {
+                body_clock.load(Ordering::SeqCst)
+            })
+            .into_data_stream();
         assert_eq!(stream.next().await.unwrap().unwrap().len(), 64 * 1024);
-        tokio::time::sleep(Duration::from_millis(
-            deadline.saturating_sub(crate::now_ms() as u64) + 20,
-        ))
-        .await;
+        // Cross the original stream deadline only after its first successful read.
+        // The stored artifact remains valid, proving its lifetime cannot extend
+        // the captured deadline of an already-open descriptor.
+        clock.store(100, Ordering::SeqCst);
+        assert!(desktop_artifact(&g, &export).await.is_ok());
         assert!(blob_path(&g, &export.id).exists());
         assert!(stream.next().await.unwrap().is_err());
         assert!(stream.next().await.is_none());
