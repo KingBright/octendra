@@ -56,6 +56,29 @@ fn load_policy(path: &Path) -> Result<Policy> {
     Ok(p)
 }
 pub async fn serve(policy_path: &Path, state_dir: &Path, socket_path: &Path) -> Result<()> {
+    serve_backend(policy_path, state_dir, socket_path, SystemBackend).await
+}
+
+/// Library entry only. No CLI, installer or activation is added in this increment.
+#[cfg(target_os = "linux")]
+pub async fn serve_managed_service(
+    policy_path: &Path,
+    state_dir: &Path,
+    socket_path: &Path,
+    grant_path: &Path,
+) -> Result<()> {
+    let backend = crate::managed_service::ManagedServiceBackend {
+        driver: crate::managed_service::LinuxServiceDriver::new(grant_path.to_owned()),
+    };
+    serve_backend(policy_path, state_dir, socket_path, backend).await
+}
+
+async fn serve_backend<B: crate::engine::Backend>(
+    policy_path: &Path,
+    state_dir: &Path,
+    socket_path: &Path,
+    backend: B,
+) -> Result<()> {
     ensure!(
         nix::unistd::geteuid().is_root(),
         "helper_requires_separately_authorized_root_installation"
@@ -92,7 +115,7 @@ pub async fn serve(policy_path: &Path, state_dir: &Path, socket_path: &Path) -> 
             dir: state_dir.to_owned(),
             owner: 0,
         },
-        backend: SystemBackend,
+        backend,
     };
     // Deliberately serialized: one maintenance action at a time. A client disconnect does
     // not cancel a mutation; its durable receipt is queried after reconnection.

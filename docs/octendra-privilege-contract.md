@@ -15,8 +15,10 @@
 - Windows 身份尚未接入令牌探测，明确报告 unverified。
 - Android 区分普通 UID、UID2000 的 ADB shell、UID0；UID0 也不使本步执行可用。
   普通应用或 shell 不会被描述成具有 root 权限。
-- 四平台统一接口及序列化合同可用；新的维护执行后端全部 execution_implemented=false、
+- 四平台统一接口及序列化合同可用；本合同的发现 CLI 仍报告 execution_implemented=false、
   execution_available=false、arbitrary_root_commands=false。没有 execute/apply/install/grant 子命令。
+  后续受管 Linux 服务库增量见 [独立边界说明](octendra-linux-managed-service.md)；
+  它没有改变本 CLI 的可用性，也不代表 helper 已安装或完成实机验收。
 - NoNewPrivilegesBlocksSudo 只说明当前进程不能用 setuid sudo 提权，
   不代表独立 root 系统服务不能执行经授权动作。
 - macOS/Linux 原 local_sudo_v1 与本合同分别报告，不以功能标签当作运行时提权成功。

@@ -5,6 +5,21 @@ use serde_json::{Value, json};
 
 #[allow(async_fn_in_trait)]
 pub trait Backend {
+    /// Closed action selected by the installed backend, never by request argv.
+    fn action(&self) -> &'static str {
+        ACTION
+    }
+    /// Includes every root-owned action grant in the persisted plan binding.
+    fn policy_binding(&self, policy: &Policy, _now: u64) -> Result<String> {
+        digest(policy)
+    }
+    fn validate_snapshot(&self, snapshot: &Snapshot) -> Result<()> {
+        ensure!(
+            snapshot.current_service_active,
+            "protected_current_remoteplay_not_active"
+        );
+        Ok(())
+    }
     async fn inspect(&self, policy: &Policy) -> Result<Snapshot>;
     async fn execute(
         &self,
@@ -13,6 +28,16 @@ pub trait Backend {
         record: &mut Record,
     ) -> Result<Snapshot>;
 }
+/// Side effects may have happened. Keep the original running receipt; never replay.
+#[derive(Debug)]
+pub struct OutcomeUnknown;
+impl std::fmt::Display for OutcomeUnknown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("outcome_unknown_observe_original")
+    }
+}
+impl std::error::Error for OutcomeUnknown {}
+
 pub struct Engine<B> {
     pub store: Store,
     pub backend: B,
@@ -33,6 +58,30 @@ fn response(record: &Record) -> Result<Value> {
     Ok(v)
 }
 impl<B: Backend> Engine<B> {
+    // The transport serializes this engine under the original helper lock.
+    // Persisted running records also block another UUID after a crash/timeout.
+    fn ensure_action_settled(&self, request_id: &str) -> Result<()> {
+        self.store.capacity()?;
+        for entry in std::fs::read_dir(&self.store.dir)?.take(2048) {
+            let path = entry?.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if id == request_id || valid_id(id).is_err() {
+                continue;
+            }
+            if let Some(record) = self.store.load(id)? {
+                ensure!(
+                    record.plan.action != self.backend.action() || record.state != State::Running,
+                    "unresolved_operation_observe_original"
+                );
+            }
+        }
+        Ok(())
+    }
     pub async fn handle(
         &self,
         policy: &Policy,
@@ -45,7 +94,7 @@ impl<B: Backend> Engine<B> {
         let revoked = self.store.revoked()?;
         match request {
             Request::Status => Ok(
-                json!({"available":true,"protocol":PROTOCOL,"version":env!("CARGO_PKG_VERSION"),"device_id":policy.device_id,"enabled":policy.enabled && !revoked,"allowed_action":ACTION,"caller_uid":uid,"plan_ttl_seconds":PLAN_TTL,"transport":"local_unix_socket","arbitrary_commands":false}),
+                json!({"available":true,"protocol":PROTOCOL,"version":env!("CARGO_PKG_VERSION"),"device_id":policy.device_id,"enabled":policy.enabled && !revoked && self.backend.policy_binding(policy, now).is_ok(),"allowed_action":self.backend.action(),"caller_uid":uid,"plan_ttl_seconds":PLAN_TTL,"transport":"local_unix_socket","arbitrary_commands":false}),
             ),
             Request::Revoke => {
                 self.store.revoke(uid, now)?;
@@ -57,32 +106,32 @@ impl<B: Backend> Engine<B> {
                     .load(&request_id)?
                     .ok_or_else(|| anyhow::anyhow!("receipt_not_found"))?;
                 ensure!(
-                    r.plan.caller_uid == uid && r.plan.device_id == policy.device_id,
+                    r.plan.caller_uid == uid
+                        && r.plan.device_id == policy.device_id
+                        && r.plan.action == self.backend.action(),
                     "receipt_binding_mismatch"
                 );
                 response(&r)
             }
             Request::Plan { request_id } => {
                 ensure!(policy.enabled && !revoked, "grant_disabled_or_revoked");
-                let policy_sha256 = digest(policy)?;
+                let policy_sha256 = self.backend.policy_binding(policy, now)?;
                 if let Some(existing) = self.store.load(&request_id)? {
                     ensure!(
                         existing.plan.caller_uid == uid
                             && existing.plan.device_id == policy.device_id
-                            && existing.plan.policy_sha256 == policy_sha256,
+                            && existing.plan.policy_sha256 == policy_sha256
+                            && existing.plan.action == self.backend.action(),
                         "idempotency_binding_conflict"
                     );
                     return response(&existing);
                 }
-                self.store.capacity()?;
+                self.ensure_action_settled(&request_id)?;
                 let snapshot = self.backend.inspect(policy).await?;
-                ensure!(
-                    snapshot.current_service_active,
-                    "protected_current_remoteplay_not_active"
-                );
+                self.backend.validate_snapshot(&snapshot)?;
                 let plan = Plan {
                     protocol: PROTOCOL,
-                    action: ACTION.into(),
+                    action: self.backend.action().into(),
                     request_id,
                     device_id: policy.device_id.clone(),
                     caller_uid: uid,
@@ -117,7 +166,8 @@ impl<B: Backend> Engine<B> {
                 ensure!(
                     record.plan.caller_uid == uid
                         && record.plan.device_id == policy.device_id
-                        && record.plan.policy_sha256 == digest(policy)?,
+                        && record.plan.policy_sha256 == self.backend.policy_binding(policy, now)?
+                        && record.plan.action == self.backend.action(),
                     "plan_binding_mismatch"
                 );
                 ensure!(
@@ -127,15 +177,13 @@ impl<B: Backend> Engine<B> {
                 if record.state != State::Prepared {
                     return response(&record);
                 }
+                self.ensure_action_settled(&request_id)?;
                 ensure!(
                     now >= record.plan.created_at && now < record.plan.expires_at,
                     "plan_expired_or_clock_moved_backwards"
                 );
                 let fresh = self.backend.inspect(policy).await?;
-                ensure!(
-                    fresh.current_service_active,
-                    "protected_current_remoteplay_not_active"
-                );
+                self.backend.validate_snapshot(&fresh)?;
                 ensure!(
                     fresh == record.plan.snapshot,
                     "targets_changed_create_new_plan"
@@ -150,8 +198,13 @@ impl<B: Backend> Engine<B> {
                         record.state = State::Succeeded;
                     }
                     Err(error) => {
-                        record.error = Some(format!("{error:#}"));
-                        record.state = State::Failed;
+                        if error.downcast_ref::<OutcomeUnknown>().is_some() {
+                            record.error = Some("outcome_unknown_observe_original".into());
+                            record.state = State::Running;
+                        } else {
+                            record.error = Some(format!("{error:#}"));
+                            record.state = State::Failed;
+                        }
                     }
                 }
                 record.updated_at = unix_time();
