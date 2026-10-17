@@ -19,6 +19,11 @@ mod unix_cli {
     }
     #[derive(Subcommand)]
     enum Action {
+        /// Linux fixed-action helper and offline installation preparation. Never sudo.
+        LinuxHelper {
+            #[command(subcommand)]
+            command: remote_hosts_admin::linux_helper_cli::Command,
+        },
         /// HO5 read-only observations and original-receipt reconciliation; no execution command.
         Ho5 {
             #[command(subcommand)]
@@ -60,6 +65,17 @@ mod unix_cli {
         let cli = Cli::parse();
         let is_apply = matches!(&cli.command, Action::Apply { .. });
         let req = match cli.command {
+            Action::LinuxHelper { command } => {
+                let value = remote_hosts_admin::linux_helper_cli::run(command, &cli.socket).await?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                if value
+                    .get("execution_state")
+                    .is_some_and(|s| s != "succeeded")
+                {
+                    std::process::exit(2);
+                }
+                return Ok(());
+            }
             Action::Ho5 { command } => {
                 println!(
                     "{}",

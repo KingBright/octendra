@@ -93,9 +93,16 @@ impl<B: Backend> Engine<B> {
         request.validate()?;
         let revoked = self.store.revoked()?;
         match request {
-            Request::Status => Ok(
-                json!({"available":true,"protocol":PROTOCOL,"version":env!("CARGO_PKG_VERSION"),"device_id":policy.device_id,"enabled":policy.enabled && !revoked && self.backend.policy_binding(policy, now).is_ok(),"allowed_action":self.backend.action(),"caller_uid":uid,"plan_ttl_seconds":PLAN_TTL,"transport":"local_unix_socket","arbitrary_commands":false}),
-            ),
+            Request::Status => {
+                let binding = self.backend.policy_binding(policy, now).ok();
+                Ok(
+                    json!({"available":true,"protocol":PROTOCOL,"version":env!("CARGO_PKG_VERSION"),
+                    "device_id":policy.device_id,"enabled":policy.enabled && !revoked && binding.is_some(),
+                    "revoked":revoked,"policy_sha256":binding,"allowed_action":self.backend.action(),
+                    "caller_uid":uid,"plan_ttl_seconds":PLAN_TTL,"transport":"local_unix_socket",
+                    "arbitrary_commands":false}),
+                )
+            }
             Request::Revoke => {
                 self.store.revoke(uid, now)?;
                 Ok(json!({"enabled":false,"revoked":true,"system_services_changed":false}))

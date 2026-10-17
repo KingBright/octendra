@@ -9,6 +9,156 @@ import plistlib
 import shutil
 import struct
 import uuid
+import sys
+
+# Managed-service preparation reuses this producer; it never includes installer scripts.
+MANAGED_PROFILE = 'linux-managed-service-v1'
+MANAGED_COMPONENT = 'remote-hosts-admin-linux-prepared'
+
+def prepare_managed(binary, output, device_id, account, uid, gid, home, source_commit, source_inputs_sha256):
+    if binary.is_symlink() or not binary.is_file() or binary_machine(binary, 'linux') != 'x86_64':
+        raise ValueError('Managed profile requires a regular Linux x86_64 ELF')
+    device_id = str(uuid.UUID(device_id))
+    if uid <= 0 or gid <= 0 or not account or len(account) >= 64 or not all(c.isascii() and (c.isalnum() or c in '_-') for c in account):
+        raise ValueError('Invalid managed-service account')
+    if not home.startswith('/') or any(p in ('', '.', '..') for p in home.split('/')[1:]) or any(c.isspace() or ord(c)<32 for c in home):
+        raise ValueError('Invalid managed-service home')
+    if len(source_commit)!=40 or len(source_inputs_sha256)!=64:
+        raise ValueError('Missing pinned source identity')
+    output.mkdir(parents=True, exist_ok=False, mode=0o700)
+    shutil.copyfile(binary, output/'remote-hosts-admin')
+    (output/'remote-hosts-admin').chmod(0o755)
+    policy=dict(protocol=1,device_id=device_id,grant_id=str(uuid.uuid4()),allowed_uid=uid,
+                allowed_gid=gid,home=home,platform='linux',enabled=False)
+    grant=dict(protocol=1,device_id=device_id,grant_id=policy['grant_id'],enabled=False,
+               not_before=0,expires_at=0,action='managed_service_restart',
+               unit='remote-hosts-code-agent.service',unit_sha256='0'*64,
+               executable='/unconfirmed/remote-hosts-code',executable_sha256='0'*64,
+               agent_config='/unconfirmed/agent.json',agent_config_sha256='0'*64)
+    for name,value in [('policy.json',policy),('service-grant.json',grant)]:
+        (output/name).write_text(json.dumps(value,indent=2)+'\n')
+        (output/name).chmod(0o600)
+    root=Path(__file__).resolve().parents[1]
+    (output/'service.template').write_bytes((root/'crates/remote-hosts-admin/src/assets/linux-managed-helper.service').read_bytes())
+    instructions = '''Prepared disabled data package. NOT installed, NOT activated, unsigned development artifact.
+No install.py, shell installer, sudoers, DNS, service restart or automatic root action is included.
+
+1. Independently verify manifest SHA-256 from the trusted preparation receipt; do not trust a replaced checksum next to a replaced binary.
+2. An OS administrator must stage the exact verified ELF in root-owned, non-writable ancestors before executing it as root.
+   Native bootstrap destination: /var/lib/remote-hosts-admin/bin/remote-hosts-admin (root:root 0755).
+   Verify the staged ELF digest AGAIN with the trusted OS checksum utility before execution.
+   Do not execute root code or a writable script directly from this package.
+3. From that verified native executable, inspect-site reads the fixed service and enrolled identity only.
+   /var/lib/remote-hosts-admin/bin/remote-hosts-admin linux-helper inspect-site --bundle <bundle> --manifest-sha256 <trusted-sha> --output <new-private-site.json>
+4. Prepare one installation review with the ORIGINAL operation UUID and explicit validity/unattended scope:
+   ... linux-helper prepare-install --bundle <bundle> --manifest-sha256 <trusted-sha> --request-id <original-operation-uuid> --site <site.json> --not-before <unix-seconds> --expires-at <unix-seconds> --allow-unattended --output <new-review.json>
+5. Review exact device/account, fixed resources, hashes, validity, out-of-band recovery and revocation. Accept the review's plan_sha256 explicitly:
+   ... linux-helper render-approved --bundle <bundle> --plan <review.json> --accept-plan-sha256 <approved-plan-sha> --output <new-private-render-directory>
+   This exports data only; it does not copy to system directories or start a service.
+6. Separate OS administrator installation is required for:
+   policy.json -> /var/lib/remote-hosts-admin/policy.json (root:root 0600)
+   service-grant.json -> /var/lib/remote-hosts-admin/service-grant.json (root:root 0600)
+   service.template -> /etc/systemd/system/remote-hosts-admin.service (root:root 0644)
+   receipts -> /var/lib/remote-hosts-admin/receipts (root:root 0700, preserve existing evidence)
+   helper binary as above; runtime socket /run/remote-hosts-admin/helper.sock.
+   Installing the PACKAGE templates keeps both policy and grant disabled. Approved rendered files are a separate, explicit authorization decision.
+   The administrator must independently verify each source and destination digest; refuse symlinks, writable ancestors or existing unknown installations.
+   Service manager reload/start/enable of remote-hosts-admin.service is a separate OS-authorized action, never done by this preparation tool.
+7. Ordinary authorized UID uses the ORIGINAL operation UUID:
+   remote-hosts-admin linux-helper status --device-id <device-uuid>
+   remote-hosts-admin linux-helper plan --device-id <device-uuid> --request-id <original-operation-uuid> --output <new-plan.json>
+   remote-hosts-admin linux-helper apply --device-id <device-uuid> --plan <plan.json> --accept-plan-sha256 <approved-action-plan-sha>
+   remote-hosts-admin linux-helper receipt --device-id <device-uuid> --request-id <same-operation-uuid>
+   remote-hosts-admin linux-helper revoke --device-id <device-uuid>
+   Unknown outcomes require the original receipt; never change UUID or replay.
+Revoke persists the original helper revocation marker; do not delete it to re-enable. Preserve receipts on uninstall.
+Only remote-hosts-code-agent.service restart is supported. No DNS, sing-box, reboot, package install or arbitrary shell.
+Other platforms need their own signed/ACL-verified adapter; this Linux package is not cross-platform activation evidence.
+'''
+    (output/'INSTALL.txt').write_text(instructions)
+    names=['remote-hosts-admin','policy.json','service-grant.json','service.template','INSTALL.txt']
+    manifest=dict(protocol=2,profile=MANAGED_PROFILE,helper_version='0.1.0',platform='linux',machine='x86_64',
+                  device_id=device_id,account=account,source_commit=source_commit,
+                  source_inputs_sha256=source_inputs_sha256,validation_kind='unsigned-dev',
+                  status='prepared_disabled',default_enabled=False,files={n:sha(output/n) for n in names})
+    (output/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
+    identity=sha(output/'manifest.json')
+    (output/'MANIFEST.sha256').write_text(identity+'  manifest.json\n')
+    return dict(output=str(output),manifest_sha256=identity,installed=False,**manifest)
+
+def publish_managed(args):
+    import fcntl, os, subprocess, tarfile
+    import release_current as current
+    root=current.primary(Path(__file__).resolve().parents[1])
+    default=root/'dist/remote-hosts-admin-linux-current'
+    archive=root/'dist/remote-hosts-admin-linux-current.tgz'
+    if args.platform not in (None,'linux') or args.binary is not None or (args.output is not None and args.output.resolve()!=default):
+        raise ValueError('Managed profile builds in primary main and publishes only its fixed Linux current group')
+    current.preflight(root)
+    lock=root/'.rust-storage/admin-helper-producer.lock'
+    with lock.open('a+b') as held:
+        fcntl.flock(held,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        env=current.snapshot_evidence(None,root)
+        defaults=[default,archive]
+        argv=['--component',MANAGED_COMPONENT,'--producer-pid',str(os.getpid())]
+        for p in defaults:argv+=['--file',str(p)]
+        (root/'dist').mkdir(exist_ok=True)
+        admitted=current.invoke(root,'release-admit',*argv)
+        if admitted.get('admission')!='reserved':
+            raise ValueError('Managed preparation current group was not admitted')
+        stages=[Path(p) for p in admitted['staged_files']]
+        if stages != [p.with_name('.'+p.name+'.pending') for p in defaults]:
+            current.abort(root)
+            raise ValueError('Unexpected current staging paths')
+        try:
+            run=lambda command:subprocess.run([sys.executable,str(root/'scripts/dev-verify.py'),'--exec',*command],cwd=root,check=True)
+            run(['cargo','build','-p','remote-hosts-admin','--locked','--offline'])
+            run(['cargo','zigbuild','-p','remote-hosts-admin','--release','--locked','--offline','--target','x86_64-unknown-linux-musl'])
+            current.check_inputs(root,env)
+            # Cargo metadata is read through the same pinned toolchain environment.
+            import importlib.util
+            spec=importlib.util.spec_from_file_location('admin_dev_verify',root/'scripts/dev-verify.py')
+            dev=importlib.util.module_from_spec(spec);spec.loader.exec_module(dev)
+            toolchain=dev.find_toolchain()
+            target=current.established_target(root,toolchain['env'])
+            result=prepare_managed(target/'x86_64-unknown-linux-musl/release/remote-hosts-admin',stages[0],
+                args.device_id,args.account,args.uid,args.gid,args.home,
+                subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),env['snapshot_id'])
+            checked=json.loads(subprocess.check_output([str(target/'debug/remote-hosts-admin'),'linux-helper','verify-package',
+                '--bundle',str(stages[0]),'--manifest-sha256',result['manifest_sha256']],cwd=root,text=True))
+            if checked['default_enabled'] is not False or checked['installed'] is not False or checked['grants_authority'] is not False:
+                raise ValueError('Native package verification did not confirm disabled preparation')
+            receipt=dict(protocol=1,validation_kind='unsigned-dev',native_verification=checked,
+                source_commit=result['source_commit'],source_inputs_sha256=env['snapshot_id'],
+                linux_native_execution=False,root_installation=False,root_activation=False)
+            (stages[0]/'prepared-validation.json').write_text(json.dumps(receipt,indent=2)+'\n')
+            with tarfile.open(stages[1],'w:gz') as tar:
+                for p in sorted(stages[0].iterdir()):
+                    if p.is_symlink() or not p.is_file():raise ValueError('Non-regular package member')
+                    tar.add(p,arcname=default.name+'/'+p.name,recursive=False)
+            with tarfile.open(stages[1],'r:gz') as tar:
+                members=tar.getmembers()
+                if len(members)!=len(list(stages[0].iterdir())):raise ValueError('Archive member count mismatch')
+                for m in members:
+                    name=Path(m.name)
+                    if not m.isfile() or name.parts[0]!=default.name or len(name.parts)!=2:
+                        raise ValueError('Unsafe prepared archive member')
+                    data=tar.extractfile(m).read()
+                    if hashlib.sha256(data).hexdigest()!=sha(stages[0]/name.name):raise ValueError('Archive roundtrip mismatch')
+            current.check_inputs(root,env)
+            validation=stages[0]/'prepared-validation.json'
+            published=current.invoke(root,'release-publish',*argv,'--validation-kind','unsigned-dev',
+                '--validation-file',str(validation),'--validation-digest',sha(validation),
+                '--expected-sha256',current.public_api().release_signature(stages[0]),
+                '--expected-sha256',sha(stages[1]))
+            if published.get('current_committed') is not True:raise ValueError('Current preparation publication not confirmed')
+            return dict(output=str(default),archive=str(archive),manifest_sha256=result['manifest_sha256'],
+                binary_sha256=result['files']['remote-hosts-admin'],installed=False,default_enabled=False,
+                publication=published)
+        except BaseException:
+            current.abort(root)
+            raise
+
 
 
 def sha(path: Path) -> str:
@@ -138,10 +288,15 @@ def prepare(binary: Path, output: Path, target: str, device_id: str, account: st
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--binary',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
-    p.add_argument('--platform',choices=['macos','linux'],required=True);p.add_argument('--device-id',required=True)
+    p.add_argument('--profile',choices=['legacy-cleanup','managed-service'],default='legacy-cleanup')
+    p.add_argument('--binary',type=Path);p.add_argument('--output',type=Path)
+    p.add_argument('--platform',choices=['macos','linux']);p.add_argument('--device-id',required=True)
     p.add_argument('--account',required=True);p.add_argument('--uid',type=int,required=True)
     p.add_argument('--gid',type=int,required=True);p.add_argument('--home',required=True)
     a=p.parse_args()
-    print(json.dumps(prepare(a.binary,a.output,a.platform,a.device_id,a.account,a.uid,a.gid,a.home),indent=2))
+    if a.profile=='managed-service':
+        print(json.dumps(publish_managed(a),indent=2))
+    else:
+        if a.binary is None or a.output is None or a.platform is None:p.error('Legacy profile requires --binary, --output and --platform')
+        print(json.dumps(prepare(a.binary,a.output,a.platform,a.device_id,a.account,a.uid,a.gid,a.home),indent=2))
 if __name__=='__main__':main()

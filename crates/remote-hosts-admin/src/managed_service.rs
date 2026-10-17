@@ -186,7 +186,7 @@ impl LinuxServiceDriver {
         Self { grant_path }
     }
 }
-fn trusted_resource(
+pub(crate) fn trusted_resource(
     path: &Path,
     expected: &str,
     executable: bool,
@@ -224,7 +224,7 @@ fn trusted_resource(
 /// Deliberately narrow service profile: no shell, lifecycle hooks, environment,
 /// namespace/path overrides, dependencies that could activate another service,
 /// continuation syntax, duplicate directives or systemd execution prefixes.
-fn validate_unit(text: &str, grant: &ServiceGrant, uid: u32, gid: u32) -> Result<()> {
+pub(crate) fn validate_unit(text: &str, grant: &ServiceGrant, uid: u32, gid: u32) -> Result<()> {
     let expected_start = format!("{} agent --config {}", grant.executable, grant.agent_config);
     let mut section = "";
     let mut seen = std::collections::BTreeSet::new();
@@ -445,7 +445,7 @@ pub fn validate_operation_binding(expected: &PlanRequest, record: &Record) -> Re
 }
 
 #[allow(async_fn_in_trait)]
-trait RecordClient {
+pub(crate) trait RecordClient {
     async fn request(&self, request: &crate::protocol::Request) -> Result<serde_json::Value>;
 }
 struct SocketClient<'a>(&'a Path);
@@ -478,7 +478,7 @@ pub async fn apply_bound(
 ) -> Result<Record> {
     apply_bound_using(&SocketClient(socket), expected, original, outcome_unknown).await
 }
-async fn apply_bound_using<C: RecordClient>(
+pub(crate) async fn apply_bound_using<C: RecordClient>(
     client: &C,
     expected: &PlanRequest,
     original: &Record,

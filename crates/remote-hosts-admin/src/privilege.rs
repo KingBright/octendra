@@ -39,6 +39,8 @@ pub enum Identity {
 pub enum Helper {
     NotInstalled,
     DetectedUnverified,
+    /// Set only after a root-peer-authenticated helper handshake, never path discovery.
+    Verified,
     Unavailable,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -186,7 +188,7 @@ pub fn discover(e: &Evidence) -> Capability {
     match e.helper {
         Helper::NotInstalled => reasons.push(Reason::HelperNotInstalled),
         Helper::DetectedUnverified => reasons.push(Reason::HelperIdentityUnverified),
-        Helper::Unavailable => {}
+        Helper::Unavailable | Helper::Verified => {}
     }
     match e.grant {
         Grant::NotChecked => reasons.push(Reason::GrantNotVerified),

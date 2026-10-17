@@ -14,7 +14,8 @@ Request 和 Record；没有第二套任务 UUID、数据库、credential 或网�
   argv、环境或脚本；DNS 修复、Agent 升级及其它服务不在本后端范围。
 - transport::serve_managed_service 是 Linux 库入口，复用原 root 安装检查、
   root 所有 policy/state/socket 目录、helper 独占锁、串行请求处理和内核 peer UID。
-  客户端复用原 root peer 校验。没有新 CLI、安装或启用入口。
+  客户端复用原 root peer 校验。后续原生 CLI 与禁用包准备入口见
+  [Linux 调用与安装准备](octendra-linux-helper-entry.md)；没有自动 root 安装入口。
 - 认证范围是授权本地 UID，不是应用签名隔离：同一 UID 的其它程序也处于边界内。
   远程 owner/session 的连接认证仍由既有 Gateway 执行，未新建旁路身份系统。
 - ServiceGrant 是单独安装、root 所有且 0600 的动作策略，绑定原 device/grant UUID、
@@ -61,7 +62,7 @@ macOS 签名 helper、Windows 服务/pipe、Android app/shell/root 发现没有�
 privilege status/plan CLI 仍只做第一步合同，不宣称 execution_available。
 本机 fixture 使用隔离 Driver、私有临时 Store 和内存状态，不执行 systemctl。
 Linux cross-check 只证明 Linux 目标编译，不能证明 root IPC 或真实服务已验收。
-后续需将该库入口接入经审阅的安装/启动流程和 Gateway 调用点，再做目标机验收。
+原生 CLI 已接入该库；目标机 root IPC、服务重启和 Gateway 实际集成仍待验收。
 
 ## HO5 首次启用前的具体确认项（本步不激活）
 
@@ -88,7 +89,7 @@ Linux cross-check 只证明 Linux 目标编译，不能证明 root IPC 或真实
    不能依赖 Agent 自身来读 helper 回执。未知结清流程、撤销/卸载及保留审计需先验收。
    root 可更改本机日志，回执不被描述成不可篡改。
 6. 首次 root 安装、启动、固定动作授权和真实一次重启验收应是后续单独批准的步骤。
-   当前没有安装器/CLI 激活入口，也没有完成 Linux root 实机验收，因此本增量不具备
+   当前只有禁用包准备、原生检查与数据导出入口，未完成 Linux root 实机验收，因此不具备
    无人值守上线结论。NNP、SELinux 与其它平台边界保持，不能通过 sudoers 或全局
    polkit 授权绕过。
 
