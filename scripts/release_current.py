@@ -86,7 +86,11 @@ def invoke(root, action, *args, required=True):
     try:
         result = subprocess.run([sys.executable, '-B', str(helper), action, '--project', str(root), *args],
                                 cwd=root, text=True, capture_output=True, check=False)
-        report = json.loads(result.stdout.strip() or result.stderr.strip())
+        raw = result.stdout.strip() or result.stderr.strip()
+        try:
+            report = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise ValueError('shared current helper returned a non-JSON receipt; exit='+str(result.returncode)+'; evidence='+repr(raw[:4096])) from error
         if result.returncode or not isinstance(report, dict) or report.get('mode') == 'refused':
             raise ValueError('shared current transaction refused: '+str(report))
         return report

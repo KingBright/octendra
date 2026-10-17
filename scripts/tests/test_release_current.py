@@ -52,6 +52,16 @@ class CurrentTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.manifest = lifecycle.snapshot_evidence(None, self.root)
 
+    def test_non_json_helper_failure_retains_exit_and_bounded_evidence(self):
+        failure = subprocess.CompletedProcess([], 1, '', 'compiler active traceback')
+        with mock.patch.object(subprocess, 'run', return_value=failure):
+            with self.assertRaisesRegex(ValueError, 'exit=1; evidence=.*compiler active'):
+                lifecycle.invoke(self.root, 'release-admit')
+        with mock.patch.object(subprocess, 'run', return_value=failure):
+            result = lifecycle.invoke(self.root, 'release-admit', required=False)
+        self.assertEqual(result['status'], 'deferred')
+        self.assertTrue(result['artifacts_preserved'])
+
     def test_main_fingerprint_does_not_create_snapshot_copy(self):
         self.assertEqual(self.manifest['source_inputs'], source_snapshot.verifier(self.root).inputs(self.root))
         self.assertFalse((self.root/'source-snapshot.json').exists())
