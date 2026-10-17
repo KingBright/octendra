@@ -3530,7 +3530,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
-    async fn workspace_creation_supports_bounded_multi_conversation_capacity()
+    async fn workspace_creation_exceeds_legacy_capacity_and_reaps_idle_sessions()
     -> Result<(), Box<dyn std::error::Error>> {
         let pool = connect_sqlite("sqlite::memory:").await?;
         migrate(&pool).await?;
@@ -3816,7 +3816,9 @@ mod tests {
             );
         }
 
-        let limited_response = app
+        // b036fc7 removed the transport's artificial 32-workspace cap.
+        // Keep checking lifecycle safety after allocating beyond that legacy boundary.
+        let beyond_legacy_limit_response = app
             .clone()
             .oneshot(
                 Request::builder()
@@ -3827,8 +3829,8 @@ mod tests {
             )
             .await?;
         assert_eq!(
-            limited_response.status(),
-            axum::http::StatusCode::TOO_MANY_REQUESTS
+            beyond_legacy_limit_response.status(),
+            axum::http::StatusCode::CREATED
         );
 
         let protected_workspace_id: WorkspaceId = workspace_id.parse()?;
@@ -3868,7 +3870,7 @@ mod tests {
                 .iter()
                 .filter(|workspace| workspace.state == WorkspaceState::Closed)
                 .count(),
-            31
+            32
         );
 
         let list_response = app
@@ -3880,7 +3882,7 @@ mod tests {
             .await?;
         let bytes = body::to_bytes(list_response.into_body(), usize::MAX).await?;
         let list_body: serde_json::Value = serde_json::from_slice(&bytes)?;
-        assert_eq!(list_body.as_array().map(Vec::len), Some(33));
+        assert_eq!(list_body.as_array().map(Vec::len), Some(34));
         Ok(())
     }
 
