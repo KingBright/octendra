@@ -19,6 +19,8 @@ pub mod installation;
 #[cfg(unix)]
 pub mod linux_helper_cli;
 #[cfg(unix)]
+pub mod macos_identity;
+#[cfg(unix)]
 pub mod managed_service;
 pub mod privilege;
 pub mod privilege_cli;

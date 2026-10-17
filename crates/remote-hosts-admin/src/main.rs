@@ -19,6 +19,11 @@ mod unix_cli {
     }
     #[derive(Subcommand)]
     enum Action {
+        /// Read-only signature gate for the fixed macOS root-helper file. Never installs.
+        MacosHelper {
+            #[command(subcommand)]
+            command: remote_hosts_admin::macos_identity::Command,
+        },
         /// Linux fixed-action helper and offline installation preparation. Never sudo.
         LinuxHelper {
             #[command(subcommand)]
@@ -65,6 +70,11 @@ mod unix_cli {
         let cli = Cli::parse();
         let is_apply = matches!(&cli.command, Action::Apply { .. });
         let req = match cli.command {
+            Action::MacosHelper { command } => {
+                let value = remote_hosts_admin::macos_identity::run(command).await?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                return Ok(());
+            }
             Action::LinuxHelper { command } => {
                 let value = remote_hosts_admin::linux_helper_cli::run(command, &cli.socket).await?;
                 println!("{}", serde_json::to_string_pretty(&value)?);
