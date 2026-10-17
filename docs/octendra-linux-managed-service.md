@@ -51,9 +51,9 @@ OutcomeUnknown 保留 Running、有限脱敏错误和原回执，不写成可安
 
 撤销只拒绝新执行；原 Receipt 可继续读取。未知记录不会因改 grant、
 新 UUID、重连、重启 helper 或更新客户端而自动结清。
-本步没有添加 root 侧 outcome resolution 管理入口；正式启用前仍需定义并验收
-按原 Record 和实际服务证据结清的管理员流程。Gateway 的 outcome_resolve
-不能被当作已结清 helper 私有 Record 的证明。
+后续已添加 [root 离线行政关闭入口](octendra-linux-unknown-settlement.md)，
+保留 closed_unknown，不推断历史执行成功或未执行；正式使用仍需实机验收。
+Gateway 的 outcome_resolve 不能被当作已结清 helper 私有 Record 的证明。
 
 ## 平台与验证边界
 

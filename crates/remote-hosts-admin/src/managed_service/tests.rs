@@ -103,6 +103,7 @@ async fn bound_client_only_reads_when_original_receipt_is_running_or_complete() 
     let r = prepare(&e, &p).await;
     for state in [
         crate::protocol::State::Running,
+        crate::protocol::State::ClosedUnknown,
         crate::protocol::State::Succeeded,
     ] {
         let mut fresh = r.clone();

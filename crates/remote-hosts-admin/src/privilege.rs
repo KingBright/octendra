@@ -286,7 +286,7 @@ pub fn plan(
             "original_receipt_identity_mismatch"
         );
         next_action = match record.state {
-            State::Running => NextAction::ObserveOriginal,
+            State::Running | State::ClosedUnknown => NextAction::ObserveOriginal,
             State::Succeeded | State::Failed if !outcome_unknown => NextAction::ReadOriginalReceipt,
             _ => next_action,
         };

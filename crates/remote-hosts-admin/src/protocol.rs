@@ -183,6 +183,8 @@ pub struct Plan {
 pub enum State {
     Prepared,
     Running,
+    /// Administrator closed an uncertain operation; execution outcome remains unproven.
+    ClosedUnknown,
     Succeeded,
     Failed,
 }

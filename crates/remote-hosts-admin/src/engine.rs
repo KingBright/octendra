@@ -50,6 +50,12 @@ pub fn unix_time() -> u64 {
 }
 fn response(record: &Record) -> Result<Value> {
     let mut v = serde_json::to_value(record)?;
+    if record.state == State::ClosedUnknown {
+        v["execution_outcome"] = json!("unknown");
+        v["administratively_closed"] = json!(true);
+        v["replay_allowed"] = json!(false);
+        v["next_action"] = json!("read_original_receipt_no_replay");
+    }
     if record.state == State::Running {
         v["recovery_required"] = json!(true);
         v["next_action"] =
@@ -292,6 +298,39 @@ mod tests {
             request_id: id.into(),
             plan_sha256: v["plan_sha256"].as_str().unwrap().into(),
         }
+    }
+    #[tokio::test]
+    async fn closed_unknown_is_observable_and_never_replayed() {
+        let (_d, e, p) = fixture();
+        let id = uuid::Uuid::new_v4().to_string();
+        let v = plan(&e, &p, &id).await;
+        let mut r = e.store.load(&id).unwrap().unwrap();
+        r.state = State::ClosedUnknown;
+        r.error = Some("outcome_unknown_observe_original".into());
+        e.store.save(&r).unwrap();
+        let out = e.handle(&p, 501, apply(&id, &v), 1001).await.unwrap();
+        assert_eq!(out["state"], "closed_unknown");
+        assert_eq!(out["execution_outcome"], "unknown");
+        assert_eq!(out["replay_allowed"], false);
+        assert_eq!(e.backend.calls.get(), 0);
+        e.store.revoke(501, 1002).unwrap();
+        let receipt = e
+            .handle(&p, 501, Request::Receipt { request_id: id }, 1003)
+            .await
+            .unwrap();
+        assert_eq!(receipt["administratively_closed"], true);
+        assert!(
+            e.handle(
+                &p,
+                501,
+                Request::Plan {
+                    request_id: uuid::Uuid::new_v4().to_string()
+                },
+                1003
+            )
+            .await
+            .is_err()
+        );
     }
     #[tokio::test]
     async fn duplicate_apply_executes_once() {

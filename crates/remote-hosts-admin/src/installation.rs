@@ -15,7 +15,7 @@ use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
     io::{Read, Write},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
 pub const PROFILE: &str = "linux-managed-service-v1";

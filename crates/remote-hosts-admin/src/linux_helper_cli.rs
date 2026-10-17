@@ -15,6 +15,26 @@ use std::path::{Path, PathBuf};
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Root-only offline review; requires revoked grant and original helper lock.
+    SettlementPreview {
+        #[arg(long)]
+        device_id: String,
+        #[arg(long)]
+        request_id: String,
+    },
+    /// Close original uncertainty without claiming success or permitting replay.
+    SettleUnknown {
+        #[arg(long)]
+        device_id: String,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        accept_record_sha256: String,
+        #[arg(long)]
+        accept_observation_sha256: String,
+        #[arg(long)]
+        acknowledge_outcome_unproven: bool,
+    },
     /// Verify a static, disabled bundle as data; allowed on preparation hosts.
     VerifyPackage {
         #[arg(long)]
@@ -262,6 +282,28 @@ async fn apply_using<C: RecordClient>(
 }
 pub async fn run(command: Command, socket: &Path) -> Result<Value> {
     match command {
+        Command::SettlementPreview {
+            device_id,
+            request_id,
+        } => return crate::settlement::run(&device_id, &request_id, None).await,
+        Command::SettleUnknown {
+            device_id,
+            request_id,
+            accept_record_sha256,
+            accept_observation_sha256,
+            acknowledge_outcome_unproven,
+        } => {
+            ensure!(
+                acknowledge_outcome_unproven,
+                "explicit_unknown_outcome_acknowledgement_required"
+            );
+            return crate::settlement::run(
+                &device_id,
+                &request_id,
+                Some((&accept_record_sha256, &accept_observation_sha256)),
+            )
+            .await;
+        }
         Command::VerifyPackage {
             bundle,
             manifest_sha256,
@@ -379,7 +421,7 @@ async fn run_client<C: RecordClient>(command: Command, client: &C, uid: u32) -> 
             .await?;
             let execution = match record.state {
                 State::Succeeded => "succeeded",
-                State::Running => "unknown",
+                State::Running | State::ClosedUnknown => "unknown",
                 State::Failed => "failed",
                 State::Prepared => "not_executed",
             };

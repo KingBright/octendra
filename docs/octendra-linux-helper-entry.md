@@ -2,6 +2,12 @@
 
 本入口复用原 Capability、PlanRequest、Record、Engine、Store 和 Unix socket。动作仍仅为固定 `remote-hosts-code-agent.service` 的重启；DNS、sing-box、RemotePlay、任意 shell 和软件升级均不包含。本文给出后续管理员验收路径；本轮不安装、启动或启用 root helper。
 
+## HO5 实际服务模型
+
+现场 Agent 使用 liang（UID/GID 1000/1000）的 systemd 用户服务；用户 bus 可连接、CanStart/CanStop=yes、RefuseManualStart/Stop=no。普通重启应走既有用户管理器，保持 UID 1000，无需 root helper；本轮只读验证控制条件，没有实际重启。现有用户 unit、ELF/config、%h 路径和 drop-in 不适配下述系统服务 profile。不得把它们交给 root 执行、去掉 root 检查、删除 drop-in 或迁移为系统服务来强行适配。当前没有为 HO5 普通重启新增 root 权限的必要项；真正 root 资源维护须另按固定 root 所有目标审阅。
+
+准备包的 --account/UID/GID/home 必须来自目标机 NSS 证据，不能沿用打包机账户；后续 inspect-site 会再次核对。禁用包是通用系统服务候选，不是 HO5 用户服务的安装方案。
+
 ## 固定准备入口
 
 在原 main 主目录执行 `python3 scripts/prepare-admin-helper.py --profile managed-service --device-id <设备 UUID> --account <本机账户> --uid <实际 UID> --gid <实际 GID> --home /unconfirmed`。它复用 `~/rust-target`、既有 rust-storage registry 和 current 发布事务；不接收外部二进制或任意输出目录。交付为 `dist/remote-hosts-admin-linux-current` 和同名 `.tgz`。包内只有静态 Linux x86_64 ELF、策略数据、固定 unit 模板、清单和说明，无安装脚本。policy 与 service grant 默认均为 false，时间窗为零，资源路径和摘要尚未确认。`unsigned-dev` 仅表示准备与校验，不是签名发行或 Linux 实机验收。
@@ -34,6 +40,6 @@ status 只有内核确认 root peer、身份/profile/策略有效才报告 share
 
 ## 验证与剩余门槛
 
-隔离测试覆盖打包默认禁用、无脚本、篡改/链接/动态 ELF 拒绝、明确摘要批准、现场漂移、私有导出、原操作读取、未知结果不重试和撤销。Linux 静态构建与 macOS 原生 CLI 测试不能替代 Linux root IPC、实际固定服务重启、Agent 断连/恢复、带外读取、撤销/卸载以及原 unknown Record 结清的实机验收。root 侧 unknown settlement 仍没有管理入口，Gateway outcome_resolve 不能代替 helper Record 结清。
+隔离测试覆盖打包默认禁用、无脚本、篡改/链接/动态 ELF 拒绝、明确摘要批准、现场漂移、私有导出、原操作读取、未知结果不重试和撤销。Linux 静态构建与 macOS 原生 CLI 测试不能替代 Linux root IPC、实际固定服务重启、Agent 断连/恢复、带外读取、撤销/卸载以及原 unknown Record 结清的实机验收。root 侧提供[离线行政关闭入口](octendra-linux-unknown-settlement.md)，仍须 Linux root 实机验收；Gateway outcome_resolve 不能代替 helper Record 结清。
 
 macOS 后续必须用签名 helper、受保护 launchd 和内核 peer 身份实现同一合同；Windows 必须用受保护服务、pipe ACL 与调用者令牌；Android app/shell/root 必须独立证明执行边界。当前没有这些平台的可执行适配，不允许回退到 sudo、脚本或放宽 DNS/网络权限。

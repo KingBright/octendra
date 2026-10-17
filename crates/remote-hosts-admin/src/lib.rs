@@ -24,6 +24,8 @@ pub mod privilege;
 pub mod privilege_cli;
 pub mod protocol;
 #[cfg(unix)]
+pub mod settlement;
+#[cfg(unix)]
 pub mod tasks;
 #[cfg(unix)]
 pub mod transport;

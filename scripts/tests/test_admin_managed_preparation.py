@@ -45,6 +45,16 @@ class ManagedPreparationTests(unittest.TestCase):
         self.assertEqual(set(report['files']),{'remote-hosts-admin','policy.json','service-grant.json','service.template','INSTALL.txt'})
         for name,digest in report['files'].items():self.assertEqual(m.sha(root/name),digest)
         self.assertEqual(m.sha(root/'manifest.json'),report['manifest_sha256'])
+    def test_remote_account_is_explicit_and_never_inferred_from_preparation_host(self):
+        from unittest import mock
+        with mock.patch.dict('os.environ', {'USER':'jinliang','LOGNAME':'jinliang','HOME':'/Users/jinliang'}):
+            report=self.prepare(account='liang',uid=1000,gid=1000,home='/home/liang')
+        policy=json.loads((self.root/'bundle/policy.json').read_text())
+        manifest=json.loads((self.root/'bundle/manifest.json').read_text())
+        self.assertEqual(report['account'],'liang')
+        self.assertEqual(manifest['account'],'liang')
+        self.assertEqual((policy['allowed_uid'],policy['allowed_gid'],policy['home']),(1000,1000,'/home/liang'))
+        self.assertFalse(policy['enabled'])
     def test_no_root_uid_or_gid_scope(self):
         for args in [{'uid':0},{'gid':0}]:
             with self.assertRaises(ValueError):self.prepare(**args)
