@@ -31,3 +31,4 @@ pub mod settlement;
 pub mod tasks;
 #[cfg(unix)]
 pub mod transport;
+pub mod windows_pipe;
