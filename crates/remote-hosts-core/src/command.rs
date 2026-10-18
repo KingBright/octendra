@@ -1,7 +1,55 @@
 //! Command profiles and validation.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+
+/// Existing source-tree ceiling. This diagnostic change does not raise it.
+pub const MAX_SHELL_SCRIPT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Structural rejection, with metadata only and no script contents.
+#[derive(Clone, Debug, Error, Eq, PartialEq, Serialize)]
+#[serde(tag = "error_code")]
+pub enum ShellScriptError {
+    /// Empty or whitespace-only text.
+    #[serde(rename = "empty_shell_script")]
+    #[error("empty_shell_script")]
+    Empty,
+    /// NUL cannot be passed as an OS argument.
+    #[serde(rename = "shell_script_contains_nul")]
+    #[error("shell_script_contains_nul")]
+    Nul,
+    /// UTF-8 script bytes exceed the existing instance ceiling.
+    #[serde(rename = "script_too_large")]
+    #[error(
+        "script_too_large: actual_bytes={actual_bytes}, max_bytes={max_bytes}, script_sha256={script_sha256}"
+    )]
+    TooLarge {
+        /// Actual UTF-8 byte count, not Unicode character count.
+        actual_bytes: usize,
+        /// Existing ceiling used for this validation.
+        max_bytes: usize,
+        /// Digest of the exact resolved script, never another request's receipt.
+        script_sha256: String,
+    },
+}
+
+fn validate_shell_script(script: &str, max_bytes: usize) -> Result<(), ShellScriptError> {
+    if script.trim().is_empty() {
+        return Err(ShellScriptError::Empty);
+    }
+    if script.contains('\0') {
+        return Err(ShellScriptError::Nul);
+    }
+    if script.len() > max_bytes {
+        return Err(ShellScriptError::TooLarge {
+            actual_bytes: script.len(),
+            max_bytes,
+            script_sha256: format!("{:x}", Sha256::digest(script.as_bytes())),
+        });
+    }
+    Ok(())
+}
 
 use crate::ServerProtectionPolicy;
 
@@ -39,6 +87,9 @@ pub struct CommandProfile {
 /// Command validation error.
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum CommandValidationError {
+    /// A script failed structural validation without executing anything.
+    #[error(transparent)]
+    InvalidScript(#[from] ShellScriptError),
     /// Program is empty.
     #[error("program must not be empty")]
     EmptyProgram,
@@ -404,12 +455,8 @@ fn one_shell_script(
     } else {
         args.join("\n")
     };
-    if script.trim().is_empty() || script.contains('\0') || script.len() > 16 * 1024 * 1024 {
-        return Err(CommandProfileResolutionError::ArgumentNotAllowed {
-            profile: name.to_owned(),
-            argument: "<invalid-script>".to_owned(),
-        });
-    }
+    validate_shell_script(&script, MAX_SHELL_SCRIPT_BYTES)
+        .map_err(CommandValidationError::InvalidScript)?;
     Ok(script)
 }
 
@@ -436,18 +483,104 @@ fn validate_shell_profile(profile: &CommandProfile) -> Result<(), CommandValidat
             ));
         }
     };
-    if script.is_none_or(|script| {
-        script.trim().is_empty() || script.contains('\0') || script.len() > 16 * 1024 * 1024
-    }) {
-        return Err(CommandValidationError::InvalidShellProfile(
-            "script must be non-empty, contain no NUL, and be at most 16 MiB".to_owned(),
-        ));
-    }
-    Ok(())
+    let script = script.ok_or_else(|| {
+        CommandValidationError::InvalidShellProfile("missing script argument".to_owned())
+    })?;
+    validate_shell_script(script, MAX_SHELL_SCRIPT_BYTES)
+        .map_err(CommandValidationError::InvalidScript)
 }
 
 #[cfg(test)]
 mod tests {
+    use sha2::Digest;
+
+    #[test]
+    fn script_diagnostics_keep_existing_source_limit_and_legacy_boundary_semantics() {
+        use super::{MAX_SHELL_SCRIPT_BYTES, ShellScriptError, validate_shell_script};
+        assert_eq!(MAX_SHELL_SCRIPT_BYTES, 16 * 1024 * 1024);
+        for limit in [65536, MAX_SHELL_SCRIPT_BYTES] {
+            for size in [limit - 1, limit] {
+                assert!(validate_shell_script(&"x".repeat(size), limit).is_ok());
+            }
+            let rejected = validate_shell_script(&"x".repeat(limit + 1), limit);
+            assert!(
+                matches!(rejected,Err(ShellScriptError::TooLarge{actual_bytes,max_bytes,..}) if actual_bytes==limit+1 && max_bytes==limit)
+            );
+        }
+        assert!(matches!(
+            validate_shell_script(&"x".repeat(68644), 65536),
+            Err(ShellScriptError::TooLarge {
+                actual_bytes: 68644,
+                max_bytes: 65536,
+                ..
+            })
+        ));
+        assert!(validate_shell_script(&"x".repeat(68644), MAX_SHELL_SCRIPT_BYTES).is_ok());
+    }
+    #[test]
+    fn script_diagnostics_distinguish_blank_nul_and_utf8_bytes_without_leaking_body() {
+        use super::{ShellScriptError, validate_shell_script};
+        assert_eq!(
+            validate_shell_script(" \n", 10),
+            Err(ShellScriptError::Empty)
+        );
+        assert_eq!(
+            validate_shell_script("secret\0body", 100),
+            Err(ShellScriptError::Nul)
+        );
+        let e = validate_shell_script("密文", 5).expect_err("six UTF-8 bytes exceed five");
+        let v = serde_json::to_value(&e).expect("serializable diagnostic");
+        assert_eq!(v["error_code"], "script_too_large");
+        assert_eq!(v["actual_bytes"], 6);
+        assert_eq!(v["max_bytes"], 5);
+        assert_eq!(
+            v["script_sha256"],
+            format!("{:x}", sha2::Sha256::digest("密文".as_bytes()))
+        );
+        assert!(!e.to_string().contains("密文"));
+        assert_ne!(validate_shell_script("不同", 5), Err(e));
+    }
+    #[test]
+    fn shell_resolution_and_preconstructed_profiles_share_structural_errors() {
+        use super::{CommandValidationError, ShellScriptError};
+        for (script, expected) in [
+            (" \n", ShellScriptError::Empty),
+            ("bad\0input", ShellScriptError::Nul),
+        ] {
+            let resolved = CommandProfileCatalog::resolve_builtin(
+                "shell.posix",
+                vec![script.into()],
+                &ServerProtectionPolicy::default(),
+            );
+            assert_eq!(
+                resolved,
+                Err(CommandProfileResolutionError::Validation(
+                    CommandValidationError::InvalidScript(expected.clone())
+                ))
+            );
+            for (name, program, args) in [
+                ("shell.posix", "sh", vec!["-lc".into(), script.into()]),
+                (
+                    "shell.powershell",
+                    "powershell.exe",
+                    vec![
+                        "-NoLogo".into(),
+                        "-NoProfile".into(),
+                        "-NonInteractive".into(),
+                        "-Command".into(),
+                        script.into(),
+                    ],
+                ),
+            ] {
+                let mut profile = readonly_profile(program, args);
+                profile.name = name.into();
+                assert_eq!(
+                    profile.validate(),
+                    Err(CommandValidationError::InvalidScript(expected.clone()))
+                );
+            }
+        }
+    }
     use super::{
         CommandClass, CommandProfile, CommandProfileCatalog, CommandProfileResolutionError,
     };

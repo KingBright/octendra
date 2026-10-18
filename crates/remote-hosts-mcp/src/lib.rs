@@ -10813,6 +10813,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_script_rejection_never_queues_or_reuses_an_old_request_receipt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use remote_hosts_core::command::MAX_SHELL_SCRIPT_BYTES;
+        let fixture = TestFixture::new().await?;
+        let agent =
+            RemoteHostsMcpServer::with_profile(fixture.repositories.clone(), ToolProfile::Agent);
+        let prepared = call_tool(
+            agent.clone(),
+            tools::PREPARE_WORKSPACE,
+            Some(json!({"host_id":fixture.host_id.to_string()})),
+        )
+        .await?;
+        let workspace_id = prepared["workspace"]["id"]
+            .as_str()
+            .ok_or("workspace id missing")?;
+        let original=call_tool(agent.clone(),tools::RUN_IN_WORKSPACE,Some(json!({
+            "workspace_id":workspace_id,"command_profile":"shell.posix","args":["printf fixture"],
+            "coordination_mode":"mutating","idempotency_key":"script-boundary-original"
+        }))).await?;
+        let original_id = original["operation"]["id"]
+            .as_str()
+            .ok_or("operation id missing")?;
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operation_runs")
+            .fetch_one(&fixture.pool)
+            .await?;
+        let chunks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operation_output_chunks")
+            .fetch_one(&fixture.pool)
+            .await?;
+        for (script, code) in [
+            ("x".repeat(MAX_SHELL_SCRIPT_BYTES + 1), "script_too_large"),
+            (" \n".to_owned(), "empty_shell_script"),
+            ("secret\0payload".to_owned(), "shell_script_contains_nul"),
+        ] {
+            // Reuse the old semantic key deliberately: invalid input must be
+            // rejected before idempotency lookup, never return the old receipt.
+            let request = serde_json::from_value(json!({
+                "workspace_id":workspace_id,"command_profile":"shell.posix","args":[script],
+                "coordination_mode":"mutating","idempotency_key":"script-boundary-original"
+            }))?;
+            let error = agent
+                .queue_workspace_operation(request)
+                .await
+                .err()
+                .ok_or("invalid script unexpectedly accepted")?;
+            assert!(error.starts_with(code), "{error}");
+            assert!(!error.contains(original_id));
+            assert!(!error.contains("secret"));
+            if code == "script_too_large" {
+                assert!(error.contains(&format!("actual_bytes={}", MAX_SHELL_SCRIPT_BYTES + 1)));
+                assert!(error.contains(&format!("max_bytes={MAX_SHELL_SCRIPT_BYTES}")));
+                assert!(error.contains("script_sha256="));
+            }
+            let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operation_runs")
+                .fetch_one(&fixture.pool)
+                .await?;
+            let after_chunks: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM operation_output_chunks")
+                    .fetch_one(&fixture.pool)
+                    .await?;
+            assert_eq!(after, before);
+            assert_eq!(after_chunks, chunks);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn mcp_operation_idempotency_is_scoped_to_one_agent_session()
     -> Result<(), Box<dyn std::error::Error>> {
         let fixture = TestFixture::new().await?;
