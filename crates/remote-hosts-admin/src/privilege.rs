@@ -232,6 +232,19 @@ pub struct PlanRequest {
     pub expected_policy_sha256: String,
     pub expected_target_sha256: String,
 }
+impl PlanRequest {
+    /// Closed request syntax only; this does not establish authorization.
+    pub fn validate(&self) -> Result<()> {
+        valid_id(&self.request_id)?;
+        valid_id(&self.device_id)?;
+        ensure!(
+            valid_digest(&self.expected_policy_sha256)
+                && valid_digest(&self.expected_target_sha256),
+            "invalid_expected_digest"
+        );
+        Ok(())
+    }
+}
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NextAction {
@@ -267,13 +280,7 @@ pub fn plan(
     outcome_unknown: bool,
     now: u64,
 ) -> Result<PrivilegePlan> {
-    valid_id(&request.request_id)?;
-    valid_id(&request.device_id)?;
-    ensure!(
-        valid_digest(&request.expected_policy_sha256)
-            && valid_digest(&request.expected_target_sha256),
-        "invalid_expected_digest"
-    );
+    request.validate()?;
     let mut next_action = if outcome_unknown {
         NextAction::ObserveOriginal
     } else {

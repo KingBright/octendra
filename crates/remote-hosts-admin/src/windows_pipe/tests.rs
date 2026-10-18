@@ -1,5 +1,197 @@
 use super::*;
 
+fn frame(p: &Policy) -> Vec<u8> {
+    let mut bytes = serde_json::to_vec(&request(p)).unwrap();
+    bytes.push(b'\n');
+    bytes
+}
+fn rejects_before_collection(input: crate::windows_caller::AssessmentInput<'_>, bytes: &[u8]) {
+    let called = std::cell::Cell::new(false);
+    let result = crate::windows_caller::assess_with_collector(input, bytes, || {
+        called.set(true);
+        anyhow::bail!("collector should not run")
+    });
+    assert!(result.is_err());
+    assert!(!called.get());
+}
+#[test]
+fn malformed_unterminated_multiple_and_claimed_identity_frames_never_collect() {
+    let p = policy();
+    let valid = frame(&p);
+    let mut without_newline = valid.clone();
+    without_newline.pop();
+    let mut double = valid.clone();
+    double.extend_from_slice(&valid);
+    let mut crlf = valid.clone();
+    crlf.insert(crlf.len() - 1, b'\r');
+    let mut unknown = serde_json::to_value(request(&p)).unwrap();
+    unknown["caller_sid"] = serde_json::json!("S-1-5-18");
+    let mut claimed = serde_json::to_vec(&unknown).unwrap();
+    claimed.push(b'\n');
+    let duplicate = format!(
+        "{{\"request_id\":\"{}\",{}",
+        REQUEST,
+        std::str::from_utf8(&valid).unwrap().trim_start_matches('{')
+    )
+    .into_bytes();
+    for bytes in [
+        vec![],
+        without_newline,
+        double,
+        crlf,
+        claimed,
+        duplicate,
+        vec![0xff, b'\n'],
+        b"{} {}\n".to_vec(),
+    ] {
+        rejects_before_collection(native_input(&p, observation(&p, &request(&p))), &bytes);
+    }
+}
+#[test]
+fn frame_binds_original_operation_device_action_policy_and_target_before_collection() {
+    let p = policy();
+    for i in 0..5 {
+        let mut changed = request(&p);
+        match i {
+            0 => changed.request_id = uuid::Uuid::nil().to_string(),
+            1 => changed.device_id = uuid::Uuid::nil().to_string(),
+            2 => changed.action = Action::ExactSourceDnsRepair,
+            3 => changed.expected_policy_sha256 = "c".repeat(64),
+            _ => changed.expected_target_sha256 = "c".repeat(64),
+        }
+        let mut bytes = serde_json::to_vec(&changed).unwrap();
+        bytes.push(b'\n');
+        let mut o = observation(&p, &request(&p));
+        // Even a matching self-reported digest cannot override the expected plan.
+        o.frame_request_sha256 = digest(&changed).unwrap();
+        rejects_before_collection(native_input(&p, o), &bytes);
+    }
+}
+#[test]
+fn noncanonical_ids_and_malformed_digests_never_reach_native_collection() {
+    let p = policy();
+    for i in 0..3 {
+        let mut changed = request(&p);
+        match i {
+            0 => changed.request_id = REQUEST.to_uppercase(),
+            1 => changed.device_id = "not-a-device".into(),
+            _ => changed.expected_target_sha256 = "B".repeat(64),
+        }
+        let mut bytes = serde_json::to_vec(&changed).unwrap();
+        bytes.push(b'\n');
+        let mut input = native_input(&p, observation(&p, &request(&p)));
+        input.observation.frame_request_sha256 = digest(&changed).unwrap();
+        input.request = changed;
+        rejects_before_collection(input, &bytes);
+    }
+}
+#[test]
+fn mismatched_frame_observation_is_rejected_rather_than_overwritten() {
+    let p = policy();
+    let mut o = observation(&p, &request(&p));
+    o.frame_request_sha256 = "0".repeat(64);
+    rejects_before_collection(native_input(&p, o), &frame(&p));
+}
+#[test]
+fn exact_frame_bytes_are_bound_without_becoming_peer_or_grant_authority() {
+    let p = policy();
+    let o = observation(&p, &request(&p));
+    let kernel = o.caller.clone().unwrap();
+    let first = frame(&p);
+    let mut second = first.clone();
+    second.insert(second.len() - 1, b' ');
+    let a =
+        crate::windows_caller::assess_with_collector(native_input(&p, o.clone()), &first, || {
+            Ok(kernel.clone())
+        })
+        .unwrap();
+    let b =
+        crate::windows_caller::assess_with_collector(native_input(&p, o), &second, || Ok(kernel))
+            .unwrap();
+    assert!(a.offline_policy_checks_passed && b.offline_policy_checks_passed);
+    assert_ne!(a.frame_sha256, b.frame_sha256);
+    assert_ne!(a.binding_sha256, b.binding_sha256);
+    assert!(!a.native_peer_authenticated && !a.grants_authority && !a.plan.execution_enabled);
+    assert_eq!(a.plan.request.request_id, REQUEST);
+    assert_eq!(
+        a.plan.expires_at,
+        a.plan.created_at + crate::protocol::PLAN_TTL
+    );
+}
+#[test]
+fn maximum_frame_is_inclusive_and_overflow_never_queries_identity() {
+    let p = policy();
+    let o = observation(&p, &request(&p));
+    let kernel = o.caller.clone().unwrap();
+    let mut bytes = frame(&p);
+    bytes.pop();
+    bytes.resize(crate::protocol::MAX_FRAME - 1, b' ');
+    bytes.push(b'\n');
+    let a =
+        crate::windows_caller::assess_with_collector(native_input(&p, o.clone()), &bytes, || {
+            Ok(kernel)
+        })
+        .unwrap();
+    assert!(a.offline_policy_checks_passed);
+    bytes.insert(bytes.len() - 1, b' ');
+    rejects_before_collection(native_input(&p, o), &bytes);
+}
+#[test]
+fn framed_request_never_mixes_another_logon_session() {
+    let p = policy();
+    let o = observation(&p, &request(&p));
+    let mut kernel = o.caller.clone().unwrap();
+    kernel.logon_sid = sid("S-1-5-5-40-51");
+    let a = crate::windows_caller::assess_with_collector(native_input(&p, o), &frame(&p), || {
+        Ok(kernel)
+    })
+    .unwrap();
+    assert!(!a.offline_policy_checks_passed && a.denials.contains(&Denial::CallerIdentity));
+}
+#[test]
+fn framed_request_preserves_revocation_original_unknown_and_closed_receipts() {
+    let p = policy();
+    let o = observation(&p, &request(&p));
+    let kernel = o.caller.clone().unwrap();
+    for state in [
+        State::Running,
+        State::ClosedUnknown,
+        State::Succeeded,
+        State::Failed,
+    ] {
+        let record = original(state);
+        let before = serde_json::to_vec(&record).unwrap();
+        let mut input = native_input(&p, o.clone());
+        input.previous = Some(&record);
+        input.grant = Grant::Revoked;
+        let a =
+            crate::windows_caller::assess_with_collector(input, &frame(&p), || Ok(kernel.clone()))
+                .unwrap();
+        assert!(!a.offline_policy_checks_passed && a.denials.contains(&Denial::GrantRevoked));
+        assert_eq!(a.plan.observed.grant, Grant::Revoked);
+        assert_eq!(
+            a.plan.next_action,
+            if matches!(state, State::Running | State::ClosedUnknown) {
+                NextAction::ObserveOriginal
+            } else {
+                NextAction::ReadOriginalReceipt
+            }
+        );
+        assert_eq!(serde_json::to_vec(&record).unwrap(), before);
+    }
+    let mut input = native_input(&p, o.clone());
+    input.outcome_unknown = true;
+    let a = crate::windows_caller::assess_with_collector(input, &frame(&p), || Ok(kernel.clone()))
+        .unwrap();
+    assert_eq!(a.plan.next_action, NextAction::ObserveOriginal);
+    assert!(!a.offline_policy_checks_passed);
+    let mut input = native_input(&p, o);
+    input.now = u64::MAX;
+    assert!(
+        crate::windows_caller::assess_with_collector(input, &frame(&p), || Ok(kernel)).is_err()
+    );
+}
+
 fn native_input<'a>(p: &'a Policy, o: Observation) -> crate::windows_caller::AssessmentInput<'a> {
     crate::windows_caller::AssessmentInput {
         policy: p,
@@ -17,8 +209,10 @@ fn native_adapter_replaces_claimed_matching_identity_with_collected_mismatch() {
     let o = observation(&p, &request(&p));
     let mut kernel = o.caller.clone().unwrap();
     kernel.user_sid = sid("S-1-5-21-10-20-30-1002");
-    let a =
-        crate::windows_caller::assess_with_collector(native_input(&p, o), || Ok(kernel)).unwrap();
+    let a = crate::windows_caller::assess_with_collector(native_input(&p, o), &frame(&p), || {
+        Ok(kernel)
+    })
+    .unwrap();
     assert!(!a.offline_policy_checks_passed);
     assert!(a.denials.contains(&Denial::CallerIdentity));
     assert!(!a.native_peer_authenticated && !a.grants_authority);
@@ -28,9 +222,10 @@ fn native_adapter_query_failure_never_uses_claimed_identity_or_success_flags() {
     let p = policy();
     let o = observation(&p, &request(&p));
     assert!(evaluate(&p, &o).offline_policy_checks_passed);
-    let result = crate::windows_caller::assess_with_collector(native_input(&p, o), || {
-        anyhow::bail!("OpenThreadToken failed")
-    });
+    let result =
+        crate::windows_caller::assess_with_collector(native_input(&p, o), &frame(&p), || {
+            anyhow::bail!("OpenThreadToken failed")
+        });
     assert!(result.is_err());
 }
 #[test]
@@ -41,8 +236,10 @@ fn native_adapter_uses_collected_identity_but_never_authenticates_other_boundary
     o.caller = None;
     o.impersonation_succeeded = false;
     o.revert_succeeded = false;
-    let a =
-        crate::windows_caller::assess_with_collector(native_input(&p, o), || Ok(kernel)).unwrap();
+    let a = crate::windows_caller::assess_with_collector(native_input(&p, o), &frame(&p), || {
+        Ok(kernel)
+    })
+    .unwrap();
     assert!(a.offline_policy_checks_passed);
     assert!(
         !a.native_peer_authenticated && !a.grants_authority && !a.plan.observed.execution_available

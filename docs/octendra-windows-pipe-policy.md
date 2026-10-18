@@ -23,6 +23,16 @@
 
 后续须在真实 Windows 验收新增 FFI/token 生命周期；原生管道安全描述符/SCM/映像/持久策略采集、ACE 解码、服务端反欺骗、frame 与实例/PID 复用防护、原撤销存储/逐动作执行仍未完成。完成前不能安装或启用此候选，也不能把反序列化输入、PID 相同或交叉编译结果当运行时安全事实。
 
+## 请求帧一致性与当前停点
+
+Windows assess_after_read 现在必须提供同一连接最后读取的 frame 字节。调用方身份声明先清空；在原生 token 采集前，校验现有 MAX_FRAME（含终止换行，64 KiB）预算、单个 LF 终止帧、闭合 PlanRequest、无重复/未知 JSON 字段、规范 UUID 和原有摘要格式。帧中 request_id/device_id/action/policy/target 必须与预期 PlanRequest 的规范摘要一致，声明的 frame_request_sha256 也必须匹配；不把不匹配的声明覆盖成通过。
+
+结果 frame_sha256 绑定完整输入字节（含换行），合并进原 binding_sha256；无帧的纯策略评估返回 None。两个语义相同但原始字节不同的帧会得到不同绑定。这是受限输入的一致性证据，不是内核来源证明；真实读帧、连接独占、OS peer/SCM/ACL/映像绑定仍未实现，native_peer_authenticated 和执行开关仍为 false。
+
+审计现有 Unix Engine：原请求 UUID 是持久幂等身份，不是新建的会话 nonce；计划摘要绑定设备、OS UID、动作、root policy/资源和有效期，撤销在 Apply 前重读，Running/ClosedUnknown 不回到 Prepared，重复请求返回原回执。Windows 描述性计划沿用原 UUID/TTL/Grant/Record 观察语义，不生成第二套 nonce、授权库或 journal；它没有真实 per-session nonce 或持久撤销适配，也不能把新生成的 TTL 当作对旧请求的重新授权。
+
+新增离线回归覆盖畸形/多帧/超长、重复字段、自报 SID、混用原请求/设备/动作/摘要、声明帧摘要冲突、同账户跨登录会话、撤销和原 unknown/完成回执。测试中的单个 framed plan 即使通过，也不证明完整会话授权完成。真正发送/接收帧、服务端 challenge/nonce、Windows 持久授权/撤销和实机断连验收仍需后续单独实现验证；本步不安装或启用服务。
+
 ## Win32 采集边界
 
 remote-hosts-admin 保留 forbid(unsafe_code)。FFI 隔离于小型 remote-hosts-admin-win32 库的 native 模块，其余解码/控制流使用有界 slice，不解引用 token 中的指针。只接受已有 BorrowedHandle：验证是服务端管道并确认线程原本没有 token；随后 ImpersonateNamedPipeClient、OpenThreadToken(TOKEN_QUERY, OpenAsSelf=true) 和有界 GetTokenInformation。用户/登录 SID 来自内核 TokenUser/TokenGroups，组须带完整 LOGON_ID/ENABLED 且非 DENY_ONLY；TokenType/level/AppContainer/HasRestrictions 查询不明确即拒绝，不回退进程 token 或客户端身份声明。

@@ -240,6 +240,9 @@ pub struct Assessment {
     pub denials: Vec<Denial>,
     pub plan: PrivilegePlan,
     pub binding_sha256: String,
+    /// Exact provided frame bytes, including newline; absent on unframed assessment.
+    /// This alone is not OS provenance or peer authentication.
+    pub frame_sha256: Option<String>,
     pub native_peer_authenticated: bool,
     pub grants_authority: bool,
 }
@@ -340,6 +343,7 @@ pub fn assess(
         binding_sha256: digest(&(policy, observed, grant, &plan))?,
         denials,
         plan,
+        frame_sha256: None,
         native_peer_authenticated: false,
         grants_authority: false,
     })
