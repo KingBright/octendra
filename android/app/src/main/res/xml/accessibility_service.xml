@@ -5,4 +5,4 @@
     android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
     android:canRetrieveWindowContent="true" android:canPerformGestures="true"
     android:canTakeScreenshot="true" android:isAccessibilityTool="false"
-    android:notificationTimeout="150" android:settingsActivity="io.remotehosts.agent.MainActivity" />
+    android:notificationTimeout="150" android:settingsActivity="fun.hackerlife.octendra.MainActivity" />

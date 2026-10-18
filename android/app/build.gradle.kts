@@ -4,15 +4,15 @@ plugins {
 }
 val signingFile = providers.environmentVariable("RH_ANDROID_KEYSTORE").orNull
 android {
-    namespace = "io.remotehosts.agent"
+    namespace = "fun.hackerlife.octendra"
     compileSdk = 36
     defaultConfig {
-        applicationId = "io.remotehosts.agent"
+        applicationId = "fun.hackerlife.octendra"
         minSdk = 30
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
-        testInstrumentationRunner = "io.remotehosts.agent.AgentInstrumentation"
+        versionCode = 1101
+        versionName = "0.11.1"
+        testInstrumentationRunner = "fun.hackerlife.octendra.AgentInstrumentation"
     }
     signingConfigs {
         if (signingFile != null) create("ownerRelease") {

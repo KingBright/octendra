@@ -7,7 +7,7 @@ release APK has neither fixture Activity, instrumentation, nor test CA configura
 import argparse, hashlib, http.cookiejar, json, os, pathlib, re, shlex, socket, ssl, subprocess, sys, time, urllib.request, uuid
 from release_client import Client, NoRedirect
 ROOT=pathlib.Path(__file__).resolve().parents[1]
-PACKAGE='io.remotehosts.agent.debug'
+PACKAGE='fun.hackerlife.octendra.debug'
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('--serial',required=True);p.add_argument('--gateway-binary',required=True,type=pathlib.Path)
@@ -48,13 +48,13 @@ def main():
         run(adb+['reverse',f'tcp:{tlsport}',f'tcp:{tlsport}']);reverse_ready=True
         run(adb+['install','-r',str(ROOT/'android/app/build/outputs/apk/debug/app-debug.apk')])
         run(adb+['install','-r','-t',str(ROOT/'android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk')])
-        result=run(adb+['shell','am','instrument','-w',PACKAGE+'.test/io.remotehosts.agent.AgentInstrumentation'],text=True).stdout
+        result=run(adb+['shell','am','instrument','-w',PACKAGE+'.test/fun.hackerlife.octendra.AgentInstrumentation'],text=True).stdout
         (base/'runtime-checks.txt').write_text(result)
         checked('android_keystore_sqlite_runtime_checks','8 runtime checks passed' in result)
         run(adb+['shell','pm','grant',PACKAGE,'android.permission.POST_NOTIFICATIONS'])
         previous=shell('settings','get','secure','enabled_accessibility_services')
         services=[] if previous in ('','null') else previous.split(':')
-        component=PACKAGE+'/io.remotehosts.agent.AccessService'
+        component=PACKAGE+'/fun.hackerlife.octendra.AccessService'
         services=[item for item in services if item!=component]
         # Instrumentation restarts the target process. Enable this fixture's
         # accessibility service AFTER that restart, preserving unrelated services.
@@ -63,7 +63,7 @@ def main():
         data=json.loads(agent.read_text());device=data['device_id']
         run(adb+['shell','run-as',PACKAGE,'mkdir','-p','files'])
         run(adb+['shell','run-as',PACKAGE,'sh','-c',shlex.quote('cat > files/integration-config.json')],input=agent.read_bytes())
-        instrument=spawn(adb+['shell','am','instrument','-w','-e','mode','fixture',PACKAGE+'.test/io.remotehosts.agent.AgentInstrumentation'],'fixture-instrumentation.log')
+        instrument=spawn(adb+['shell','am','instrument','-w','-e','mode','fixture',PACKAGE+'.test/fun.hackerlife.octendra.AgentInstrumentation'],'fixture-instrumentation.log')
         client=Client(origin,password_file=password,transport='legacy')
         client.opener=urllib.request.build_opener(NoRedirect(),urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),urllib.request.HTTPSHandler(context=context),urllib.request.ProxyHandler({}))
         client.login()
@@ -93,7 +93,7 @@ def main():
             time.sleep(.5)
         checked('accessibility_capability_live',status['accessibility'] is True and status['shell_connected'] is False)
         missing,_=cmd('shell',{'command':'id'});checked('shell_denied_before_local_activation',missing.get('error')=='shell_activation_required')
-        launched=shell('am','start','-W','-n',PACKAGE+'/io.remotehosts.agent.ProbeActivity')
+        launched=shell('am','start','-W','-n',PACKAGE+'/fun.hackerlife.octendra.ProbeActivity')
         (base/'probe-launch.txt').write_text(launched)
         node=None;system_waits=0
         for _ in range(20):
@@ -116,7 +116,7 @@ def main():
         checked('structured_screen_tree',len(obs.get('nodes',[]))>=4)
         checked('password_nodes_redacted',any(n.get('password') is True and n.get('text')=='<redacted>' for n in obs['nodes']) and 'fixture-sensitive-value' not in json.dumps(obs))
         for attempt in range(5):
-            value,_=cmd('text',{'observation_id':obs['observation_id'],'node_id':node['id'],'text':'你好 Remote Hosts'})
+            value,_=cmd('text',{'observation_id':obs['observation_id'],'node_id':node['id'],'text':'你好 Octendra'})
             if value.get('accepted') is True:break
             if value.get('error') not in ('node_changed_observe_again','screen_changed_observe_again'):break
             # These are explicit pre-action refusals, not uncertain executions.
@@ -135,9 +135,9 @@ def main():
         if value.get('accepted') is not True:raise AssertionError('fixture_button_click_rejected: '+json.dumps(value))
         for _ in range(10):
             obs,_=cmd('observe')
-            if any(n.get('text')=='已确认：你好 Remote Hosts' for n in obs.get('nodes',[])):break
+            if any(n.get('text')=='已确认：你好 Octendra' for n in obs.get('nodes',[])):break
             time.sleep(.2)
-        checked('click_verified_by_changed_screen',any(n.get('text')=='已确认：你好 Remote Hosts' for n in obs.get('nodes',[])))
+        checked('click_verified_by_changed_screen',any(n.get('text')=='已确认：你好 Octendra' for n in obs.get('nodes',[])))
         shot,_=cmd('screenshot');checked('screenshot_created',shot.get('size',0)>0 and shot.get('secure_windows_bypassed') is False)
         artifact=client.tool('file_download',{'workspace_id':ws,'path':shot['path'],'idempotency_key':runid+'-screenshot-download'})
         png=client.read_artifact(artifact);(base/'probe.png').write_bytes(png)
@@ -193,18 +193,18 @@ def main():
         remote_apk=root+'/fixtures/release.apk'
         run(adb+['shell','run-as',PACKAGE,'sh','-c',shlex.quote('cat > '+shlex.quote(remote_apk))],input=apk.read_bytes())
         installed,_=cmd('install',{'path':'fixtures/release.apk','sha256':apkhash})
-        checked('release_apk_installed_by_shell_bridge',installed.get('installed') is True and installed.get('package')=='io.remotehosts.agent')
-        installed_path=next(line.removeprefix('package:') for line in shell('pm','path','io.remotehosts.agent').splitlines() if line.endswith('/base.apk'))
+        checked('release_apk_installed_by_shell_bridge',installed.get('installed') is True and installed.get('package')=='fun.hackerlife.octendra')
+        installed_path=next(line.removeprefix('package:') for line in shell('pm','path','fun.hackerlife.octendra').splitlines() if line.endswith('/base.apk'))
         installed_hash,_=cmd('shell',{'command':'sha256sum '+shlex.quote(installed_path)})
         checked('installed_release_apk_bytes_match',installed_hash.get('exit_code')==0 and installed_hash.get('output','').split()[0]==apkhash)
         report['release_apk_tested_as_install_target']=True;report['release_apk_sha256']=apkhash
-        launched,_=cmd('launch',{'package':'io.remotehosts.agent'})
+        launched,_=cmd('launch',{'package':'fun.hackerlife.octendra'})
         checked('release_launch_requested_through_gateway',launched.get('accepted') is True)
         time.sleep(1)
-        running=shell('pidof','io.remotehosts.agent');checked('signed_release_launch_smoke',bool(running))
+        running=shell('pidof','fun.hackerlife.octendra');checked('signed_release_launch_smoke',bool(running))
         for _ in range(10):
             result,_=cmd('screenshot')
-            if str(result.get('error','')).startswith('screenshot_denied') or result.get('package')=='io.remotehosts.agent':break
+            if str(result.get('error','')).startswith('screenshot_denied') or result.get('package')=='fun.hackerlife.octendra':break
             time.sleep(.3)
         if str(result.get('error','')).startswith('screenshot_denied'):
             checked('secure_configuration_window_not_captured',True,protection='explicit_platform_denial')
@@ -212,7 +212,7 @@ def main():
             # Whole-display capture may succeed while the secure window is
             # replaced by black pixels. Verify the actual returned bytes, not
             # just an API return code or the agent's own protection claim.
-            checked('signed_release_is_foreground',result.get('package')=='io.remotehosts.agent')
+            checked('signed_release_is_foreground',result.get('package')=='fun.hackerlife.octendra')
             secure_artifact=client.tool('file_download',{'workspace_id':ws,'path':result['path'],'idempotency_key':runid+'-secure-screenshot-download'})
             secure_png=client.read_artifact(secure_artifact)
             checked('secure_capture_checksum_verified',hashlib.sha256(secure_png).hexdigest()==secure_artifact['sha256'])
@@ -223,7 +223,7 @@ def main():
         run(adb+['shell','run-as',PACKAGE,'touch','files/integration-stop']);instrument.wait(timeout=30)
         time.sleep(.5)
         services=shell('dumpsys','activity','services',PACKAGE)
-        checked('local_stop_removed_foreground_service','ServiceRecord' not in services or 'io.remotehosts.agent.AgentService' not in services)
+        checked('local_stop_removed_foreground_service','ServiceRecord' not in services or 'fun.hackerlife.octendra.AgentService' not in services)
         report['passed']=not bool(report.get('failed_checks'))
     finally:
         if client:

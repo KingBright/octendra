@@ -24,8 +24,11 @@ def main():
         return subprocess.run(command, check=True, capture_output=True, text=True, timeout=90).stdout
     signature = run(str(a.build_tools/'apksigner'), 'verify', '--verbose', '--print-certs', str(a.apk))
     check('apk_signature_verified', 'Verifies' in signature)
+    check('existing_owner_signer', 'f84d9b71f1a00f4b5e3084420e5cee3327053389983b2428d9bec71755e5539d' in signature)
     badging = run(str(a.build_tools/'aapt'), 'dump', 'badging', str(a.apk))
-    check('release_package_identity', "package: name='io.remotehosts.agent'" in badging)
+    check('release_package_identity', "package: name='fun.hackerlife.octendra'" in badging)
+    check('release_version_identity', "versionCode='1101' versionName='0.11.1'" in badging)
+    check('approved_product_label', "application-label:'Octendra'" in badging)
     check('not_debuggable', 'application-debuggable' not in badging)
     check('android_11_minimum', "sdkVersion:'30'" in badging)
     permissions = set(re.findall(r"uses-permission(?:-sdk-\d+)?: name='([^']+)'", badging))

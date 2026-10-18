@@ -48,13 +48,13 @@ def main():
     if fleet.returncode:
         raise SystemExit('Mixed-fleet regression failed: ' + fleet.stderr)
     version = build['version']
-    if version != '0.1.0' or build.get('package') != 'io.remotehosts.agent':
+    if version != '0.11.1' or build.get('package') != 'fun.hackerlife.octendra':
         raise SystemExit('Unexpected release identity.')
     target = ROOT/'dist/android'/version
     target.parent.mkdir(parents=True, exist_ok=True)
     # Exclusive creation: no published/partially published directory is overwritten.
     target.mkdir()
-    apk_name = f'remote-hosts-android-{version}.apk'
+    apk_name = f'octendra-android-{version}.apk'
     shutil.copy2(apk,target/apk_name)
     shutil.copy2(build_path,target/'build-receipt.json')
     shutil.copy2(artifact_path,target/'artifact-verification.json')
