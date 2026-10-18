@@ -163,6 +163,26 @@ async fn semantic_guard_blocks_new_keys_until_unknown_outcome_is_resolved() {
     assert!(blocked.contains("semantic_operation_guarded"));
     assert!(blocked.contains(&operation));
 
+    // Neither an omitted key nor the one-step device-name path may bypass an
+    // existing operation's unknown/active guard. No second job is admitted.
+    let omitted = gateway
+        .dispatch(
+            &principal,
+            "terminal_exec",
+            json!({
+                "workspace_id":workspace,"command":"printf guarded"
+            }),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(omitted.contains("semantic_operation_guarded"));
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
+        .fetch_one(&gateway.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+
     sqlx::query("UPDATE jobs SET result=?,state='done' WHERE id=?")
         .bind(r#"{"error":"outcome_unknown"}"#)
         .bind(&operation)
@@ -174,6 +194,21 @@ async fn semantic_guard_blocks_new_keys_until_unknown_outcome_is_resolved() {
         .execute(&gateway.store.pool)
         .await
         .unwrap();
+
+    let alias = workspace.replacen(&device, "fixture", 1);
+    let blocked_unknown = gateway
+        .dispatch(
+            &principal,
+            "terminal_exec",
+            json!({
+                "workspace_id":alias,"command":"printf guarded"
+            }),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(blocked_unknown.contains("semantic_operation_guarded"));
+    assert!(blocked_unknown.contains(&operation));
 
     let resolved = gateway.dispatch(&principal, "outcome_resolve", json!({
         "operation_id":operation,"resolution":"verified_not_applied","idempotency_key":"resolve-one"

@@ -252,7 +252,7 @@ fn obsolete_identification_policy_version_is_not_silently_migrated() {
     assert!(p.validate().is_err());
 }
 use crate::protocol::{Plan, Snapshot, State};
-const DEVICE: &str = "ba3bf113-2390-466e-88bc-40d5b4f02884";
+const DEVICE: &str = "11111111-2390-466e-88bc-40d5b4f02884";
 const REQUEST: &str = "15ed57df-a740-4d56-935c-950d146b39ba";
 fn sid(value: &str) -> Sid {
     Sid::parse(value).unwrap()

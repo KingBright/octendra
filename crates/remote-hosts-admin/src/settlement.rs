@@ -41,6 +41,7 @@ fn observation_sha(snapshot: &Snapshot, boot: &str) -> Result<String> {
     );
     digest(&(snapshot, boot))
 }
+#[allow(clippy::too_many_arguments)]
 fn close_verified(
     store: &Store,
     policy: &Policy,

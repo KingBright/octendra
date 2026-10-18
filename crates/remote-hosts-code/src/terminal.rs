@@ -203,10 +203,10 @@ impl Terminals {
         fixed: Option<crate::maintenance_tasks::FixedLaunch>,
     ) -> Result<Value> {
         let timeout = files::number(v, "timeout_seconds", 600, 1, 86400)?;
-        // Default to a short bounded wait so fast commands usually finish in the
+        // Default to a 10s bounded wait so most commands finish in the
         // initiating tool call even when an older host schema cannot send wait_ms.
         // Long commands still return the same durable terminal handle.
-        let wait_ms = files::number(v, "wait_ms", 2000, 0, 60000)?;
+        let wait_ms = files::number(v, "wait_ms", 10000, 0, 60000)?;
         let interactive = v.get("pty").and_then(Value::as_bool).unwrap_or(false);
         ensure!(
             fixed.is_none() || !interactive,
@@ -458,10 +458,7 @@ impl Terminals {
                     _ = tokio::time::sleep_until(deadline) => break,
                 }
             }
-            match self
-                .read(ws, &json!({"terminal_id":id,"max_bytes":16000}))
-                .await
-            {
+            match self.read(ws, &json!({"terminal_id":id})).await {
                 Ok(page) => {
                     result["state"] = page["terminal"]["state"].clone();
                     result["terminal"] = page["terminal"].clone();
@@ -570,13 +567,14 @@ impl Terminals {
         );
         // For recognized high-noise commands, consume a much larger raw page before
         // semantic compaction. This reduces MCP round trips and repeated cursor/status
-        // envelopes without exposing larger unknown-command output. Generic/full views
+        // envelopes without exposing larger unknown-command output. Full views
         // retain the conservative 16 KB default.
-        let default_max = if output_mode == "compact"
-            && status.output_profile != OutputProfile::Generic
-            && status.log_format == 1
-        {
-            65_536
+        let default_max = if output_mode == "compact" && status.log_format == 1 {
+            if status.output_profile != OutputProfile::Generic {
+                65_536
+            } else {
+                32_768
+            }
         } else {
             16_000
         };

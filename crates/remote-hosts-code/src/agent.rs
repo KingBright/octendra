@@ -488,17 +488,30 @@ impl Agent {
         let id = files::text(v, "workspace_id")?;
         let ws: Workspace = match self.store.get("workspace", id).await? {
             Some(ws) => ws,
-            None if Path::new(id).is_dir() => {
-                let root = PathBuf::from(id).canonicalize()?;
-                let ws = Workspace {
-                    id: id.to_owned(),
-                    device_id: self.config.device_id.clone(),
-                    root,
+            None => {
+                let candidate = id
+                    .strip_prefix(&format!("{}:", self.config.device_id))
+                    .unwrap_or(id);
+                let target_dir = if candidate == "default" && !self.config.roots.is_empty() {
+                    Some(self.config.roots[0].clone())
+                } else if Path::new(candidate).is_dir() {
+                    Some(PathBuf::from(candidate))
+                } else {
+                    None
                 };
-                self.store.put("workspace", id, &ws, i64::MAX).await?;
-                ws
+                if let Some(dir) = target_dir {
+                    let root = dir.canonicalize()?;
+                    let ws = Workspace {
+                        id: id.to_owned(),
+                        device_id: self.config.device_id.clone(),
+                        root,
+                    };
+                    self.store.put("workspace", id, &ws, i64::MAX).await?;
+                    ws
+                } else {
+                    bail!("workspace not found on this device")
+                }
             }
-            None => bail!("workspace not found on this device"),
         };
         ensure!(
             ws.device_id == self.config.device_id,

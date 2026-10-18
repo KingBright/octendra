@@ -227,7 +227,7 @@ fn build_catalog() -> Vec<Tool> {
         }
         let read =
             scope(name) == Some("code:read") && !matches!(name, "workspace_open" | "file_download");
-        let value = json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"outputSchema":{"type":"object","additionalProperties":true},"_meta":{"securitySchemes":[{"type":"oauth2","scopes":required_scopes(name)}]},"annotations":{"readOnlyHint":read,"destructiveHint":!read&&name!="workspace_open","idempotentHint":true,"openWorldHint":matches!(name, "terminal_exec" | "terminal_input" | "terminal_cancel")}});
+        let value = json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"outputSchema":{"type":"object","additionalProperties":true},"_meta":{"securitySchemes":[{"type":"oauth2","scopes":required_scopes(name)}]},"annotations":{"readOnlyHint":read,"destructiveHint":!read&&name!="workspace_open","idempotentHint":read,"openWorldHint":matches!(name, "terminal_exec" | "terminal_input" | "terminal_cancel")}});
         // Catalog is composed entirely from static, server-controlled JSON.
         if let Ok(tool) = serde_json::from_value(value) {
             tools.push(tool);
@@ -450,8 +450,11 @@ mod tests {
                 .clone()
         };
         assert_eq!(annotations("terminal_exec")["readOnlyHint"], false);
+        assert_eq!(annotations("terminal_exec")["idempotentHint"], false);
+        assert_eq!(annotations("code_apply_edits")["idempotentHint"], false);
         assert_eq!(annotations("terminal_exec")["openWorldHint"], true);
         assert_eq!(annotations("terminal_read")["readOnlyHint"], true);
+        assert_eq!(annotations("terminal_read")["idempotentHint"], true);
         assert_eq!(annotations("terminal_read")["openWorldHint"], false);
         assert_eq!(annotations("task_resume")["readOnlyHint"], true);
     }

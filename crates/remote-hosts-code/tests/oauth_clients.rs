@@ -769,10 +769,13 @@ async fn refresh_tokens_and_replay_revocation_are_client_bound() {
         f.mcp(&fresh, "tools/list", json!({})).await.0,
         StatusCode::OK
     );
-    assert_eq!(f.refresh(&client, &token).await.0, StatusCode::BAD_REQUEST);
+    let (replay_status, _, replayed) = f.refresh(&client, &token).await;
+    assert_eq!(replay_status, StatusCode::OK);
+    assert_eq!(replayed["access_token"], fresh["access_token"]);
+    assert_eq!(replayed["refresh_token"], fresh["refresh_token"]);
     assert_eq!(
         f.mcp(&fresh, "tools/list", json!({})).await.0,
-        StatusCode::UNAUTHORIZED
+        StatusCode::OK
     );
 }
 #[tokio::test]
@@ -781,17 +784,11 @@ async fn concurrent_refresh_cannot_miss_replay_marker() {
     let client = f.register("client_secret_basic", SPARK).await;
     let token = f.login(&client).await;
     let (a, b) = tokio::join!(f.refresh(&client, &token), f.refresh(&client, &token));
-    let (ok, bad) = if a.0 == StatusCode::OK {
-        (a, b)
-    } else {
-        (b, a)
-    };
-    assert_eq!(ok.0, StatusCode::OK);
-    assert_eq!(bad.0, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        f.mcp(&ok.2, "tools/list", json!({})).await.0,
-        StatusCode::UNAUTHORIZED
-    );
+    assert_eq!(a.0, StatusCode::OK);
+    assert_eq!(b.0, StatusCode::OK);
+    assert_eq!(a.2["access_token"], b.2["access_token"]);
+    assert_eq!(a.2["refresh_token"], b.2["refresh_token"]);
+    assert_eq!(f.mcp(&a.2, "tools/list", json!({})).await.0, StatusCode::OK);
 }
 #[tokio::test]
 async fn legacy_public_client_records_and_token_only_revocation_still_work() {
@@ -1015,17 +1012,16 @@ async fn missing_resource_is_not_enabled_by_client_name_or_mixed_callbacks() {
         );
         let (status, _, token) = f.authenticated(&client, "/oauth/token", code).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            f.authenticated(
+        let (status, _, renewed) = f
+            .authenticated(
                 &client,
                 "/oauth/token",
-                json!({"grant_type":"refresh_token","refresh_token":token["refresh_token"]})
+                json!({"grant_type":"refresh_token","refresh_token":token["refresh_token"]}),
             )
-            .await
-            .0,
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(f.refresh(&client, &token).await.0, StatusCode::OK);
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(renewed["resource"], RESOURCE);
+        assert_eq!(f.refresh(&client, &renewed).await.0, StatusCode::OK);
     }
 }
 
@@ -1311,4 +1307,259 @@ async fn desktop_oauth_handoff_step_up_is_client_and_resource_bound_without_defa
     );
     let default = f.login(&client).await;
     assert!(!default["scope"].as_str().unwrap().contains("desktop:"));
+}
+
+#[tokio::test]
+async fn confidential_retry_is_bounded_and_returns_the_current_successor_lifetime() {
+    let f = Fixture::new().await;
+    let client = f.register("client_secret_basic", SPARK).await;
+    let original = f.login(&client).await;
+    assert_eq!(original["expires_in"], 3600);
+    let (status, _, first) = f.refresh(&client, &original).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, current) = f.refresh(&client, &first).await;
+    assert_eq!(status, StatusCode::OK);
+    let refresh = current["refresh_token"].as_str().unwrap();
+    let access: Value =
+        f.g.store
+            .get("oauth2_refresh", &hash(refresh))
+            .await
+            .unwrap()
+            .unwrap();
+    sqlx::query("UPDATE kv SET value=json_set(value,'$.access_expires_at',?) WHERE kind='oauth_refresh_family' AND key=?")
+        .bind(remote_hosts_code::now()+17).bind(access["family"].as_str().unwrap())
+        .execute(&f.g.store.pool).await.unwrap();
+    let (status, _, replayed) = f.refresh(&client, &original).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replayed["refresh_token"], current["refresh_token"]);
+    assert_eq!(replayed["access_token"], current["access_token"]);
+    assert!(
+        replayed["expires_in"]
+            .as_i64()
+            .is_some_and(|ttl| (1..=17).contains(&ttl))
+    );
+    sqlx::query("UPDATE kv SET value=json_set(value,'$.retry_until',?) WHERE kind='oauth_refresh_binding' AND key=?")
+        .bind(remote_hosts_code::now()-1).bind(hash(original["refresh_token"].as_str().unwrap()))
+        .execute(&f.g.store.pool).await.unwrap();
+    assert_eq!(
+        f.refresh(&client, &original).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        f.mcp(&current, "tools/list", json!({})).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn public_client_replay_is_rejected_without_persisting_recoverable_tokens() {
+    let f = Fixture::new().await;
+    let client = f.register("none", GPT).await;
+    let original = f.login(&client).await;
+    let (status, _, fresh) = f.refresh(&client, &original).await;
+    assert_eq!(status, StatusCode::OK);
+    let key = hash(original["refresh_token"].as_str().unwrap());
+    let binding: Value =
+        f.g.store
+            .get("oauth_refresh_binding", &key)
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(binding.get("access_token").is_none());
+    assert!(binding.get("refresh_token").is_none());
+    assert!(binding["retry_until"].is_null());
+    assert_eq!(
+        f.refresh(&client, &original).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        f.mcp(&fresh, "tools/list", json!({})).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn revocation_survives_old_retention_and_covers_long_lived_successors() {
+    let f = Fixture::new().await;
+    let client = f.register("client_secret_basic", SPARK).await;
+    let original = f.login(&client).await;
+    let (_, _, successor) = f.refresh(&client, &original).await;
+    let key = hash(successor["refresh_token"].as_str().unwrap());
+    // Simulate a previously-issued 365-day refresh without changing production TTLs.
+    sqlx::query("UPDATE kv SET expires=? WHERE kind='oauth2_refresh' AND key=?")
+        .bind(remote_hosts_code::now() + 365 * 86400)
+        .bind(&key)
+        .execute(&f.g.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.authenticated(
+            &client,
+            "/oauth/revoke",
+            json!({"token":original["access_token"]})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    // Shift persisted expiry backwards by 31 days, representing elapsed wall time.
+    sqlx::query("UPDATE kv SET expires=expires-? WHERE kind IN ('revoked','oauth2_refresh')")
+        .bind(31 * 86400_i64)
+        .execute(&f.g.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.refresh(&client, &successor).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        f.mcp(&successor, "tools/list", json!({})).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn refresh_write_failures_roll_back_consumption_markers_and_both_tokens() {
+    for kind in [
+        "oauth2_used_refresh",
+        "oauth_refresh_binding",
+        "oauth2_access",
+        "oauth2_refresh",
+        "oauth_refresh_family",
+    ] {
+        let f = Fixture::new().await;
+        let client = f.register("client_secret_basic", SPARK).await;
+        let original = f.login(&client).await;
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM kv")
+            .fetch_one(&f.g.store.pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE synthetic_failure_kind(kind TEXT NOT NULL)")
+            .execute(&f.g.store.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO synthetic_failure_kind(kind) VALUES(?)")
+            .bind(kind)
+            .execute(&f.g.store.pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TRIGGER synthetic_refresh_failure BEFORE INSERT ON kv WHEN NEW.kind=(SELECT kind FROM synthetic_failure_kind) BEGIN SELECT RAISE(FAIL,'synthetic issuance fault'); END")
+            .execute(&f.g.store.pool).await.unwrap();
+        assert_eq!(
+            f.refresh(&client, &original).await.0,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{kind}"
+        );
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM kv")
+            .fetch_one(&f.g.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(before, after, "partial writes after {kind}");
+        sqlx::query("DROP TRIGGER synthetic_refresh_failure")
+            .execute(&f.g.store.pool)
+            .await
+            .unwrap();
+        let (status, _, fresh) = f.refresh(&client, &original).await;
+        assert_eq!(status, StatusCode::OK, "original refresh lost after {kind}");
+        assert_eq!(
+            f.mcp(&fresh, "tools/list", json!({})).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(f.refresh(&client, &fresh).await.0, StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn concurrent_refresh_and_revoke_cannot_leave_a_usable_successor() {
+    let f = Fixture::new().await;
+    let client = f.register("client_secret_basic", SPARK).await;
+    let original = f.login(&client).await;
+    let (refresh, revoke) = tokio::join!(
+        f.refresh(&client, &original),
+        f.authenticated(
+            &client,
+            "/oauth/revoke",
+            json!({"token":original["access_token"]})
+        )
+    );
+    assert_eq!(revoke.0, StatusCode::OK);
+    assert!(matches!(
+        refresh.0,
+        StatusCode::OK | StatusCode::BAD_REQUEST
+    ));
+    if refresh.0 == StatusCode::OK {
+        assert_eq!(
+            f.mcp(&refresh.2, "tools/list", json!({})).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            f.refresh(&client, &refresh.2).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        f.refresh(&client, &original).await.0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn revoking_a_consumed_refresh_revokes_the_current_family() {
+    let f = Fixture::new().await;
+    let client = f.register("client_secret_basic", SPARK).await;
+    let original = f.login(&client).await;
+    let (_, _, first) = f.refresh(&client, &original).await;
+    let (_, _, current) = f.refresh(&client, &first).await;
+    assert_eq!(
+        f.authenticated(
+            &client,
+            "/oauth/revoke",
+            json!({"token":original["refresh_token"]})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        f.refresh(&client, &current).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        f.refresh(&client, &original).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        f.mcp(&current, "tools/list", json!({})).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn refresh_commit_failure_leaves_original_retryable() {
+    let f = Fixture::new().await;
+    let client = f.register("client_secret_basic", SPARK).await;
+    let original = f.login(&client).await;
+    sqlx::query("CREATE TABLE synthetic_parent(id INTEGER PRIMARY KEY)")
+        .execute(&f.g.store.pool)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE synthetic_deferred(id INTEGER REFERENCES synthetic_parent(id) DEFERRABLE INITIALLY DEFERRED)")
+        .execute(&f.g.store.pool).await.unwrap();
+    sqlx::query("CREATE TRIGGER synthetic_commit_failure BEFORE INSERT ON kv WHEN NEW.kind='oauth_refresh_family' BEGIN INSERT INTO synthetic_deferred VALUES(1); END")
+        .execute(&f.g.store.pool).await.unwrap();
+    assert_eq!(
+        f.refresh(&client, &original).await.0,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    sqlx::query("DROP TRIGGER synthetic_commit_failure")
+        .execute(&f.g.store.pool)
+        .await
+        .unwrap();
+    let (status, _, fresh) = f.refresh(&client, &original).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        f.mcp(&fresh, "tools/list", json!({})).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(f.refresh(&client, &fresh).await.0, StatusCode::OK);
 }

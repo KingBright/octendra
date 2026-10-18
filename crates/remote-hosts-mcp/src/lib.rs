@@ -11,7 +11,7 @@ use std::{
 };
 
 use remote_hosts_core::{
-    AccessCandidate, AccessResolutionError, AccessResolver, CommandProfileCatalog,
+    AccessCandidate, AccessResolutionError, AccessResolver, CommandClass, CommandProfileCatalog,
     ConnectorStateTracker, DEFAULT_SFTP_MAX_SIZE_BYTES, DEFAULT_SFTP_TIMEOUT_SECONDS,
     FileTransferSpec, HostStateAggregator, HostStateInput, OperationCoordinationMode,
     PtySessionControlCommand, PtySessionHeartbeatCommand, PtySessionInputCommand,
@@ -1027,6 +1027,9 @@ pub struct RunInWorkspaceRequest {
     pub wait_timeout_ms: Option<u64>,
     /// Stable retry key. Reusing it in this conversation returns the original operation.
     pub idempotency_key: Option<String>,
+    /// Execute as root via sudo on POSIX hosts using pre-authorized Vault sudo/SSH credentials without interactive PTY steps.
+    #[serde(default)]
+    pub sudo: Option<bool>,
 }
 
 /// Upload one connector-local file through a workspace.
@@ -1243,6 +1246,10 @@ impl RemoteHostsMcpServer {
         for tool in tool_router.list_all() {
             if !tool_profile.includes(&tool.name) {
                 tool_router.remove_route(&tool.name);
+            } else if matches!(tool_profile, ToolProfile::Agent)
+                && let Some(route) = tool_router.map.get_mut(tool.name.as_ref())
+            {
+                route.attr.output_schema = None;
             }
         }
         Self {
@@ -1280,21 +1287,103 @@ impl RemoteHostsMcpServer {
         matches!(self.tool_profile, ToolProfile::Agent)
     }
 
+    async fn resolve_host_id(&self, input: &str) -> Result<HostId, String> {
+        let trimmed = input.trim();
+        if let Ok(id) = parse_host_id(trimmed) {
+            return Ok(id);
+        }
+        let hosts = self
+            .repositories
+            .hosts
+            .list()
+            .await
+            .map_err(|error| tool_error(&error))?;
+        if let Some(host) = hosts.iter().find(|h| {
+            h.name.eq_ignore_ascii_case(trimmed) || h.display_name.eq_ignore_ascii_case(trimmed)
+        }) {
+            return Ok(host.id);
+        }
+        for host in &hosts {
+            let paths = self
+                .repositories
+                .access_paths
+                .list_enabled_for_host(host.id)
+                .await
+                .map_err(|error| tool_error(&error))?;
+            if paths
+                .iter()
+                .any(|p| p.address.eq_ignore_ascii_case(trimmed))
+            {
+                return Ok(host.id);
+            }
+        }
+        Err(format!(
+            "invalid host_id `{trimmed}`: not a UUID or known host name/address"
+        ))
+    }
+
     async fn resolve_or_prepare_workspace_id(
         &self,
         workspace_id: &str,
         host_id: Option<&str>,
     ) -> Result<WorkspaceId, String> {
-        if !workspace_id.trim().is_empty() {
-            return parse_workspace_id(workspace_id.trim());
-        }
-        let host_id = host_id
+        let ws_trimmed = workspace_id.trim();
+        let mut fallback_host: Option<String> = host_id
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| "supply either workspace_id or host_id".to_owned())?;
+            .map(str::to_owned);
+        if !ws_trimmed.is_empty() {
+            if let Ok(parsed_ws) = parse_workspace_id(ws_trimmed) {
+                let existing = self
+                    .repositories
+                    .workspaces
+                    .get(parsed_ws)
+                    .await
+                    .map_err(|error| tool_error(&error))?;
+                if let Some(existing_ws) = existing {
+                    if self.workspace_for_tool(parsed_ws).await.is_ok() {
+                        return Ok(parsed_ws);
+                    }
+                    if fallback_host.is_none()
+                        && let Some(owner_id) = existing_ws.agent_session_id
+                        && let Ok(Some(owner_session)) =
+                            self.repositories.agent_sessions.get(owner_id).await
+                        && (owner_session.state == AgentSessionState::Expired
+                            || owner_session.expires_at <= now_utc())
+                    {
+                        fallback_host = Some(existing_ws.host_id.to_string());
+                    }
+                    if fallback_host.is_none() {
+                        return Ok(parsed_ws);
+                    }
+                } else if fallback_host.is_none()
+                    && let Ok(as_host_id) = parse_host_id(ws_trimmed)
+                    && self
+                        .repositories
+                        .hosts
+                        .get(as_host_id)
+                        .await
+                        .map_err(|error| tool_error(&error))?
+                        .is_some()
+                {
+                    fallback_host = Some(as_host_id.to_string());
+                } else if fallback_host.is_none() {
+                    return Ok(parsed_ws);
+                }
+            } else if fallback_host.is_none()
+                && let Ok(resolved_host) = self.resolve_host_id(ws_trimmed).await
+            {
+                fallback_host = Some(resolved_host.to_string());
+            } else if fallback_host.is_none() {
+                return parse_workspace_id(ws_trimmed);
+            }
+        }
+        let raw_host =
+            fallback_host.ok_or_else(|| "supply either workspace_id or host_id".to_owned())?;
+        let resolved_host = self.resolve_host_id(&raw_host).await?;
         let Json(prepared) = self
             .prepare_workspace(Parameters(PrepareWorkspaceRequest {
-                host_id: host_id.to_owned(),
+                host_id: resolved_host.to_string(),
                 access_path_id: None,
                 label: None,
                 cwd: None,
@@ -1339,6 +1428,7 @@ impl RemoteHostsMcpServer {
             .await
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn execute_code_tool(&self, request: CodeExecuteRequest) -> Result<Value, String> {
         let gateway_url = trim_optional(request.gateway_url).or_else(|| {
             std::env::var("REMOTE_HOSTS_CODE_GATEWAY_URL")
@@ -1349,7 +1439,7 @@ impl RemoteHostsMcpServer {
             Value::Null => json!({}),
             Value::Object(map) => Value::Object(map),
             other => {
-                return Err(format!("arguments must be a JSON object, got {}", other));
+                return Err(format!("arguments must be a JSON object, got {other}"));
             }
         };
         if let Some(gateway_url) = gateway_url {
@@ -2439,11 +2529,12 @@ impl RemoteHostsMcpServer {
         let idempotency_key = normalize_idempotency_key(request.idempotency_key)?;
         let coordination_mode: OperationCoordinationMode =
             request.coordination_mode.unwrap_or_default().into();
-        let requested_coordination_scope = trim_optional(request.coordination_scope);
+        let requested_coordination_scope =
+            trim_optional(request.coordination_scope).map(|s| s.to_ascii_lowercase());
         let requested_coordination_scopes = request.coordination_scopes.map(|scopes| {
             scopes
                 .into_iter()
-                .map(|scope| scope.trim().to_owned())
+                .map(|scope| scope.trim().to_ascii_lowercase())
                 .collect::<Vec<_>>()
         });
         let coordination_scopes = resolve_operation_coordination_scopes(
@@ -2456,6 +2547,16 @@ impl RemoteHostsMcpServer {
         let mut profile =
             CommandProfileCatalog::resolve_builtin(&request.command_profile, request.args, &policy)
                 .map_err(|error| error.to_string())?;
+        if request.sudo == Some(true) && profile.program != "sudo" {
+            let mut sudo_args = Vec::with_capacity(profile.args.len() + 3);
+            sudo_args.push("-n".to_owned());
+            sudo_args.push("--".to_owned());
+            sudo_args.push(std::mem::replace(&mut profile.program, "sudo".to_owned()));
+            sudo_args.append(&mut profile.args);
+            profile.args = sudo_args;
+            "sudo.posix".clone_into(&mut profile.name);
+            profile.class = CommandClass::Sensitive;
+        }
         if let Some(timeout_seconds) = request.timeout_seconds {
             profile.timeout_seconds = timeout_seconds;
         }
@@ -2585,11 +2686,34 @@ impl RemoteHostsMcpServer {
                 ));
             }
             if is_terminal_operation_state(&operation.state) {
+                let raw_chunks = self
+                    .repositories
+                    .operation_output_chunks
+                    .list_for_workspace(workspace_id, Some(operation_id), None, 200)
+                    .await
+                    .map_err(|error| tool_error(&error))?;
+                let non_system: Vec<_> = raw_chunks
+                    .into_iter()
+                    .filter(|c| c.stream != remote_hosts_domain::OutputStream::System)
+                    .collect();
+                let inline_output = if non_system.is_empty() {
+                    None
+                } else {
+                    let (compacted, _) =
+                        token_output::compact_operation_chunks(&operation, &non_system);
+                    compacted
+                        .first()
+                        .and_then(|item| item.get("text"))
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                };
                 return Ok(OperationCompletionOutput {
                     completed: true,
                     state: operation_state_name(&operation.state).to_owned(),
                     exit_code: operation.exit_code,
                     summary: operation_result_summary(&operation),
+                    output: inline_output,
                     next_action: "none".to_owned(),
                     operation: (!self.compact_responses())
                         .then(|| public_operation_value(&operation))
@@ -2607,6 +2731,7 @@ impl RemoteHostsMcpServer {
                     state: operation_state_name(&operation.state).to_owned(),
                     exit_code: operation.exit_code,
                     summary: operation_result_summary(&operation),
+                    output: None,
                     next_action: "get_workspace_result".to_owned(),
                     operation: (!self.compact_responses())
                         .then(|| public_operation_value(&operation))
@@ -3502,7 +3627,7 @@ impl RemoteHostsMcpServer {
                     .unwrap_or_else(|| {
                         existing_path
                             .as_ref()
-                            .map_or(1, |path| path.max_new_connections_per_minute)
+                            .map_or(20, |path| path.max_new_connections_per_minute)
                     }),
                 requires_tty: access.requires_tty.unwrap_or_else(|| {
                     existing_path.as_ref().is_some_and(|path| path.requires_tty)
@@ -4124,7 +4249,7 @@ impl RemoteHostsMcpServer {
                 || {
                     existing
                         .as_ref()
-                        .map_or(1, |path| path.max_new_connections_per_minute)
+                        .map_or(20, |path| path.max_new_connections_per_minute)
                 },
             ),
             requires_tty: request
@@ -5286,7 +5411,7 @@ impl RemoteHostsMcpServer {
         Parameters(request): Parameters<CreateWorkspaceRequest>,
     ) -> Result<Json<WorkspaceOutput>, String> {
         let agent_session = self.ensure_agent_session().await?;
-        let host_id = parse_host_id(&request.host_id)?;
+        let host_id = self.resolve_host_id(&request.host_id).await?;
         let access_path = if let Some(access_path_id) = request.access_path_id.as_deref() {
             let parsed = parse_access_path_id(access_path_id)?;
             self.repositories
@@ -5335,7 +5460,7 @@ impl RemoteHostsMcpServer {
                         .policy_profile
                         .unwrap_or_else(|| "default".to_owned()),
                     coordination_scope: trim_optional(request.coordination_scope)
-                        .unwrap_or_else(|| "host".to_owned()),
+                        .map_or_else(|| "host".to_owned(), |s| s.to_ascii_lowercase()),
                     ttl_seconds: request.ttl_seconds.unwrap_or(3600),
                 },
                 capacity.effective_active,
@@ -5376,7 +5501,7 @@ impl RemoteHostsMcpServer {
         Parameters(request): Parameters<PrepareWorkspaceRequest>,
     ) -> Result<Json<PreparedWorkspaceOutput>, String> {
         let agent_session = self.ensure_agent_session().await?;
-        let host_id = parse_host_id(&request.host_id)?;
+        let host_id = self.resolve_host_id(&request.host_id).await?;
         let (expired_reaped, _) = self
             .reconcile_workspace_capacity(host_id, agent_session.id)
             .await?;
@@ -5385,8 +5510,8 @@ impl RemoteHostsMcpServer {
             .as_deref()
             .map(parse_access_path_id)
             .transpose()?;
-        let requested_coordination_scope =
-            trim_optional(request.coordination_scope.clone()).unwrap_or_else(|| "host".to_owned());
+        let requested_coordination_scope = trim_optional(request.coordination_scope.clone())
+            .map_or_else(|| "host".to_owned(), |s| s.to_ascii_lowercase());
         let workspaces = if self.requires_workspace_ownership() {
             self.repositories
                 .workspaces
@@ -5410,7 +5535,7 @@ impl RemoteHostsMcpServer {
         } else {
             let Json(created) = self
                 .create_workspace(Parameters(CreateWorkspaceRequest {
-                    host_id: request.host_id.clone(),
+                    host_id: host_id.to_string(),
                     access_path_id: request.access_path_id,
                     connector_id: None,
                     label: trim_optional(request.label).unwrap_or_else(|| "agent-main".to_owned()),
@@ -5430,7 +5555,7 @@ impl RemoteHostsMcpServer {
         let runtime_snapshot = if full_context {
             Some(
                 self.get_host_runtime_snapshot(Parameters(HostIdRequest {
-                    host_id: request.host_id,
+                    host_id: host_id.to_string(),
                 }))
                 .await?
                 .0,
@@ -7361,6 +7486,9 @@ pub struct OperationCompletionOutput {
     pub elapsed_ms: u64,
     /// Suggested next poll delay when the operation remains non-terminal.
     pub retry_after_ms: Option<u64>,
+    /// Compacted inline command output when the operation finished.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
 }
 
 /// Workspace output chunks.
@@ -13813,6 +13941,154 @@ mod tests {
         )
         .await?;
         assert_eq!(conflict.is_error, Some(true));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn mcp_agent_one_step_run_in_workspace_sudo_and_compact_schema()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestFixture::new().await?;
+        let agent =
+            RemoteHostsMcpServer::with_profile(fixture.repositories.clone(), ToolProfile::Agent);
+
+        // 1. Verify Agent profile strips output_schema to save >50% tool schema tokens
+        let (server_transport, client_transport) = tokio::io::duplex(32 * 1024);
+        let server_clone = agent.clone();
+        let server_handle = tokio::spawn(async move {
+            let service = server_clone
+                .serve(server_transport)
+                .await
+                .map_err(|error| format!("serve MCP server: {error}"))?;
+            service
+                .waiting()
+                .await
+                .map_err(|error| format!("wait MCP server: {error}"))?;
+            Ok::<(), String>(())
+        });
+        let client = ClientInfo::default().serve(client_transport).await?;
+        let tools_result = client.peer().list_tools(None).await?;
+        assert!(
+            tools_result
+                .tools
+                .iter()
+                .all(|tool| tool.output_schema.is_none()),
+            "Agent profile tools must omit output_schema"
+        );
+        drop(client);
+        server_handle.abort();
+
+        // 2. 1-step run_in_workspace by host name (no prior prepare_workspace), sudo=true, uppercase scope
+        let queued = call_tool(
+            agent.clone(),
+            tools::RUN_IN_WORKSPACE,
+            Some(json!({
+                "workspace_id": "",
+                "host_id": "company-4090-mcp",
+                "command_profile": "shell.posix",
+                "args": ["id -u"],
+                "sudo": true,
+                "coordination_mode": "mutating",
+                "coordination_scope": "HOST/Service-A"
+            })),
+        )
+        .await?;
+        let op_id_str = queued["operation"]["id"]
+            .as_str()
+            .ok_or("missing operation id")?;
+        let ws_id_str = queued["workspace"]["id"]
+            .as_str()
+            .ok_or("missing workspace id")?;
+        assert_eq!(
+            queued["operation"]["coordination_scope"],
+            json!("host/service-a")
+        );
+        assert!(
+            queued["operation"]["command_preview"]
+                .as_str()
+                .is_some_and(|preview| preview.contains("sudo.posix"))
+        );
+
+        // Simulate operation completion with output chunk and verify wait_for_operation_completion returns inline output
+        let op_id = OperationId::from(uuid::Uuid::parse_str(op_id_str)?);
+        let ws_id = WorkspaceId::from(uuid::Uuid::parse_str(ws_id_str)?);
+        fixture
+            .repositories
+            .operation_output_chunks
+            .insert(&OperationOutputChunk {
+                id: remote_hosts_domain::OperationOutputChunkId::new(),
+                operation_id: op_id,
+                workspace_id: ws_id,
+                sequence: 1,
+                stream: remote_hosts_domain::OutputStream::Stdout,
+                byte_len: 2,
+                redacted_text: "0\n".to_owned(),
+                truncated: false,
+                created_at: now_utc(),
+            })
+            .await?;
+        fixture
+            .repositories
+            .operations
+            .update_state(
+                op_id,
+                OperationState::Succeeded,
+                Some(now_utc()),
+                Some(0),
+                Some("0"),
+            )
+            .await?;
+
+        let completion = agent
+            .wait_for_operation_completion(ws_id, op_id, 100)
+            .await?;
+        assert!(completion.completed);
+        assert_eq!(completion.output.as_deref(), Some("0\n"));
+
+        // 3. Expired session workspace_id auto-recovery without requiring host_id
+        let expired_session = AgentSession {
+            id: AgentSessionId::new(),
+            client_kind: "gemini".to_owned(),
+            client_instance_id: "restarted-client".to_owned(),
+            project_key: None,
+            conversation_key: None,
+            state: AgentSessionState::Expired,
+            created_at: now_utc() - time::Duration::hours(2),
+            last_seen_at: now_utc() - time::Duration::hours(2),
+            expires_at: now_utc() - time::Duration::hours(1),
+        };
+        fixture
+            .repositories
+            .agent_sessions
+            .upsert(&expired_session)
+            .await?;
+        let stale_ws = AgentWorkspace {
+            id: WorkspaceId::new(),
+            agent_session_id: Some(expired_session.id),
+            host_id: fixture.host_id,
+            access_path_id: fixture.access_path_id,
+            connector_id: fixture.connector_id,
+            label: "stale-ws".to_owned(),
+            cwd: None,
+            state: WorkspaceState::Idle,
+            policy_profile: "default".to_owned(),
+            coordination_scope: "host".to_owned(),
+            created_at: now_utc() - time::Duration::hours(2),
+            last_activity_at: now_utc() - time::Duration::hours(2),
+            ttl_seconds: 3600,
+        };
+        fixture.repositories.workspaces.insert(&stale_ws).await?;
+        let recovered = call_tool(
+            agent,
+            tools::RUN_IN_WORKSPACE,
+            Some(json!({
+                "workspace_id": stale_ws.id.to_string(),
+                "command_profile": "host.identity",
+                "args": []
+            })),
+        )
+        .await?;
+        assert_eq!(recovered["workspace"]["id"], json!(ws_id_str));
         Ok(())
     }
 

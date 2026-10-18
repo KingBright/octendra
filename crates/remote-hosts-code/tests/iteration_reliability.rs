@@ -58,7 +58,9 @@ async fn fixture() -> (tempfile::TempDir, Agent, String) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancel_and_read_remain_available_when_terminal_inputs_are_busy() {
     let (_dir, agent, ws) = fixture().await;
-    let term=agent.execute(&job(&agent,"terminal_exec",json!({"workspace_id":ws,"command":"stty raw -echo; printf 'ready\\n'; sleep 30","pty":true,"timeout_seconds":10,"idempotency_key":"start"}))).await.unwrap();
+    // This fixture tests concurrent control of a running PTY, so admission must
+    // return immediately rather than consume the command's ten-second lifetime.
+    let term=agent.execute(&job(&agent,"terminal_exec",json!({"workspace_id":ws,"command":"stty raw -echo; printf 'ready\\n'; sleep 30","pty":true,"timeout_seconds":10,"wait_ms":0,"idempotency_key":"start"}))).await.unwrap();
     let id = term["terminal_id"].as_str().unwrap().to_owned();
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {

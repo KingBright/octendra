@@ -47,7 +47,7 @@ class ManagedPreparationTests(unittest.TestCase):
         self.assertEqual(m.sha(root/'manifest.json'),report['manifest_sha256'])
     def test_remote_account_is_explicit_and_never_inferred_from_preparation_host(self):
         from unittest import mock
-        with mock.patch.dict('os.environ', {'USER':'jinliang','LOGNAME':'jinliang','HOME':'/Users/jinliang'}):
+        with mock.patch.dict('os.environ', {'USER':'hostuser','LOGNAME':'hostuser','HOME':'/Users/hostuser'}):
             report=self.prepare(account='liang',uid=1000,gid=1000,home='/home/liang')
         policy=json.loads((self.root/'bundle/policy.json').read_text())
         manifest=json.loads((self.root/'bundle/manifest.json').read_text())

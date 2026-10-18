@@ -51,11 +51,14 @@ impl Fixture {
     }
     async fn start(&self, command: &str, pty: bool, timeout: u64) -> String {
         let id = uuid::Uuid::new_v4().to_string();
+        // These tests drive ready/release/done barriers themselves. Waiting the
+        // production ten-second default here can exhaust the fixture's lifetime
+        // before the test sends input or observes an intentionally split stream.
         self.terminals
             .start(
                 &self.config,
                 &self.ws,
-                &json!({"command":command,"pty":pty,"timeout_seconds":timeout}),
+                &json!({"command":command,"pty":pty,"timeout_seconds":timeout,"wait_ms":0}),
                 &id,
             )
             .await

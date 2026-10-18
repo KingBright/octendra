@@ -230,7 +230,7 @@ async fn oauth_pkce_mcp_and_refresh_replay() {
         &router,
         "POST",
         "/mcp",
-        json!({}),
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}),
         new["access_token"].as_str(),
         None,
         false,
@@ -239,7 +239,7 @@ async fn oauth_pkce_mcp_and_refresh_replay() {
     assert_eq!(
         status,
         StatusCode::UNAUTHORIZED,
-        "refresh replay revokes family"
+        "a public client ID is not proof that refresh replay is a safe retry"
     );
 }
 #[tokio::test]
@@ -307,6 +307,20 @@ async fn relay_edit_retry_and_isolation() {
             "terminal:exec".into(),
         ],
     };
+    let direct_read = g
+        .dispatch(
+            &p,
+            "code_read",
+            json!({"workspace_id":"Mac A:default","requests":[{"path":"code.rs"}]}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        direct_read["ranges"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("41")
+    );
     let open = g
         .dispatch(
             &p,

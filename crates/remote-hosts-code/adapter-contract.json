@@ -1,9 +1,9 @@
 {
-  "adapter_tools_sha256": "b3954a50086b095dc8d8a2bf7e4e2905e37b0a4c098ffd9a826f6f0e4888ef76",
+  "adapter_tools_sha256": "a602d4a52d3bfbf92584e959589fd889f0ab83a9bfee331e692e2e777f0a9c07",
   "boundary": "Adapter-sent catalog is not proof of final host exposure. No final host report means unknown.",
   "protocol": 1,
-  "server_tools_sha256": "b3954a50086b095dc8d8a2bf7e4e2905e37b0a4c098ffd9a826f6f0e4888ef76",
-  "skill_revision": "decaf9bdc698f67a2afc15ba8bccb10eef185ef9416e60c1e2be04d1d1f54142",
+  "server_tools_sha256": "a602d4a52d3bfbf92584e959589fd889f0ab83a9bfee331e692e2e777f0a9c07",
+  "skill_revision": "b758b3543584341dae86e17523d561db5c2ab5560427f66d5f70cfef4ac9cb1e",
   "tools": [
     {
       "_meta": {
@@ -19,7 +19,7 @@
       },
       "annotations": {
         "destructiveHint": true,
-        "idempotentHint": true,
+        "idempotentHint": false,
         "openWorldHint": false,
         "readOnlyHint": false
       },
@@ -198,7 +198,7 @@
       },
       "annotations": {
         "destructiveHint": true,
-        "idempotentHint": true,
+        "idempotentHint": false,
         "openWorldHint": false,
         "readOnlyHint": false
       },
@@ -488,7 +488,7 @@
       },
       "annotations": {
         "destructiveHint": false,
-        "idempotentHint": true,
+        "idempotentHint": false,
         "openWorldHint": false,
         "readOnlyHint": false
       },
@@ -873,7 +873,7 @@
       },
       "annotations": {
         "destructiveHint": true,
-        "idempotentHint": true,
+        "idempotentHint": false,
         "openWorldHint": false,
         "readOnlyHint": false
       },
@@ -987,7 +987,7 @@
       },
       "annotations": {
         "destructiveHint": true,
-        "idempotentHint": true,
+        "idempotentHint": false,
         "openWorldHint": false,
         "readOnlyHint": false
       },
@@ -1059,7 +1059,7 @@
       },
       "annotations": {
         "destructiveHint": true,
-        "idempotentHint": true,
+        "idempotentHint": false,
         "openWorldHint": false,
         "readOnlyHint": false
       },
@@ -1121,7 +1121,7 @@
       },
       "annotations": {
         "destructiveHint": true,
-        "idempotentHint": true,
+        "idempotentHint": false,
         "openWorldHint": false,
         "readOnlyHint": false
       },
@@ -1281,7 +1281,7 @@
       },
       "annotations": {
         "destructiveHint": true,
-        "idempotentHint": true,
+        "idempotentHint": false,
         "openWorldHint": true,
         "readOnlyHint": false
       },
@@ -1478,7 +1478,7 @@
       },
       "annotations": {
         "destructiveHint": true,
-        "idempotentHint": true,
+        "idempotentHint": false,
         "openWorldHint": true,
         "readOnlyHint": false
       },
@@ -1544,7 +1544,7 @@
       },
       "annotations": {
         "destructiveHint": true,
-        "idempotentHint": true,
+        "idempotentHint": false,
         "openWorldHint": true,
         "readOnlyHint": false
       },
@@ -1692,7 +1692,7 @@
       },
       "annotations": {
         "destructiveHint": true,
-        "idempotentHint": true,
+        "idempotentHint": false,
         "openWorldHint": true,
         "readOnlyHint": false
       },
@@ -1788,7 +1788,7 @@
       },
       "annotations": {
         "destructiveHint": false,
-        "idempotentHint": true,
+        "idempotentHint": false,
         "openWorldHint": true,
         "readOnlyHint": false
       },
@@ -1952,7 +1952,7 @@
       },
       "annotations": {
         "destructiveHint": true,
-        "idempotentHint": true,
+        "idempotentHint": false,
         "openWorldHint": false,
         "readOnlyHint": false
       },
@@ -2013,7 +2013,7 @@
       },
       "annotations": {
         "destructiveHint": false,
-        "idempotentHint": true,
+        "idempotentHint": false,
         "openWorldHint": true,
         "readOnlyHint": false
       },
@@ -2093,7 +2093,7 @@
       },
       "annotations": {
         "destructiveHint": true,
-        "idempotentHint": true,
+        "idempotentHint": false,
         "openWorldHint": false,
         "readOnlyHint": false
       },
@@ -2199,5 +2199,5 @@
     "host_tools": "x-rh-host-tools",
     "request_id": "x-rh-request-id"
   },
-  "version": "0.11.0"
+  "version": "0.11.1"
 }

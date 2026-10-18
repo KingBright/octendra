@@ -285,7 +285,7 @@ pub async fn run(command: Command, socket: &Path) -> Result<Value> {
         Command::SettlementPreview {
             device_id,
             request_id,
-        } => return crate::settlement::run(&device_id, &request_id, None).await,
+        } => crate::settlement::run(&device_id, &request_id, None).await,
         Command::SettleUnknown {
             device_id,
             request_id,
@@ -297,17 +297,17 @@ pub async fn run(command: Command, socket: &Path) -> Result<Value> {
                 acknowledge_outcome_unproven,
                 "explicit_unknown_outcome_acknowledgement_required"
             );
-            return crate::settlement::run(
+            crate::settlement::run(
                 &device_id,
                 &request_id,
                 Some((&accept_record_sha256, &accept_observation_sha256)),
             )
-            .await;
+            .await
         }
         Command::VerifyPackage {
             bundle,
             manifest_sha256,
-        } => return installation::verify_report(&bundle, &manifest_sha256),
+        } => installation::verify_report(&bundle, &manifest_sha256),
         Command::PrepareInstall {
             bundle,
             manifest_sha256,
@@ -329,9 +329,9 @@ pub async fn run(command: Command, socket: &Path) -> Result<Value> {
             )
             .await?;
             installation::write_new(&output, &review)?;
-            return Ok(
+            Ok(
                 json!({"record":review.record,"ready_for_confirmation":review.ready_for_confirmation,"grants_authority":false,"output":output}),
-            );
+            )
         }
         Command::InspectSite {
             bundle,
@@ -340,16 +340,14 @@ pub async fn run(command: Command, socket: &Path) -> Result<Value> {
         } => {
             let site = installation::inspect_site(&bundle, &manifest_sha256).await?;
             installation::write_new(&output, &site)?;
-            return Ok(
-                json!({"site":site,"output":output,"system_changes":false,"grants_authority":false}),
-            );
+            Ok(json!({"site":site,"output":output,"system_changes":false,"grants_authority":false}))
         }
         Command::RenderApproved {
             plan,
             accept_plan_sha256,
             bundle,
             output,
-        } => return installation::render(&bundle, &plan, &accept_plan_sha256, &output).await,
+        } => installation::render(&bundle, &plan, &accept_plan_sha256, &output).await,
         Command::Serve {
             policy,
             state_dir,

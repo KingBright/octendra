@@ -28,7 +28,7 @@ mod history_gateway;
 mod history_retention;
 mod job_dispatch;
 mod job_receipts;
-mod local_sudo;
+pub mod local_sudo;
 mod maintenance;
 pub mod maintenance_tasks;
 mod oauth_handoff;

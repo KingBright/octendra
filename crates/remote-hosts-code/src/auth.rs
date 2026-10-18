@@ -74,6 +74,112 @@ struct Access {
     resource: String,
     family: String,
 }
+// Preserve the deployed policy. Longer sessions need a separately reviewed policy change.
+const ACCESS_TTL: i64 = 3600;
+const REFRESH_TTL: i64 = 30 * 86400;
+const REFRESH_RETRY_WINDOW: i64 = 30;
+
+#[derive(Serialize, Deserialize)]
+struct CurrentTokens {
+    access: Access,
+    bearer: String,
+    refresh: String,
+    access_expires_at: i64,
+}
+impl CurrentTokens {
+    fn response(&self, observed_at: i64) -> Json<Value> {
+        Json(json!({
+            "access_token": self.bearer,
+            "refresh_token": self.refresh,
+            "token_type": "Bearer",
+            "expires_in": (self.access_expires_at - observed_at).max(0),
+            "scope": self.access.principal.scopes.join(" "),
+            "resource": self.access.resource
+        }))
+    }
+}
+async fn put_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    kind: &str,
+    key: &str,
+    value: &impl Serialize,
+    expires: i64,
+) -> anyhow::Result<()> {
+    sqlx::query("INSERT INTO kv VALUES(?,?,?,?) ON CONFLICT(kind,key) DO UPDATE SET value=excluded.value, expires=excluded.expires")
+        .bind(kind).bind(key).bind(serde_json::to_string(value)?).bind(expires)
+        .execute(&mut **tx).await?;
+    Ok(())
+}
+async fn get_tx<T: serde::de::DeserializeOwned>(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    kind: &str,
+    key: &str,
+    observed_at: i64,
+) -> anyhow::Result<Option<T>> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT value FROM kv WHERE kind=? AND key=? AND expires>?")
+            .bind(kind)
+            .bind(key)
+            .bind(observed_at)
+            .fetch_optional(&mut **tx)
+            .await?;
+    row.map(|(value,)| serde_json::from_str(&value).map_err(Into::into))
+        .transpose()
+}
+async fn revoke_family_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    family: &str,
+) -> anyhow::Result<()> {
+    // A durable tombstone also covers already-issued long-lived legacy successors.
+    // The same writer transaction serializes revocation against every refresh issuance.
+    put_tx(tx, "revoked", family, &true, i64::MAX).await?;
+    sqlx::query("DELETE FROM kv WHERE kind='oauth_refresh_family' AND key=?")
+        .bind(family)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+async fn issue_tokens_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    access: Access,
+    confidential: bool,
+    issued_at: i64,
+) -> anyhow::Result<CurrentTokens> {
+    let tokens = CurrentTokens {
+        bearer: oauth_random(access.client_id.starts_with("rh2_")),
+        refresh: oauth_random(access.client_id.starts_with("rh2_")),
+        access,
+        access_expires_at: issued_at + ACCESS_TTL,
+    };
+    put_tx(
+        tx,
+        &oauth_state_kind("access", &tokens.bearer),
+        &hash(&tokens.bearer),
+        &tokens.access,
+        tokens.access_expires_at,
+    )
+    .await?;
+    put_tx(
+        tx,
+        &oauth_state_kind("refresh", &tokens.refresh),
+        &hash(&tokens.refresh),
+        &tokens.access,
+        issued_at + REFRESH_TTL,
+    )
+    .await?;
+    if confidential {
+        // Only a short authenticated retry window retains recoverable token values.
+        put_tx(
+            tx,
+            "oauth_refresh_family",
+            &tokens.access.family,
+            &tokens,
+            issued_at + REFRESH_RETRY_WINDOW,
+        )
+        .await?;
+    }
+    Ok(tokens)
+}
 impl Auth {
     pub fn new(config: Arc<GatewayConfig>, store: Store) -> Self {
         Self {
@@ -406,9 +512,9 @@ async fn token_inner(a: Auth, headers: &HeaderMap, f: TokenRequest) -> HttpResul
         .authenticate_client(headers, f.client_id.as_deref(), f.client_secret.as_deref())
         .await?;
     let client_id = &client.client_id;
-    let resource = a.client_resource(&client, f.resource.as_deref())?;
     let access = match f.grant_type.as_str() {
         "authorization_code" => {
+            let resource = a.client_resource(&client, f.resource.as_deref())?;
             let code = f.code.ok_or_else(invalid)?;
             let verifier = f.code_verifier.ok_or_else(invalid)?;
             if !(43..=128).contains(&verifier.len())
@@ -453,132 +559,194 @@ async fn token_inner(a: Auth, headers: &HeaderMap, f: TokenRequest) -> HttpResul
         }
         "refresh_token" => {
             let refresh = f.refresh_token.ok_or_else(invalid)?;
+            let requested_resource = match f.resource.as_deref() {
+                Some(explicit) => Some(a.client_resource(&client, Some(explicit))?),
+                None => None,
+            };
             let key = hash(&refresh);
             let refresh_kind = oauth_state_kind("refresh", &refresh);
             let used_kind = oauth_state_kind("used_refresh", &refresh);
-            let access: Option<Access> =
-                a.store.get(&refresh_kind, &key).await.map_err(internal)?;
-            if let Some(access) = &access
-                && (&access.client_id != client_id
-                    || access.resource != resource
-                    || a.store
-                        .get::<bool>("revoked", &access.family)
-                        .await
-                        .map_err(internal)?
-                        .is_some())
-            {
-                return Err(invalid());
-            }
-            // Consume and record the replay marker in one transaction so two
-            // concurrent refresh requests cannot miss each other's marker.
-            let mut tx = a.store.pool.begin().await.map_err(internal)?;
-            let row: Option<(String,)> = sqlx::query_as(
-                "DELETE FROM kv WHERE kind=? AND key=? AND expires>? RETURNING value",
-            )
-            .bind(&refresh_kind)
-            .bind(&key)
-            .bind(now())
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(internal)?;
-            let Some((encoded,)) = row else {
-                tx.commit().await.map_err(internal)?;
-                let used = match a
-                    .store
-                    .get::<UsedRefresh>("oauth_refresh_binding", &key)
+            // Acquire the writer before reading either tokens or revocation. Concurrent
+            // refresh/revoke calls cannot observe a half-issued successor or miss a revoke.
+            let mut tx = a
+                .store
+                .pool
+                .begin_with("BEGIN IMMEDIATE")
+                .await
+                .map_err(internal)?;
+            let observed_at = now();
+            let row: Option<(String, i64)> =
+                sqlx::query_as("SELECT value,expires FROM kv WHERE kind=? AND key=? AND expires>?")
+                    .bind(&refresh_kind)
+                    .bind(&key)
+                    .bind(observed_at)
+                    .fetch_optional(&mut *tx)
                     .await
-                    .map_err(internal)?
+                    .map_err(internal)?;
+            let Some((encoded, old_expires)) = row else {
+                let used = match get_tx::<UsedRefresh>(
+                    &mut tx,
+                    "oauth_refresh_binding",
+                    &key,
+                    observed_at,
+                )
+                .await
+                .map_err(internal)?
                 {
                     Some(used) => Some(used),
-                    None => a
-                        .store
-                        .get::<UsedRefresh>(&used_kind, &key)
+                    None => get_tx::<UsedRefresh>(&mut tx, &used_kind, &key, observed_at)
                         .await
                         .map_err(internal)?,
                 };
-                if let Some(used) = used {
-                    let family = match used {
-                        UsedRefresh::Bound {
-                            family,
-                            client_id: owner,
-                        } if &owner == client_id => Some(family),
-                        // Records issued before multi-client authentication used a string.
-                        UsedRefresh::Legacy(family)
-                            if client.token_endpoint_auth_method == "none" =>
-                        {
-                            Some(family)
-                        }
-                        _ => None,
-                    };
-                    if let Some(family) = family {
-                        a.store
-                            .put("revoked", &family, &true, now() + 2592000)
-                            .await
-                            .map_err(internal)?;
+                let (family, retry_until) = match used {
+                    Some(UsedRefresh::Bound {
+                        family,
+                        client_id: owner,
+                        retry_until,
+                    }) if &owner == client_id => (family, retry_until),
+                    Some(UsedRefresh::Legacy(family))
+                        if client.token_endpoint_auth_method == "none" =>
+                    {
+                        (family, None)
                     }
+                    _ => return Err(invalid()),
+                };
+                if get_tx::<bool>(&mut tx, "revoked", &family, observed_at)
+                    .await
+                    .map_err(internal)?
+                    .is_some()
+                {
+                    return Err(invalid());
                 }
+                if client.token_endpoint_auth_method != "none"
+                    && retry_until.is_some_and(|until| observed_at < until)
+                    && let Some(current) = get_tx::<CurrentTokens>(
+                        &mut tx,
+                        "oauth_refresh_family",
+                        &family,
+                        observed_at,
+                    )
+                    .await
+                    .map_err(internal)?
+                    && &current.access.client_id == client_id
+                    && current.access.family == family
+                    && requested_resource
+                        .as_deref()
+                        .is_none_or(|r| r == current.access.resource)
+                    && current.access_expires_at > observed_at
+                    && get_tx::<Access>(
+                        &mut tx,
+                        &oauth_state_kind("access", &current.bearer),
+                        &hash(&current.bearer),
+                        observed_at,
+                    )
+                    .await
+                    .map_err(internal)?
+                    .is_some()
+                    && get_tx::<Access>(
+                        &mut tx,
+                        &oauth_state_kind("refresh", &current.refresh),
+                        &hash(&current.refresh),
+                        observed_at,
+                    )
+                    .await
+                    .map_err(internal)?
+                    .is_some()
+                {
+                    tx.commit().await.map_err(internal)?;
+                    return Ok(current.response(observed_at));
+                }
+                // Public client IDs are not sender proof. An old token cannot enable
+                // unlimited replay, even during the confidential-client retry grace.
+                revoke_family_tx(&mut tx, &family).await.map_err(internal)?;
+                tx.commit().await.map_err(internal)?;
                 return Err(invalid());
             };
             let access: Access = serde_json::from_str(&encoded).map_err(internal)?;
-            if &access.client_id != client_id || access.resource != resource {
-                tx.rollback().await.map_err(internal)?;
+            if &access.client_id != client_id
+                || requested_resource
+                    .as_deref()
+                    .is_some_and(|r| r != access.resource)
+                || get_tx::<bool>(&mut tx, "revoked", &access.family, observed_at)
+                    .await
+                    .map_err(internal)?
+                    .is_some()
+            {
                 return Err(invalid());
             }
+            sqlx::query("DELETE FROM kv WHERE kind=? AND key=?")
+                .bind(&refresh_kind)
+                .bind(&key)
+                .execute(&mut *tx)
+                .await
+                .map_err(internal)?;
             let used = UsedRefresh::Bound {
                 family: access.family.clone(),
                 client_id: client_id.clone(),
+                retry_until: (client.token_endpoint_auth_method != "none")
+                    .then_some(observed_at + REFRESH_RETRY_WINDOW),
             };
-            // Preserve the legacy string format for public-client rollback.
-            // A separate binding row adds client ownership without changing it.
-            for (kind, value) in [
-                (
-                    used_kind.as_str(),
-                    serde_json::to_string(&access.family).map_err(internal)?,
-                ),
-                (
-                    "oauth_refresh_binding",
-                    serde_json::to_string(&used).map_err(internal)?,
-                ),
-            ] {
-                sqlx::query("INSERT INTO kv (kind,key,value,expires) VALUES(?,?,?,?) ON CONFLICT(kind,key) DO UPDATE SET value=excluded.value, expires=excluded.expires")
-                    .bind(kind).bind(&key).bind(value).bind(now() + 2592000)
-                    .execute(&mut *tx).await.map_err(internal)?;
-            }
+            put_tx(
+                &mut tx,
+                &used_kind,
+                &key,
+                &access.family,
+                old_expires.max(observed_at + REFRESH_TTL),
+            )
+            .await
+            .map_err(internal)?;
+            put_tx(
+                &mut tx,
+                "oauth_refresh_binding",
+                &key,
+                &used,
+                old_expires.max(observed_at + REFRESH_TTL),
+            )
+            .await
+            .map_err(internal)?;
+            let tokens = issue_tokens_tx(
+                &mut tx,
+                access,
+                client.token_endpoint_auth_method != "none",
+                observed_at,
+            )
+            .await
+            .map_err(internal)?;
             tx.commit().await.map_err(internal)?;
-            access
+            return Ok(tokens.response(observed_at));
         }
         _ => return Err(invalid()),
     };
-    let bearer = oauth_random(client_id.starts_with("rh2_"));
-    let refresh = oauth_random(client_id.starts_with("rh2_"));
-    a.store
-        .put(
-            &oauth_state_kind("access", &bearer),
-            &hash(&bearer),
-            &access,
-            now() + 3600,
-        )
+    let mut tx = a
+        .store
+        .pool
+        .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(internal)?;
-    a.store
-        .put(
-            &oauth_state_kind("refresh", &refresh),
-            &hash(&refresh),
-            &access,
-            now() + 2592000,
-        )
-        .await
-        .map_err(internal)?;
-    Ok(Json(
-        json!({"access_token":bearer,"refresh_token":refresh,"token_type":"Bearer","expires_in":3600,"scope":access.principal.scopes.join(" "),"resource":access.resource}),
-    ))
+    let issued_at = now();
+    let tokens = issue_tokens_tx(
+        &mut tx,
+        access,
+        client.token_endpoint_auth_method != "none",
+        issued_at,
+    )
+    .await
+    .map_err(internal)?;
+    tx.commit().await.map_err(internal)?;
+    Ok(tokens.response(issued_at))
 }
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]
 enum UsedRefresh {
-    Bound { family: String, client_id: String },
+    Bound {
+        family: String,
+        client_id: String,
+        #[serde(default)]
+        retry_until: Option<i64>,
+    },
     Legacy(String),
 }
+
 async fn revoke(
     State(a): State<Auth>,
     headers: HeaderMap,
@@ -612,11 +780,25 @@ async fn revoke_inner(
             .await
             .map_err(internal)?,
     };
+    let binding = match access {
+        Some(access) => Some((access.family, access.client_id)),
+        None => match a
+            .store
+            .get::<UsedRefresh>("oauth_refresh_binding", &key)
+            .await
+            .map_err(internal)?
+        {
+            Some(UsedRefresh::Bound {
+                family, client_id, ..
+            }) => Some((family, client_id)),
+            _ => None,
+        },
+    };
     // Preserve token-possession revocation for legacy public clients. A
     // confidential client always has to authenticate with its registered method.
     let legacy_id =
         if !headers.contains_key(header::AUTHORIZATION) && !v.contains_key("client_secret") {
-            access.as_ref().map(|access| access.client_id.as_str())
+            binding.as_ref().map(|(_, client_id)| client_id.as_str())
         } else {
             None
         };
@@ -630,19 +812,25 @@ async fn revoke_inner(
     let client = a
         .authenticate_client(headers, id, v.get("client_secret").map(String::as_str))
         .await?;
-    if let Some(access) = access
-        && access.client_id == client.client_id
+    if let Some((family, owner)) = binding
+        && owner == client.client_id
     {
-        a.store
-            .put("revoked", &access.family, &true, now() + 2592000)
+        let mut tx = a
+            .store
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(internal)?;
+        revoke_family_tx(&mut tx, &family).await.map_err(internal)?;
         for kind in ["access", "refresh"] {
-            a.store
-                .take::<Access>(&oauth_state_kind(kind, token), &key)
+            sqlx::query("DELETE FROM kv WHERE kind=? AND key=?")
+                .bind(oauth_state_kind(kind, token))
+                .bind(&key)
+                .execute(&mut *tx)
                 .await
                 .map_err(internal)?;
         }
+        tx.commit().await.map_err(internal)?;
     }
     Ok(Json(json!({})))
 }

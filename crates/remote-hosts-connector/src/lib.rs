@@ -2659,6 +2659,9 @@ where
         let session = self.session().await?;
         let completion_marker = (!self.config.windows)
             .then(|| format!("REMOTE_HOSTS_EXEC_DONE_{}", request.operation_id));
+        // Noninteractive execution never reads Vault sudo/login credentials. The
+        // target's own sudo -n decision is authoritative; per-command NOPASSWD
+        // rules need no probe and cannot inherit a credential-bearing stream.
         let command = match completion_marker.as_deref() {
             Some(marker) => framed_posix_ssh_exec_command(&request.profile, marker),
             None => ssh_exec_command(&request.profile, self.config.windows),
@@ -5942,6 +5945,12 @@ async fn execute_russh_command(
         .exec(true, command)
         .await
         .map_err(|error| TransportError::Backend(error.to_string()))?;
+    // Every pipe-mode target receives EOF. Credentials are handled only by
+    // the separate, explicitly authorized PTY credential workflow.
+    channel
+        .eof()
+        .await
+        .map_err(|error| TransportError::Backend(error.to_string()))?;
     let result =
         receive_russh_exec_result(&mut channel, output_limit_bytes, completion_marker).await;
     let _ = channel.close().await;
@@ -5998,6 +6007,8 @@ async fn receive_russh_exec_result(
     Ok(result)
 }
 
+// Keep channel ownership and each independent control stream explicit.
+#[allow(clippy::too_many_arguments)]
 async fn run_russh_pty_channel<C>(
     transport: Arc<RusshTransport<C>>,
     session: Arc<client::Handle<RusshClientHandler>>,
@@ -6024,6 +6035,7 @@ async fn run_russh_pty_channel<C>(
     transport.release_pty_channel(&session).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drive_russh_pty_channel<C>(
     transport: &RusshTransport<C>,
     session: &Arc<client::Handle<RusshClientHandler>>,
@@ -12129,6 +12141,9 @@ fn classify_connection_failure(message: &str) -> (EntityState, StateReasonCode, 
 }
 
 #[cfg(test)]
+mod noninteractive_sudo_tests;
+
+#[cfg(test)]
 mod tests {
     use std::{
         collections::BTreeSet,
@@ -13057,8 +13072,7 @@ mod tests {
                 .saturating_duration_since(now)
                 .min(Duration::from_millis(500));
             match tokio::time::timeout(wait, channel.wait()).await {
-                Ok(Some(ChannelMsg::Data { data }))
-                | Ok(Some(ChannelMsg::ExtendedData { data, .. })) => {
+                Ok(Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. })) => {
                     output.push_str(&String::from_utf8_lossy(&data));
                 }
                 Ok(Some(ChannelMsg::ExitStatus { exit_status })) => {
@@ -13434,6 +13448,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires scripts/run-real-sshd-regression.py"]
+    #[allow(clippy::too_many_lines)]
     async fn real_sshd_russh_reuses_transport_sftp_and_forward()
     -> Result<(), Box<dyn std::error::Error>> {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -13682,6 +13697,53 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn sudo_exec_uses_target_nopasswd_policy_with_eof_and_no_credential_probe()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let sudo = temp.path().join("sudo-fixture");
+        // Synthetic policy: `true` is denied, the actual shell target is NOPASSWD.
+        // A shared password stream would be visible to this policy/target as input.
+        std::fs::write(
+            &sudo,
+            r#"#!/bin/sh
+[ "$1" = -n ] && [ "$2" = -- ] || exit 90
+shift 2
+[ "$1" = true ] && exit 91
+if IFS= read -r unexpected; then exit 92; fi
+exec "$@"
+"#,
+        )?;
+        std::fs::set_permissions(&sudo, std::fs::Permissions::from_mode(0o700))?;
+        let profile = CommandProfile {
+            name: "sudo.posix".into(),
+            program: sudo.to_string_lossy().into_owned(),
+            args: vec![
+                "-n".into(),
+                "--".into(),
+                "/bin/sh".into(),
+                "-c".into(),
+                "if IFS= read -r value; then exit 93; fi; printf 'target EOF'; exit 23".into(),
+            ],
+            class: CommandClass::Sensitive,
+            timeout_seconds: 30,
+            output_limit_bytes: 4096,
+            requires_tty: false,
+        };
+        let marker = "REMOTE_HOSTS_EXEC_DONE_sudo_fixture";
+        let command = super::framed_posix_ssh_exec_command(&profile, marker);
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", &command])
+            .stdin(std::process::Stdio::null())
+            .output()?;
+        assert_eq!(output.status.code(), Some(23));
+        assert!(String::from_utf8(output.stdout)?.contains("target EOF"));
+        assert!(output.stderr.is_empty());
+        Ok(())
+    }
+
     #[test]
     fn framed_posix_exec_status_overrides_incorrect_gateway_status() {
         let marker = "REMOTE_HOSTS_EXEC_DONE_override";
@@ -13850,6 +13912,12 @@ mod tests {
             Some("unit-test-credential")
         );
         assert!(secret.private_key_pem.is_none());
+
+        // Login authority does not implicitly grant stored sudo authority.
+        assert!(matches!(
+            provider.sudo_password_for(access_path.id).await,
+            Err(super::SshCredentialError::MissingSudoPassword)
+        ));
 
         let wrong_provider = super::VaultSshCredentialProvider::new(
             repositories.clone(),

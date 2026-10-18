@@ -1,12 +1,12 @@
 //! NAS-side Streamable HTTP MCP, authenticated outbound device polling and durable routing.
 use crate::{
-    GatewayConfig,
+    DeviceRegistration, GatewayConfig,
     auth::{Auth, Principal},
     files, hash, now, now_ms, random,
     store::Store,
     tools,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use axum::{
     Extension, Form, Json, Router,
     extract::{DefaultBodyLimit, Request, State},
@@ -382,6 +382,43 @@ impl Gateway {
     ) -> Result<Value> {
         let scope = tools::scope(name).context("unknown tool")?;
         ensure!(p.owner == self.config.owner, "unknown owner");
+        if !matches!(
+            name,
+            "devices_list"
+                | "fleet_status"
+                | "task_resume"
+                | "task_context"
+                | "operation_get"
+                | "outcome_resolve"
+                | "transfer_cancel"
+                | "transfer_resume"
+                | "workspace_open"
+                | "desktop_worker"
+                | "desktop_frame"
+        ) && let Some(object) = args.as_object_mut()
+        {
+            let dev_hint = object
+                .remove("device_id")
+                .and_then(|v| v.as_str().map(str::to_owned));
+            if object.get("workspace_id").is_none() {
+                if let Some(dev) = dev_hint {
+                    object.insert("workspace_id".into(), json!(format!("{dev}:default")));
+                } else if self.config.devices.len() == 1 {
+                    object.insert(
+                        "workspace_id".into(),
+                        json!(format!("{}:default", self.config.devices[0].id)),
+                    );
+                }
+            } else if let Some(dev) = dev_hint
+                && let Some(ws) = object
+                    .get("workspace_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                && (!ws.contains(':') || ws.starts_with('/'))
+            {
+                object.insert("workspace_id".into(), json!(format!("{dev}:{ws}")));
+            }
+        }
         if matches!(
             name,
             "workspace_open"
@@ -546,22 +583,52 @@ impl Gateway {
         if name == "task_context" {
             return crate::activity::task(self, p, &args).await;
         }
+        let resolve_device = |raw: &str| -> Result<&DeviceRegistration> {
+            self.config
+                .devices
+                .iter()
+                .find(|d| d.id == raw || d.name.eq_ignore_ascii_case(raw))
+                .context("unknown device")
+        };
         let device = if matches!(name, "workspace_open" | "desktop_worker" | "desktop_frame") {
-            files::text(&args, "device_id")?
+            let raw = files::text(&args, "device_id")?;
+            let reg = resolve_device(raw)?;
+            if raw != reg.id
+                && let Some(object) = args.as_object_mut()
+            {
+                object.insert("device_id".into(), json!(reg.id));
+            }
+            reg.id.clone()
         } else {
-            files::text(&args, "workspace_id")?
-                .split_once(':')
-                .context("invalid workspace id")?
-                .0
-        }
-        .to_owned();
+            let raw_ws = files::text(&args, "workspace_id")?.to_owned();
+            if let Some((prefix, suffix)) = raw_ws.split_once(':')
+                && !raw_ws.starts_with('/')
+                && (prefix.len() > 1 || raw_ws.as_bytes().get(2).is_none_or(|b| *b != b'\\'))
+            {
+                let reg = resolve_device(prefix)?;
+                if prefix != reg.id
+                    && let Some(object) = args.as_object_mut()
+                {
+                    object.insert("workspace_id".into(), json!(format!("{}:{suffix}", reg.id)));
+                }
+                reg.id.clone()
+            } else if let Some(raw_dev) = args.get("device_id").and_then(Value::as_str) {
+                let reg = resolve_device(raw_dev)?;
+                if let Some(object) = args.as_object_mut() {
+                    object.insert("workspace_id".into(), json!(format!("{}:{raw_ws}", reg.id)));
+                }
+                reg.id.clone()
+            } else if self.config.devices.len() == 1 {
+                let reg = &self.config.devices[0];
+                if let Some(object) = args.as_object_mut() {
+                    object.insert("workspace_id".into(), json!(format!("{}:{raw_ws}", reg.id)));
+                }
+                reg.id.clone()
+            } else {
+                bail!("invalid workspace id");
+            }
+        };
         let device = device.as_str();
-        let _registration = self
-            .config
-            .devices
-            .iter()
-            .find(|d| d.id == device)
-            .context("unknown device")?;
         if let Some(object) = args.as_object_mut() {
             if !matches!(name, "desktop_worker" | "desktop_frame") {
                 object.remove("task_id");
@@ -592,6 +659,7 @@ impl Gateway {
                 .unwrap_or("")
         ));
         let fingerprint = hash(serde_json::to_vec(&args)?);
+        // Unknown outcomes remain guarded even when admission generated the retry key.
         let semantic = if scope != "code:read" {
             let mut semantic_args = args.clone();
             if let Some(object) = semantic_args.as_object_mut() {
@@ -845,7 +913,12 @@ impl Gateway {
         }
         // Publish only after the insertion is committed; retries keep the same job.
         signals.jobs.notify_waiters();
-        let deadline = Instant::now() + Duration::from_secs(4);
+        let gateway_wait_ms = args
+            .get("wait_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(4_000)
+            .clamp(100, 62_000);
+        let deadline = Instant::now() + Duration::from_millis(gateway_wait_ms);
         loop {
             // notify_waiters observes futures created before the durable read, even
             // when they have not been polled yet. This closes the check/wait race.

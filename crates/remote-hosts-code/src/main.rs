@@ -110,6 +110,19 @@ enum Command {
         #[arg(long)]
         agent: bool,
     },
+    /// Pre-authorize silent sudo execution once for this device agent (via private credential or sudoers NOPASSWD).
+    AuthorizeSudo {
+        #[arg(long)]
+        config: PathBuf,
+        /// Read the sudo password from this file (or stdin when omitted unless --sudoers is used alone).
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+        /// Also install /etc/sudoers.d/remote-hosts-code (NOPASSWD: ALL + !tty_tickets) validated via visudo.
+        #[arg(long)]
+        sudoers: bool,
+        #[arg(long)]
+        user: Option<String>,
+    },
 }
 fn lock(dir: &std::path::Path) -> Result<std::fs::File> {
     std::fs::create_dir_all(dir)?;
@@ -447,6 +460,40 @@ async fn main() -> Result<()> {
                 c.validate_oauth_policy()?;
             }
             println!("Configuration valid; secrets not displayed.");
+        }
+        Command::AuthorizeSudo {
+            config,
+            password_file,
+            sudoers,
+            user,
+        } => {
+            let c: AgentConfig = read_config(&config)?;
+            let mut stored_secret = None;
+            if let Some(path) = password_file {
+                let bytes = std::fs::read(&path)?;
+                stored_secret = Some(remote_hosts_code::local_sudo::store_credential(&c, &bytes)?);
+            } else if !sudoers {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                std::io::stdin().read_to_end(&mut bytes)?;
+                stored_secret = Some(remote_hosts_code::local_sudo::store_credential(&c, &bytes)?);
+            }
+            let sudoers_path = if sudoers {
+                Some(remote_hosts_code::local_sudo::configure_sudoers_rule(
+                    user.as_deref(),
+                )?)
+            } else {
+                None
+            };
+            println!(
+                "{}",
+                serde_json::json!({
+                    "state": "authorized",
+                    "device_id": c.device_id,
+                    "credential_path": stored_secret,
+                    "sudoers_path": sudoers_path,
+                })
+            );
         }
     }
     Ok(())

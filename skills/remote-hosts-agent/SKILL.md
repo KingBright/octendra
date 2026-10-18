@@ -5,106 +5,51 @@ description: Operate and maintain the user's transport-first Remote Hosts system
 
 # Remote Hosts Agent Skill
 
-Use this skill for Remote Hosts code editing across authorized devices and for managed SSH operations.
+Use this skill for Remote Hosts code editing across authorized devices (`remote-hosts-code`) and for managed SSH operations (`remote_hosts_*` MCP tools).
 
-For code work, prefer the Code Gateway tools (`devices_list`, `workspace_open`,
-`code_search`, `code_read`, `code_apply_edits`, `terminal_exec`) whether exposed by
-a desktop MCP server or a hosted connector. Choose the device explicitly, open a
-project under its advertised roots, use bounded reads and version-checked edits,
-and reuse the returned workspace and operation identities. The SSH inventory's
-host IDs are not Code Gateway device IDs. Never silently substitute one for the
-other or fail over an offline device to a different machine.
+## 1-Step Fast Paths (Lowest Token & Tool-Call Overhead)
 
-## Connection authority and continued work
+### 1. Code Gateway (`remote-hosts-code` / `remote_hosts_code_execute`)
+- **Direct 1-call execution**: `code_read`, `code_search`, `code_apply_edits`, `terminal_exec`, `files_sync`, and `file_upload` accept `workspace_id` as an existing Workspace UUID **or** `"<device_name_or_id>:/abs/path"` (or `":default"` / `"/abs/path"` on a single-device Gateway). The Gateway and Agent automatically resolve device names and open/reuse the workspace.
+- **`idempotency_key` is optional**: Omit `idempotency_key` for normal interactive or iterative calls; supply an explicit key only when you want deterministic deduplication across network retries.
+- **Default 10s inline wait**: `terminal_exec` waits up to `10000ms` by default (`wait_ms` configurable up to `60000ms`) and returns up to 32–64 KB of output inline in the first response.
+- **Sudo (`sudo: true`)**: On an Agent with pre-authorized local sudo (`remote-hosts-code authorize-sudo --config <agent.json>` or `--sudoers`), pass `sudo: true` to `terminal_exec`. Never send passwords in chat, tool arguments, `terminal_input`, command text, or logs.
 
-Code operations reuse the current authenticated connection, account scopes,
-enrolled device scopes and Agent local flags. There is no separate task grant,
-renewal form, command classifier or per-command business approval. A task_id is
-only a correlation label; authorization_version is a deprecated compatibility
-field. Connection revocation and local OS permissions remain authoritative.
+### 2. Managed SSH (`remote_hosts_*` MCP tools)
+- **Direct 1-call execution**: Call `remote_hosts_run_in_workspace` directly with `host_id: "<host_name | display_name | ip_address | uuid>"` (leave `workspace_id: ""`), `command_profile: "shell.posix"`, `args: ["..."]`, and `wait_timeout_ms: 10000`. It automatically prepares/reuses a healthy Workspace, waits for completion, and returns compacted stdout/stderr inline in `completion.output`!
+- **One-time sudo (`sudo: true`)**: Pass `sudo: true` on `remote_hosts_run_in_workspace` (or run `sudo -n ...` in `shell.posix`). Noninteractive SSH uses the target's existing `sudo -n` authority and EOF stdin; it never injects Vault passwords or reuses the SSH login password for sudo. If existing OS authorization is insufficient, the command fails without a credential fallback.
+- **Host registration**: Use `remote_hosts_ensure_host` to register or update a host, route, and encrypted credential in one idempotent call.
 
-The retired task_resume compatibility tool only observes the original request
-or operation; it never renews or replays it. Pre-upgrade queued task bindings
-stay held, rather than being silently released at upgrade. Unknown outcomes
-must be observed and resolved through the original operation before new work.
+## Connection Authority & Sudo Rules
 
-On an Agent advertising local_sudo_v1, terminal_exec with sudo=true uses the
-current device/local user's OS credential and sudo policy for a noninteractive
-shell. The user registers credentials locally; never request a password in
-chat, tool arguments, terminal_input, command text, logs or receipts. The SSH
-connector's access-path stored-sudo flow remains separate. Do not substitute
-a host ID, device or credential source. See
-[connection authorization](../../docs/task-authorization.md).
-
-Client confirmations remain client-controlled. Gemini App requires confirmation
-for write actions; CLI policies are separate. Read-only annotations must describe
-actual behavior, and arbitrary terminal execution is never a read-only tool.
-Never evade a platform denial, device/local policy, source-address rejection or
-unknown outcome by changing task labels, command form, device or transport.
+- Code operations reuse the authenticated connection, account scopes, enrolled device scopes, and Agent local flags. There is no separate task grant or per-command business approval.
+- Client OAuth tokens retain the deployed 1-hour access / 30-day refresh policy. Authenticated confidential clients may retry a consumed refresh token for 30 seconds and receive the current valid successor with its remaining access lifetime. Public clients retain reuse detection; a client ID alone never authorizes replay. Family revocation remains durable.
+- Never silently substitute an SSH host ID for a Code Gateway device ID or fail over an offline device to a different machine.
+- Secrets stay in credential-only tools or local `authorize-sudo` storage (`0600 sudo.secret` / OS Keychain / `/etc/sudoers.d/remote-hosts-code`).
 
 ## Core Rules
 
-1. Prefer `remote_hosts_*` MCP tools over shelling out to `ssh`, editing the SQLite database, or inventing host state.
-2. Secrets use credential-only tools and never enter normal replies, logs, shell arguments, knowledge, or raw PTY input. Before sudo, password fallback, or nested SSH, read the mandatory prompt/host-key verification rules in [mcp-workflows.md](references/mcp-workflows.md).
-3. Never create or suggest a duplicate host before running the duplicate checks in [host-registry.md](references/host-registry.md).
-4. Reuse only `idle` or `working` workspaces owned by the current Agent Session and healthy PTY/access-path state. The one exception is an already-active PTY with visible `interaction`: keep that same blocked workspace and answer through the same PTY instead of creating another SSH session.
-5. Treat `blocked`, `exhausted`, `throttled`, `rate_limited`, `connector_offline`, `auth_failed`, `host_key_changed`, and `ssh_route_unsupported` as stop-and-diagnose states, except `pty_input_required` with an active, input-allowed PTY, which requires a deliberate response on that PTY. For `pooled_transport_invalidated`, wait for its short cooldown, then make one fresh workspace/connection attempt; never restart the connector or interrupt an unrelated PTY solely to clear a discarded pooled transport.
-6. Use `shell.posix` or `shell.powershell` as the normal path for domain work. Narrow read-only profiles are optional shortcuts, not an extensibility boundary. Prefer one persistent PTY when interaction, shared shell state, or an unreliable gateway makes repeated exec channels unsuitable.
-7. Keep output bounded. Use output artifact tools for large logs and read full content only in bounded chunks. Compound scripts intentionally use conservative generic compaction; do not split dependent commands merely to force compression. Expand the same durable result for exact evidence, never rerun the command.
-8. For normal host registration or route updates, use the idempotent `remote_hosts_ensure_host`; it performs duplicate checks and preserves the canonical host identity.
-9. The default MCP `agent` profile is intentionally compact but supports task-level host and encrypted credential management. Use `admin` only for low-level registry repair or manual entity maintenance; never bypass a missing tool by editing SQLite directly.
-10. Prefer public-key authentication. When a stored password is needed, the connector tries local keys first, uses the password as fallback, and then schedules one bounded, idempotent local-public-key install. A failed install never invalidates the authenticated pooled session or requires the user to type the password again.
-11. Inspect each runtime snapshot access path's `authorized_key_bootstrap` and related `attention` before retrying. `proxy_jump` or a non-empty `proxy_chain` is true multi-hop and must stop on `ssh_route_unsupported`. An empty-chain `bastion` route is a single SSH endpoint and may use an interactive menu or an explicitly documented gateway username. For Smart Mine production, the only SSH entry is `10.36.31.20`; all internal machines must be selected inside its interactive menu, and no direct-login username or internal-IP access path may be inferred.
-12. Never loop on a pending/failed PTY. Reuse the same active current-session PTY for a typed interaction, read new output before input, and follow [mcp-workflows.md](references/mcp-workflows.md) for credential injection. Failed/disabled PTYs are diagnosed or replaced, never blindly replayed.
-13. Use Remote Hosts file tools and the existing Workspace for transfers. Keep one stable operation/idempotency identity, continue from reported progress/checkpoints, and never create parallel retries or put file bodies in shell/MCP text. Read [minio-relay.md](references/minio-relay.md) only for interactive-bastion large-file routing.
-14. Handshake protection has independent per-access-path and connector-wide budgets. On `local_handshake_budget_exhausted`, respect the exact `retry_after_seconds`; do not create another workspace or session to bypass either bucket.
-15. For gateway file fallback, require explicit initialization, per-chunk, and final markers plus integrity checks. Missing output or markers is failure even when the channel reports exit status zero. Initialization, chunk append, and final placement may retry internally up to the bounded stage limit because they verify remote state and are idempotent. Once that budget is exhausted, stop until route capability or configuration changes. Never generalize this retry permission to arbitrary shell writes.
-16. For reuse/capacity/transport/PTY reasoning require the runtime version documented in [setup-and-runtime.md](references/setup-and-runtime.md). Distinguish logical Workspace capacity from SSH channel capacity, and logical sessions from real transport evidence.
-17. Treat `channel_capacity.state=saturated|oversubscribed` and attention `ssh_channel_capacity_saturated` as local queue pressure, not SSH failure. Keep the same Workspace, operation, PTY, and idempotency key; wait for a reservation to clear. Raise `max_concurrent_channels` only when the target and bastion are known to support more channels. The connector prioritizes queued input for already-active PTYs and bounds native PTY channel/shell activation by the SSH connect timeout. If one pending PTY reports an activation timeout, inspect that PTY and route; do not assume other active PTYs or their queued input are stalled, and do not restart the connector merely to advance the queue.
-18. Interpret `transport_evidence.connection_use` precisely: `reused` proves an existing authenticated SSH connection served the channel; `first_handshake` means this runtime opened its first connection; `reconnected` means the same runtime replaced a failed connection; `attempt_failed` means a real connection attempt did not authenticate. `runtime_replaced=true` separately means route change or connector restart created a different runtime.
-19. Treat Agent Session boundaries as strict. Never reuse a Workspace or PTY id copied from another Codex/Antigravity task. If ownership is rejected, call `remote_hosts_prepare_workspace` in the current task; do not switch profiles or create raw SSH state to bypass isolation.
-20. Use a stable semantic `idempotency_key` for every mutating shell step, upload/download placement, and PTY input. Keep the same key and exact payload for a retry; use a new key for a changed command, file specification, or input. Never generate a new key merely because a wait timed out.
-21. Every `shell.posix` or `shell.powershell` request must declare `coordination_mode`. Use `read_only` only when the complete script is observational and has no remote side effect, including temporary files, cache/auth refresh, locks, signals, or implicit package/config changes. Use `mutating` for every possible side effect. Omitted `auto` is backward-compatible and conservatively treats arbitrary shell as mutating; never use `read_only` merely to escape a wait.
-22. Mutations declare the narrowest truthful stable resource scope, or the complete exact set for one indivisible multi-resource action. Parent/child conflicts serialize; independent siblings may proceed. Never broaden, rename, or invent scopes to escape a lease. Full rules: [mcp-workflows.md](references/mcp-workflows.md).
-23. Inspect `operation.requires_write_lease`, exact `operation.coordination_scopes`, the legacy summary `operation.coordination_scope`, and `write_lease.active_leases`. The singular summary may be a broad common ancestor for old clients; only the exact set determines new-runtime conflicts. Declared `read_only` shell operations do not acquire a write lease and may run concurrently across Agent Sessions within channel capacity. Wait only when a queued mutation overlaps a foreign exact scope. `recommended_action=wait_for_overlapping_scope_or_refine_scope` permits a narrower truthful declaration only when the original scope was genuinely over-broad and no side effect has begun; it never permits inventing a sibling scope.
-24. Physical and logical reuse are different: Agent Sessions, Workspaces, PTYs, operations, artifacts, and temporary context are isolated per conversation, while all conversations intentionally share the connector's pooled SSH transport for the selected access path.
-25. Treat topology synchronization as an authoritative inventory write. Read [topology-and-inventory.md](references/topology-and-inventory.md), use one globally stable `external_key` per real resource, and submit a complete snapshot for exactly one `scope_key + source`. Never publish a partial or failed discovery as complete because omitted members become inactive for that producer scope.
-26. On cold start, context compression, recovery, or after a long wait, call Agent Work Context `mode=snapshot`; retain its ids/cursor and follow only `primary_action`. Continue with `mode=wait` on the same cursor/filter. `changed=false` is a normal wait, not permission to rediscover or replay. Use entity-specific diagnostics only when the primary action requires them.
-27. Treat Agent-profile MCP responses as compact decision records. Follow `next_action` and `retry_after_ms`, retain stable `workspace.id`, `operation.id`, and sequence cursors, and read only new chunks. Do not request a runtime snapshot or command-profile catalog after every call; fetch diagnostics explicitly only when state, attention, capacity, routing, or transport evidence is needed.
-28. Command and PTY audit summaries expose bounded, redacted previews. Use `operation.command_preview` to confirm the submitted action, but never expect secrets to appear. Password and sudo interactions remain type-only. Operators can inspect the same activity in the HTTP admin page's `Agent 活动` view without reading raw MCP JSON.
-29. Idle lifecycle is connector-owned. For genuinely quiet long-running PTY work, use truthful heartbeat metadata; heartbeat/control-plane persistence failures do not prove the remote process failed and never justify duplicate execution, reconnect, or forced PTY closure. See [mcp-workflows.md](references/mcp-workflows.md).
-30. For sharing between Remote Hosts installations, read [instance-sync.md](references/instance-sync.md). Use `remote_hosts_configure_instance_sync_peer` once per approved direction, then `remote_hosts_sync_instance_peer`. The default includes `inventory`, `knowledge`, and all user-authorized SSH credentials, carried as peer-sealed ciphertext and re-encrypted in the receiving vault. Do not move SQLite files, vault master keys, Workspaces, PTYs, operations, output artifacts, or active repositories. Resolve a reported conflict explicitly instead of retrying it.
-31. For Remote Hosts Code rollout, prefer one immutable release bundle plus `fleet_status`: upgrade the Gateway before Agents, require explicit wire compatibility, and declare convergence only when version, tool schema, and embedded Skill revision all match. Never interpret an incompatible/offline Agent as proof that installation failed.
-32. If a mutating Code operation returns `outcome_unknown`, observe the original operation and verify scoped side effects. A new idempotency key must not bypass the semantic guard; use `outcome_resolve` only after evidence proves `verified_applied` or `verified_not_applied`.
-
-## Ordinary maintenance task candidate
-
-For controlled maintenance descriptions and ordinary-user checks, read [admin-maintenance.md](../../docs/admin-maintenance.md). Use the same candidate `remote-hosts-admin task` CLI through an already authorized channel. This source feature is not proof the installed runtime exposes it. Preserve the request UUID, plan digest, operation and private journal through retries; observe interrupted running records instead of using another UUID. Task prepare/run write journal state and require a truthful mutating scope. Metadata-check success, caller-declared device UUID, admin_status_protocol and upgrade receipts never establish root authorization. The repair task is deliberately blocked: separate platform installation/access confirmation and a privileged executor are still required. Never use it to circumvent a denied application/tool action or transmit a password.
+1. Prefer `remote_hosts_*` MCP tools over shelling out to `ssh` or editing SQLite directly.
+2. Reuse `idle` or `working` workspaces; `remote_hosts_run_in_workspace` with `host_id` automatically recovers when a previous session's workspace expired.
+3. Treat `blocked`, `exhausted`, `throttled`, `rate_limited`, `connector_offline`, `auth_failed`, `host_key_changed`, and `ssh_route_unsupported` as stop-and-diagnose states (except `pty_input_required` on an active PTY).
+4. Keep output bounded. When `completion.output` or `terminal_exec` inline output is sufficient, do not make extra read calls. Use `remote_hosts_get_workspace_result` or `terminal_read` only for pagination or running processes.
+5. Every `shell.posix` or `shell.powershell` request declares `coordination_mode` (`read_only` for pure observation, `mutating` for side effects) and a lowercase `coordination_scope` (default `"host"`).
+6. If any Code mutation returns `outcome_unknown`, inspect the original operation with `operation_get` and resolve with `outcome_resolve` (`verified_applied` or `verified_not_applied`) only after verifying side effects. Omitting a retry key never bypasses the unknown-outcome guard.
 
 ## Remote Hosts Code Observation Contract
 
-For Code tools, submit once with a stable idempotency key, then observe `operation_get` with the same `operation_id`, including while its terminal is running. Use `wait_ms`, state `cursor` and byte `terminal_cursor` only when actually exposed by the host. `terminal_read` is the full-log or missing-range recovery path, not a mandatory second task. A compact preview may use `output_ref: "#/output"` to reference the identical top-level output; do not treat it as missing bytes. Byte cursors apply to sanitized UTF-8, not compressed character counts. `output_complete` means capture is sealed; also inspect range completeness, gaps, truncation and the exit code. Process success does not imply business acceptance. `paused` and `awaiting_source` require recovery of the original transfer, never a replacement upload. A server or adapter catalog report is not proof of final host exposure; missing host reports remain unknown.
+For Code tools, submit once with a stable idempotency key when retry deduplication is needed, then observe `operation_get` with the same `operation_id`, including while its terminal is running. Use `wait_ms`, state `cursor` and byte `terminal_cursor` only when actually exposed by the host. `terminal_read` is the full-log or missing-range recovery path, not a mandatory second task. A compact preview may use `output_ref: "#/output"` to reference the identical top-level output; do not treat it as missing bytes. Byte cursors apply to sanitized UTF-8, not compressed character counts. `output_complete` means capture is sealed; also inspect range completeness, gaps, truncation and the exit code.
 
-## Service Assumptions
+## Reference Router (Load On Demand Only)
 
-Platform install paths, service managers, local API checks, upgrade/version gates, and MCP client setup are cold-path context. Read [setup-and-runtime.md](references/setup-and-runtime.md) only when tools are unavailable or the task is explicitly about installation, upgrade, runtime version, or service diagnosis. Do not infer a live deployment path or version from an example.
-For a macOS Code Agent upgrade, never bypass the repository signing gate or replace the running binary with an unsigned candidate. `authorization_required`, `no identity found`, or a `CSSMERR_*` identity is a signing-recovery state: load [setup-and-runtime.md](references/setup-and-runtime.md), repair the host-local trust/search-list state, and only then resume the original upgrade workflow.
-
-## Workflow Router
-
-- For host inventory, aliases, deduplication, environment/access-path maintenance, or stale facts: read [host-registry.md](references/host-registry.md).
-- For normal remote execution, workspace reuse, PTY sessions, and output polling: read [mcp-workflows.md](references/mcp-workflows.md).
-- For connection health, connector state, throttling, SSH failures, and reuse policy: read [connection-and-errors.md](references/connection-and-errors.md).
-- For cluster topology, host-internal services, dependency edges, inactive history, or topology credential bindings: read [topology-and-inventory.md](references/topology-and-inventory.md).
-- For direct durable sharing between Remote Hosts installations: read [instance-sync.md](references/instance-sync.md).
-- For Codex/Antigravity MCP configuration and local service operations: read [setup-and-runtime.md](references/setup-and-runtime.md).
-
-## Fast Path
-
-For normal remote work, start with Agent Work Context. If it reports current work, preserve its ids/cursor and follow `primary_action`; if idle, identify one host and call `remote_hosts_prepare_workspace`. Run one bounded command with explicit intent, semantic idempotency, truthful coordination mode/scope, and `wait_timeout_ms` when appropriate. Read the exact operation with `remote_hosts_get_workspace_result`, retain `next_sequence`, and use the compact view by default. Artifact reads retain `next_offset`; request `output_mode=full` only for exact omitted evidence. Never rerun a command merely to recover output.
-
-For PTY, transfer, registry, topology, instance-sync, credential, or route-recovery work, load only the corresponding Workflow Router reference above. Keep the same Workspace/operation/PTY/transfer identity through waits and recovery. Low-level runtime events are for connector/runtime changes; normal task waiting uses Agent Work Context.
+- Host inventory, deduplication, or route updates: [host-registry.md](references/host-registry.md)
+- Advanced PTY workflows, file transfers, and lease scopes: [mcp-workflows.md](references/mcp-workflows.md)
+- SSH/route errors, bastion menus (`10.36.31.20`), and capacity diagnosis: [connection-and-errors.md](references/connection-and-errors.md)
+- Bastion large-file MinIO relay: [minio-relay.md](references/minio-relay.md)
+- Cluster/service topology snapshots: [topology-and-inventory.md](references/topology-and-inventory.md)
+- Cross-instance encrypted sync: [instance-sync.md](references/instance-sync.md)
+- Local service installation, signing recovery, and MCP setup: [setup-and-runtime.md](references/setup-and-runtime.md)
 
 ## Reporting
 
-Report decision-changing facts only: target/Workspace, action and final state, meaningful blocker/recovery hint, and verified transfer or deployment evidence when relevant. Include lease, transport, topology, sync, bootstrap, or snapshot details only when they materially affected the task. Do not dump unchanged snapshots, protocol bookkeeping, or full compacted-away output into the final answer.
+Report decision-changing facts only: target/Workspace, action, final state, and key output or verification evidence.

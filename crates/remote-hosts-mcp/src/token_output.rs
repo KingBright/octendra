@@ -12,7 +12,7 @@ pub(crate) fn classify_operation(operation: &OperationRun) -> OutputProfile {
     if let Some(profile) = &operation.command_profile_json
         && matches!(
             profile["name"].as_str(),
-            Some("shell.posix" | "shell.powershell")
+            Some("shell.posix" | "shell.powershell" | "sudo.posix")
         )
     {
         return profile["args"]
@@ -25,6 +25,7 @@ pub(crate) fn classify_operation(operation: &OperationRun) -> OutputProfile {
     let command = summary
         .strip_prefix("shell.posix via pooled workspace:")
         .or_else(|| summary.strip_prefix("shell.powershell via pooled workspace:"))
+        .or_else(|| summary.strip_prefix("sudo.posix via pooled workspace:"))
         .unwrap_or(summary);
     classify(command, false)
 }
