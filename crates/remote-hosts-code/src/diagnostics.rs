@@ -1,6 +1,12 @@
 //! Stable recovery guidance. Never serialize raw commands, URLs, or OS error chains.
 use crate::now;
 use serde_json::{Value, json};
+pub(crate) fn is_code(message: &str, code: &str) -> bool {
+    message == code
+        || message
+            .strip_prefix(code)
+            .is_some_and(|rest| rest.starts_with(':'))
+}
 pub(crate) fn outcome_unknown(value: &Value) -> bool {
     value["error"] == "outcome_unknown"
         || (value.get("error").is_some()
@@ -80,7 +86,7 @@ pub(crate) fn error(tool: &str, message: &str, operation: Option<&str>, stage: &
             "observe_original_updater",
             "not_executed",
         )
-    } else if message.starts_with("invalid_arguments") {
+    } else if is_code(message, "invalid_arguments") {
         ("invalid_arguments", "correct_arguments", "not_executed")
     } else if message.contains("source_authorization_required") {
         (
@@ -163,7 +169,7 @@ pub(crate) fn error(tool: &str, message: &str, operation: Option<&str>, stage: &
         || message.contains("permission")
         || message.contains("authorized")
         || message.contains("authorization revoked")
-        || message.contains("outside allowed")
+        || message.contains("outside allowed directories")
     {
         (
             "access_denied",
@@ -324,6 +330,24 @@ mod tests {
         assert_eq!(v["evidence"]["sanitized"], true);
         assert!(v["observed_at"].as_i64().is_some());
         assert_eq!(v["automatic_replay_safe"], false);
+        let embedded = super::error(
+            "terminal_exec",
+            "command output mentioned invalid_arguments: in middle of text",
+            Some("id"),
+            "agent_execute",
+        );
+        assert_eq!(embedded["error_code"], "execution_failed");
+        assert_eq!(embedded["outcome"], "unknown");
+        assert_eq!(embedded["execution_state"], "unknown");
+        for other in [
+            "invalid_arguments_other",
+            "invalid_arguments_other: different code",
+        ] {
+            let v = super::error("code_read", other, Some("id"), "agent_execute");
+            assert_eq!(v["error_code"], "execution_failed");
+            assert_eq!(v["outcome"], "unknown");
+            assert_eq!(v["execution_state"], "unknown");
+        }
     }
     #[test]
     fn request_receipt_is_distinct_from_remote_operation() {

@@ -147,7 +147,7 @@ Official requirements:
 7. `code_diff`: inspect staged/unstaged changes and, in 0.5.0, optionally include bounded non-ignored untracked text/binary entries so an untracked source tree cannot look like an empty diff.
 8. `terminal_exec`, `terminal_read`, `terminal_input`, `terminal_cancel`: run tests and interact with the same terminal rather than rerunning commands. Terminal completion can also be replicated into the original operation observation; output still uses its independent byte cursor.
 9. `workspace_context`: recover bounded terminal/transfer summaries and workspace-scoped event cursors after reconnecting.
-10. `file_upload` / `file_download`: use durable, verified single-file transfer with explicit resume/cancel for suspended work.
+10. `file_upload` / `file_download`: use durable, verified single-file transfer with explicit resume/cancel for suspended work. `file_upload` is create-only by default (omitting `expected_version` or supplying `"absent"` uses `hard_link` to refuse overwriting an existing destination); replacing an existing file requires `expected_version` equal to its current SHA-256 (verified before transfer and before same-directory `rename` publication; this prevents torn writes and accidental clobber, though external local writers outside the agent lock still have a narrow race window between the pre-rename check and `rename`).
 11. `files_sync` (0.5.0 server catalog): plan a version-bound file set and publish only changed payloads from a verified manifest bundle. It never deletes extra target files by default.
 
 A host conversation may not immediately expose every new server tool. Always compare the gateway catalog/capabilities with the tools actually loaded by the host before assuming a newly deployed action is callable.
@@ -156,14 +156,17 @@ Search uses Rust's ignore/glob/regex libraries locally rather than transferring
 the repository. `.gitignore` is respected unless explicitly overridden; `.git`
 internals are excluded from broad file enumeration. UTF-8 text files are limited
 to 8 MiB; binary files produce an explicit error. Reads normally return at most
-16 KB of text (configurable to 64 KB). Oversized single lines are reported rather
+16 KB of text (configurable up to 1 MiB). Oversized single lines are reported rather
 than silently skipped. File versions are SHA-256 hashes of exact bytes. Search
 pages observe live files, so repeat the query after edits.
 
-Edits and deletes require `expected_version` equal to the current file SHA-256.
-Creating a file requires the literal `"absent"`, plus the complete `content` and
-`action: "create"`; omit `edits` and `patch` for creation. An empty string, `null`,
-or an omitted version is not the missing-file marker. For example:
+In `code_apply_edits`, `expected_version` is optional: omit it to apply `create`,
+`edit`, or `delete` without a preflight CAS check (`create` still requires an
+absent target and full `content`), or supply `expected_version` for optimistic
+concurrency control (the current file SHA-256 for `edit`/`delete`, and the
+literal `"absent"` for `create`; omit `edits` and `patch` for creation). When
+`expected_version` is supplied, an empty string is not the missing-file marker.
+For example:
 
 ```json
 {"workspace_id":"existing-workspace","idempotency_key":"create-diagnostic-v1","files":[{"path":"src/diagnostic.rs","action":"create","expected_version":"absent","content":"pub fn diagnostic() {}\n"}]}

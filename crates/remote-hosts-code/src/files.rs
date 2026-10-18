@@ -60,9 +60,16 @@ pub fn bounded(s: &str, max: usize) -> (&str, bool) {
 pub fn number(v: &Value, key: &str, default: usize, min: usize, max: usize) -> Result<usize> {
     let n = match v.get(key) {
         None => default,
-        Some(n) => usize::try_from(n.as_u64().context("expected positive integer")?)?,
+        Some(n) => usize::try_from(
+            n.as_u64()
+                .with_context(|| format!("invalid_arguments: {key} expected positive integer"))?,
+        )
+        .with_context(|| format!("invalid_arguments: {key} outside allowed bounds"))?,
     };
-    ensure!((min..=max).contains(&n), "{key} outside allowed bounds");
+    ensure!(
+        (min..=max).contains(&n),
+        "invalid_arguments: {key} outside allowed bounds"
+    );
     Ok(n)
 }
 pub fn text<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
@@ -887,7 +894,34 @@ mod tests {
     }
     #[test]
     fn read_path_validation_is_not_an_unknown_execution() {
-        let (_d, w) = fixture();
+        let (d, w) = fixture();
+        std::fs::write(d.path().join("a"), "hello\n").unwrap();
+        let max_ok = read(
+            &w,
+            &json!({"requests":[{"path":"a","start_line":1,"end_line":1}],"max_bytes":1048576}),
+        )
+        .unwrap();
+        assert_eq!(max_ok["ranges"][0]["text"], "hello\n");
+        for bad_max in [json!(512), json!(1048577)] {
+            let error = read(
+                &w,
+                &json!({"requests":[{"path":"a","start_line":1,"end_line":1}],"max_bytes":bad_max}),
+            )
+            .unwrap_err();
+            let receipt = crate::diagnostics::error(
+                "code_read",
+                &error.to_string(),
+                Some("original"),
+                "agent_execute",
+            );
+            assert_eq!(receipt["error_code"], "invalid_arguments");
+            assert_eq!(receipt["outcome"], "not_executed");
+            assert_eq!(receipt["execution_state"], "not_started");
+            assert_eq!(
+                receipt["retry_policy"],
+                "retry_only_after_correcting_arguments"
+            );
+        }
         for path in ["/tmp/a", "../secret", "a/../secret", ""] {
             let error = read(
                 &w,

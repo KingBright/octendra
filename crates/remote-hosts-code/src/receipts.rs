@@ -339,8 +339,12 @@ pub(crate) async fn finish(
         .as_str()
         .or_else(|| value["operation_id"].as_str())
         .map(str::to_owned);
-    if value.get("error").is_some() && operation.is_some() {
+    let unknown_error = value.get("error").is_some()
+        && operation.is_some()
+        && (value["operation_id"].is_null() || crate::diagnostics::outcome_unknown(&value));
+    if unknown_error {
         value["execution_state"] = json!("unknown");
+        value["outcome"] = json!("unknown");
         value["last_confirmed_stage"] = json!("operation_created");
         value["retry_policy"] = json!("do_not_replay_observe_original");
     }
@@ -370,8 +374,10 @@ pub(crate) async fn finish(
     saved["operation_id"] = json!(operation);
     saved["updated_at"] = json!(now());
     saved["state"] = json!(if value.get("error").is_some() {
-        if operation.is_some() {
+        if unknown_error {
             "outcome_unknown"
+        } else if operation.is_some() {
+            "operation_observed"
         } else {
             "gateway_rejected"
         }
@@ -458,5 +464,151 @@ mod tests {
         assert_eq!(r["execution_state"], "unknown");
         assert_eq!(r["stale"], true);
         assert_eq!(r["retry_policy"], "do_not_replay_observe_original");
+    }
+    #[tokio::test]
+    async fn deterministic_agent_rejections_preserve_execution_state_and_retry_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = Gateway::new(crate::GatewayConfig {
+            forge_browser: None,
+            public_url: "https://mcp.example.com".into(),
+            bind: "127.0.0.1:0".into(),
+            state_dir: dir.path().join("gateway"),
+            owner: "owner".into(),
+            password_hash: crate::hash("password"),
+            devices: vec![],
+            redirect_uris: vec!["https://chatgpt.com/connector_platform_oauth_redirect".into()],
+            allowed_origins: crate::default_mcp_client_origins(),
+        })
+        .await
+        .unwrap();
+        let p = Principal {
+            owner: "owner".into(),
+            scopes: vec!["code:read".into()],
+        };
+        for (idx, (msg, expected_code, expected_state, expected_policy)) in [
+            (
+                "invalid_arguments: path must be a non-empty relative path without . or ..",
+                "invalid_arguments",
+                "not_started",
+                "retry_only_after_correcting_arguments",
+            ),
+            (
+                "version_conflict: destination was not changed",
+                "version_conflict",
+                "not_started_or_partial",
+                "do_not_replay_reconcile_state_first",
+            ),
+            (
+                "permission denied by workspace policy",
+                "access_denied",
+                "not_started_or_partial",
+                "do_not_replay_until_original_outcome_is_observed",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let req_id = format!("req_{idx:032x}");
+            let op_id = uuid::Uuid::new_v4().to_string();
+            let entry = json!({
+                "protocol": 1,
+                "request_id": req_id,
+                "owner": "owner",
+                "tool": "code_read",
+                "scope": "code:read",
+                "fingerprint": "fp",
+                "state": "operation_created",
+                "received_at": 1,
+                "updated_at": 1,
+                "operation_id": op_id,
+                "last_confirmed_stage": "operation_created",
+                "execution_state": "not_started_or_unknown"
+            });
+            g.store
+                .put(
+                    "request_receipt",
+                    &req_id,
+                    &entry,
+                    RETAIN_UNTIL_EXPLICIT_CLEANUP,
+                )
+                .await
+                .unwrap();
+            let v = crate::diagnostics::error("code_read", msg, Some(&op_id), "agent_execute");
+            assert!(!crate::diagnostics::outcome_unknown(&v), "{msg}: {v}");
+            let out = finish(&g, &p, "code_read", v, &req_id, None).await.unwrap();
+            assert_eq!(out["error_code"], expected_code);
+            assert_eq!(out["execution_state"], expected_state);
+            assert_eq!(out["retry_policy"], expected_policy);
+            assert_eq!(out["receipt"]["durable"], true);
+            assert_eq!(out["receipt"]["execution_state"], expected_state);
+            assert_eq!(out["receipt"]["retry_policy"], expected_policy);
+
+            let persisted: Value = g
+                .store
+                .get("request_receipt", &req_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(persisted["state"], "operation_observed");
+            assert_eq!(persisted["error_code"], expected_code);
+            assert_eq!(persisted["execution_state"], expected_state);
+            assert_eq!(persisted["retry_policy"], expected_policy);
+            assert_eq!(persisted["receipt"]["execution_state"], expected_state);
+            assert_eq!(persisted["receipt"]["retry_policy"], expected_policy);
+        }
+
+        // True unknown execution error must still persist as outcome_unknown.
+        let req_unknown = "req_ffffffffffffffffffffffffffffffff";
+        let op_unknown = uuid::Uuid::new_v4().to_string();
+        let entry = json!({
+            "protocol": 1,
+            "request_id": req_unknown,
+            "owner": "owner",
+            "tool": "code_read",
+            "scope": "code:read",
+            "fingerprint": "fp",
+            "state": "operation_created",
+            "received_at": 1,
+            "updated_at": 1,
+            "operation_id": op_unknown,
+            "last_confirmed_stage": "operation_created",
+            "execution_state": "not_started_or_unknown"
+        });
+        g.store
+            .put(
+                "request_receipt",
+                req_unknown,
+                &entry,
+                RETAIN_UNTIL_EXPLICIT_CLEANUP,
+            )
+            .await
+            .unwrap();
+        let v_unknown = crate::diagnostics::error(
+            "code_read",
+            "unexpected runtime interruption",
+            Some(&op_unknown),
+            "agent_execute",
+        );
+        assert!(crate::diagnostics::outcome_unknown(&v_unknown));
+        let out_unknown = finish(&g, &p, "code_read", v_unknown, req_unknown, None)
+            .await
+            .unwrap();
+        assert_eq!(out_unknown["execution_state"], "unknown");
+        assert_eq!(
+            out_unknown["retry_policy"],
+            "do_not_replay_observe_original"
+        );
+        let persisted_unknown: Value = g
+            .store
+            .get("request_receipt", req_unknown)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted_unknown["state"], "outcome_unknown");
+        assert_eq!(persisted_unknown["execution_state"], "unknown");
+        assert_eq!(
+            persisted_unknown["retry_policy"],
+            "do_not_replay_observe_original"
+        );
     }
 }

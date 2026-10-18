@@ -202,6 +202,9 @@ pub(crate) async fn run(
         if c.cancel_requested {
             return Err(cancelled());
         }
+        if job.tool == "file_upload" {
+            preflight_upload_destination(ws, &job.arguments).await?;
+        }
         j.phase = "transferring".into();
         j.save(store).await?;
         if job.tool == "file_upload" {
@@ -304,9 +307,14 @@ pub(crate) async fn run(
             return suspended(config, store, &mut j, p, f.state, f.code, None).await;
         }
         Err(error) => {
+            let msg = error.to_string();
+            let pre_mutation_rejection = crate::diagnostics::is_code(&msg, "invalid_arguments")
+                || crate::diagnostics::is_code(&msg, "version_conflict")
+                || crate::diagnostics::is_code(&msg, "version_conflict_during_transfer");
             // Keep publication intent for recovery rather than describing a
-            // potentially committed rename as a clean no-op.
-            if j.phase == "publishing" {
+            // potentially committed rename as a clean no-op, unless pre-publish
+            // version/argument validation rejected before touching destination.
+            if j.phase == "publishing" && !pre_mutation_rejection {
                 return suspended(
                     config,
                     store,
@@ -319,8 +327,59 @@ pub(crate) async fn run(
                 .await;
             }
             let _ = cleanup(config, job, &j, &guard.client, false).await;
-            json!({"operation_id":job.id,"state":"failed","error":"transfer_failed","message":error.to_string(),
-                "resumable":false,"transfer_revision":j.revision,"destination_changed":false})
+            let not_started =
+                j.offset == 0 && j.publication_temp.is_none() && j.phase == "preparing";
+            let (error_code, outcome, execution_state, execution_started, retry_policy) =
+                if crate::diagnostics::is_code(&msg, "invalid_arguments") && not_started {
+                    (
+                        "invalid_arguments",
+                        "not_executed",
+                        "not_started",
+                        false,
+                        "retry_only_after_correcting_arguments",
+                    )
+                } else if crate::diagnostics::is_code(&msg, "version_conflict") && not_started {
+                    (
+                        "version_conflict",
+                        "not_executed",
+                        "not_started",
+                        false,
+                        "do_not_replay_reconcile_state_first",
+                    )
+                } else if crate::diagnostics::is_code(&msg, "version_conflict")
+                    || crate::diagnostics::is_code(&msg, "version_conflict_during_transfer")
+                    || crate::diagnostics::is_code(&msg, "source_version_conflict")
+                {
+                    (
+                        "version_conflict",
+                        "not_executed_or_partial",
+                        "not_started_or_partial",
+                        true,
+                        "do_not_replay_reconcile_state_first",
+                    )
+                } else {
+                    (
+                        "transfer_failed",
+                        "unknown",
+                        "unknown",
+                        !not_started,
+                        "do_not_replay_observe_original",
+                    )
+                };
+            json!({
+                "operation_id": job.id,
+                "state": "failed",
+                "error": "transfer_failed",
+                "error_code": error_code,
+                "message": msg,
+                "outcome": outcome,
+                "execution_state": execution_state,
+                "execution_started": execution_started,
+                "retry_policy": retry_policy,
+                "resumable": false,
+                "transfer_revision": j.revision,
+                "destination_changed": false
+            })
         }
     };
     result["transfer_revision"] = json!(j.revision);
@@ -331,6 +390,56 @@ pub(crate) async fn run(
         let _ = tokio::fs::remove_file(j.data_path(config)).await;
     }
     Ok(result)
+}
+
+async fn preflight_upload_destination(ws: &Workspace, v: &Value) -> Result<()> {
+    let ws = ws.clone();
+    let v = v.clone();
+    tokio::task::spawn_blocking(move || {
+        let path = files::relative(files::text(&v, "path")?)?;
+        let expected = v
+            .get("expected_version")
+            .and_then(Value::as_str)
+            .unwrap_or("absent");
+        ensure!(
+            expected == "absent" || transfers::valid_hash(expected),
+            "invalid_arguments: expected_version must be absent or a SHA-256"
+        );
+        let canonical = ws.root.canonicalize().map_err(|error| {
+            transfers::classify_destination_error(error.into(), "destination_staging", Some(false))
+        })?;
+        ensure!(
+            canonical == ws.root && canonical.is_dir(),
+            "workspace authorization changed"
+        );
+        let root = transfers::root(&ws).map_err(|error| {
+            transfers::classify_destination_error(error, "destination_staging", Some(false))
+        })?;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        let name = std::path::PathBuf::from(path.file_name().context("missing file name")?);
+        let current = match root.open_dir(parent) {
+            Ok(dir) => transfers::existing(&dir, &name).map_err(|error| {
+                transfers::classify_destination_error(error, "destination_staging", Some(false))
+            })?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => "absent".into(),
+            Err(e) => {
+                return Err(transfers::classify_destination_error(
+                    e.into(),
+                    "destination_staging",
+                    Some(false),
+                ));
+            }
+        };
+        ensure!(
+            current == expected,
+            "version_conflict: destination was not changed"
+        );
+        Ok(())
+    })
+    .await?
 }
 async fn suspended(
     config: &AgentConfig,

@@ -34,17 +34,21 @@ struct Snapshot {
 }
 
 pub(crate) fn read(ws: &Workspace, args: &Value) -> Result<Value> {
-    let ranges: Vec<Range> =
-        serde_json::from_value(args.get("requests").cloned().context("missing requests")?)?;
+    let ranges: Vec<Range> = serde_json::from_value(
+        args.get("requests")
+            .cloned()
+            .context("invalid_arguments: missing requests")?,
+    )
+    .map_err(|_| anyhow::anyhow!("invalid_arguments: invalid read requests"))?;
     ensure!(
         !ranges.is_empty() && ranges.len() <= 20,
-        "expected 1..20 read ranges"
+        "invalid_arguments: expected 1..20 read ranges"
     );
     let partial = args
         .get("allow_partial")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let mut remaining = files::number(args, "max_bytes", 16000, 1024, 65536)?;
+    let mut remaining = files::number(args, "max_bytes", 16000, 1024, 1024 * 1024)?;
     let directory = files::directory(ws)?;
     let mut snapshots: HashMap<String, std::result::Result<Snapshot, String>> = HashMap::new();
     let mut used = 0usize;
@@ -54,11 +58,11 @@ pub(crate) fn read(ws: &Workspace, args: &Value) -> Result<Value> {
     for range in ranges {
         ensure!(
             range.start_line >= 1 && range.end_line >= range.start_line,
-            "invalid line range"
+            "invalid_arguments: invalid line range"
         );
         ensure!(
             range.line_byte_offset <= 8 * 1024 * 1024,
-            "line_byte_offset outside bounds"
+            "invalid_arguments: line_byte_offset outside bounds"
         );
         if remaining == 0 {
             results.push(json!({"path":range.path,"text":"","truncated":true,"next_line":range.start_line,"next_line_byte_offset":range.line_byte_offset,"reason":"response_budget"}));
@@ -89,16 +93,21 @@ pub(crate) fn read(ws: &Workspace, args: &Value) -> Result<Value> {
         };
         let result = match snapshot {
             Ok(snapshot) => select(snapshot, &range, &mut remaining),
+            Err(message) if crate::diagnostics::is_code(message, "invalid_arguments") => {
+                Err(anyhow::anyhow!("{message}"))
+            }
             Err(message) => Err(anyhow::anyhow!("read_failed: {message}")),
         };
         match result {
             Ok(value) => results.push(value),
             Err(error) if partial => {
                 let message = error.to_string();
-                let code = if message.starts_with("version_conflict") {
+                let code = if crate::diagnostics::is_code(&message, "version_conflict") {
                     "version_conflict"
-                } else if message.starts_with("invalid_cursor") {
+                } else if crate::diagnostics::is_code(&message, "invalid_cursor") {
                     "invalid_cursor"
+                } else if crate::diagnostics::is_code(&message, "invalid_arguments") {
+                    "invalid_arguments"
                 } else {
                     "read_failed"
                 };

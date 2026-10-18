@@ -361,7 +361,7 @@ pub(crate) struct Staged {
     dir: Dir,
     name: PathBuf,
     pub(crate) temporary: String,
-    expected: Option<String>,
+    expected: String,
 }
 impl Drop for Staged {
     fn drop(&mut self) {
@@ -382,17 +382,16 @@ impl Staged {
         let expected = v
             .get("expected_version")
             .and_then(Value::as_str)
-            .map(str::to_owned);
-        if let Some(expected) = &expected {
-            ensure!(
-                expected == "absent" || valid_hash(expected),
-                "expected_version must be absent or a SHA-256"
-            );
-            ensure!(
-                existing(&dir, &name)? == *expected,
-                "version_conflict: destination was not changed"
-            );
-        }
+            .unwrap_or("absent")
+            .to_owned();
+        ensure!(
+            expected == "absent" || valid_hash(&expected),
+            "invalid_arguments: expected_version must be absent or a SHA-256"
+        );
+        ensure!(
+            existing(&dir, &name)? == expected,
+            "version_conflict: destination was not changed"
+        );
         let temporary = format!(".remote-hosts-transfer-{}.tmp", random());
         let mut opts = cap_std::fs::OpenOptions::new();
         opts.write(true).create_new(true);
@@ -414,15 +413,21 @@ impl Staged {
     }
     pub(crate) fn publish(self) -> Result<()> {
         let current = existing(&self.dir, &self.name)?;
-        if let Some(expected) = &self.expected {
-            ensure!(
-                current == *expected,
-                "version_conflict_during_transfer: destination was not changed"
-            );
-        }
-        if current == "absent" {
+        ensure!(
+            current == self.expected,
+            "version_conflict_during_transfer: destination was not changed"
+        );
+        if self.expected == "absent" {
             // Atomic create-only publication, including a concurrent creator race.
-            self.dir.hard_link(&self.temporary, &self.dir, &self.name)?;
+            self.dir
+                .hard_link(&self.temporary, &self.dir, &self.name)
+                .map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::AlreadyExists {
+                        anyhow!("version_conflict_during_transfer: destination was not changed")
+                    } else {
+                        e.into()
+                    }
+                })?;
             self.dir.remove_file(&self.temporary)?;
         } else {
             let permissions = self.dir.metadata(&self.name)?.permissions();
@@ -1681,13 +1686,42 @@ mod tests {
         drop(file);
         stage.publish().unwrap();
         assert_eq!(std::fs::read(ws.root.join("assets/a.bin")).unwrap(), bytes);
-        assert!(Staged::new(&ws, &json!({"path":"assets/a.bin"})).is_ok());
+        let omitted_err = Staged::new(&ws, &json!({"path":"assets/a.bin"}))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            omitted_err.contains("version_conflict"),
+            "omitting expected_version on existing file must refuse overwrite: {omitted_err}"
+        );
         assert!(
             Staged::new(
                 &ws,
                 &json!({"path":"assets/a.bin","expected_version":"absent"})
             )
             .is_err()
+        );
+        assert!(
+            Staged::new(
+                &ws,
+                &json!({"path":"assets/a.bin","expected_version":hash(b"stale")})
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(ws.root.join("assets/a.bin")).unwrap(), bytes);
+        let replacement = b"updated-binary-payload";
+        let (replace_stage, mut replace_file) = Staged::new(
+            &ws,
+            &json!({"path":"assets/a.bin","expected_version":hash(bytes)}),
+        )
+        .unwrap();
+        replace_file.write_all(replacement).unwrap();
+        replace_file.sync_all().unwrap();
+        drop(replace_file);
+        replace_stage.publish().unwrap();
+        assert_eq!(
+            std::fs::read(ws.root.join("assets/a.bin")).unwrap(),
+            replacement
         );
         assert!(Staged::new(&ws, &json!({"path":"../outside"})).is_err());
         let (stage, mut file) =
