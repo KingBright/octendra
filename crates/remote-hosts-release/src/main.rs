@@ -26,7 +26,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Action {
     Doctor {
-        #[arg(long, default_value = "1.94.1")]
+        #[arg(long, default_value = "1.99.1")]
         toolchain: String,
     },
     Prepare {
@@ -36,7 +36,7 @@ enum Action {
         run_dir: PathBuf,
         #[arg(long, default_value = "remote-hosts-code")]
         package: String,
-        #[arg(long, default_value = "1.94.1")]
+        #[arg(long, default_value = "1.99.1")]
         toolchain: String,
     },
     Run {

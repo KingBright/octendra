@@ -392,7 +392,7 @@ mod tests {
     .unwrap();
     let run = root.join("run");
     let cancel = Arc::new(AtomicBool::new(false));
-    let pinned = std::env::var("RH_TEST_TOOLCHAIN").unwrap_or_else(|_| "1.94.1".into());
+    let pinned = std::env::var("RH_TEST_TOOLCHAIN").unwrap_or_else(|_| "1.99.1".into());
     let prepared = pipeline::prepare(&original, &run, "native-fixture", &pinned)
         .await
         .unwrap();

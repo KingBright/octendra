@@ -67,8 +67,8 @@ try:
     receipt["source_before"]=hashes();save()
     # Never format the RP worktree.
     fmt_files=list((rh/"desktop-worker/src").glob("*.rs"))+list((rh/"crates/remote-hosts-desktop-protocol").rglob("*.rs"))
-    run("format",["rustup","run","1.94.1","rustfmt","--edition","2024","--config","skip_children=true","--check"]+[str(f) for f in fmt_files],rh,30)
-    cargo=["cargo","+1.94.1"]
+    run("format",["rustup","run","1.99.1","rustfmt","--edition","2024","--config","skip_children=true","--check"]+[str(f) for f in fmt_files],rh,30)
+    cargo=["cargo","+1.99.1"]
     manifest=rh/"desktop-worker/Cargo.toml"
     patch=["--config",'patch.crates-io.host.path="'+str(rp/"host")+'"',
         "--config",'patch.crates-io.protocol.path="'+str(rp/"protocol")+'"',
