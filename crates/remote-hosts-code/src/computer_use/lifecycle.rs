@@ -168,10 +168,7 @@ impl Tracker {
         let mut line = Vec::new();
         let mut bytes = 0usize;
         let mut oversized = false;
-        loop {
-            let Ok(n) = input.read(&mut buffer).await else {
-                break;
-            };
+        while let Ok(n) = input.read(&mut buffer).await {
             if n == 0 {
                 break;
             }

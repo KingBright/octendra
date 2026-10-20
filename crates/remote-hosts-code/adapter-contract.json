@@ -2199,5 +2199,5 @@
     "host_tools": "x-rh-host-tools",
     "request_id": "x-rh-request-id"
   },
-  "version": "0.11.1"
+  "version": "0.11.2"
 }

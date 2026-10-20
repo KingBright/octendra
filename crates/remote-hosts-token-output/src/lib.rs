@@ -285,7 +285,7 @@ fn enumeration_line(profile: OutputProfile, line: &str) -> bool {
                 && bytes[2] == b' '
                 && (matches!((bytes[0], bytes[1]), (b'?', b'?') | (b'!', b'!'))
                     || (bytes[..2].iter().all(|byte| b" MADRCUT".contains(byte))
-                        && bytes[..2] != [b' ', b' ']))
+                        && bytes[..2] != *b"  "))
         }
         OutputProfile::Search => {
             let Some((path, mut rest)) = line.split_once(':') else {

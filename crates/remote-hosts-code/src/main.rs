@@ -1,5 +1,8 @@
 //! Standalone gateway/device service alongside the existing Remote Hosts connector.
 #![cfg_attr(windows, windows_subsystem = "windows")]
+#[cfg(unix)]
+mod owner_password;
+
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use remote_hosts_code::{AgentConfig, GatewayConfig, random, read_config, write_private};
@@ -55,6 +58,11 @@ enum Command {
         owner: String,
         #[arg(long)]
         password_file: PathBuf,
+    },
+    /// Replace only the existing gateway owner's password hash from an interactive terminal.
+    ResetOwnerPassword {
+        #[arg(long)]
+        config: PathBuf,
     },
     /// Add one independently revocable device and write its private agent config.
     Enroll {
@@ -185,7 +193,39 @@ async fn main() -> Result<()> {
             remote_hosts_code::agent_log::attach_parent_console();
         }
     }
-    let command = Cli::parse().command;
+    let command = if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "reset-owner-password")
+    {
+        // Clap's normal argument error can echo an unexpected positional value.
+        // Never repeat a password accidentally supplied to this subcommand.
+        match Cli::try_parse() {
+            Ok(cli) => cli.command,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                ) =>
+            {
+                error.exit()
+            }
+            Err(_) => anyhow::bail!(
+                "usage: remote-hosts-code reset-owner-password --config PATH\n\
+                 Password arguments and noninteractive confirmation are not accepted."
+            ),
+        }
+    } else {
+        Cli::parse().command
+    };
+    if let Command::ResetOwnerPassword { config } = &command {
+        #[cfg(unix)]
+        return owner_password::run(config).await;
+        #[cfg(not(unix))]
+        {
+            let _ = config;
+            anyhow::bail!("owner password reset requires a local or SSH POSIX terminal");
+        }
+    }
     let filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
     if let Command::Agent { config, foreground } = &command {
@@ -320,6 +360,9 @@ async fn main() -> Result<()> {
             }
         }
         Command::Agent { .. } => unreachable!("agent handled before service logger initialization"),
+        Command::ResetOwnerPassword { .. } => {
+            unreachable!("password reset handled before service logger initialization")
+        }
         Command::InitGateway {
             config,
             public_url,
