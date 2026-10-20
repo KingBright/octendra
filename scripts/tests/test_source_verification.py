@@ -88,11 +88,10 @@ class SourceEvidenceTests(unittest.TestCase):
         self.assertEqual(proof['checks']['rust_tests']['idle_timeout_seconds'], 2700)
         self.assertTrue(all(x['wall_timeout_seconds'] is None for x in proof['checks'].values()))
         # Serialize independent cases, not the actors inside each concurrency test.
-        # Preserve both packages, all normal tests, and collection of every failure.
+        # Preserve the full workspace and collection of every failure.
         self.assertEqual(commands['rust_tests'], [
-            'cargo', 'test', '-p', 'octendra-code', '-p', 'octendra-mcp',
-            '-p', 'octendra-release', '-p', 'octendra-token-output',
-            '--locked', '--no-fail-fast', '--', '--test-threads=1', '--color', 'never'])
+            'bash', 'scripts/test.sh', '--locked', '--no-fail-fast',
+            '--', '--test-threads=1', '--color', 'never'])
 
     def test_existing_receipt_is_rejected_before_executing_commands(self):
         self.report.parent.mkdir()
