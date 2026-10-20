@@ -1,4 +1,4 @@
-use remote_hosts_desktop_protocol::Identity;
+use octendra_desktop_protocol::Identity;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -10,8 +10,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-pub const APP_ID: &str = "io.github.KingBright.RemoteHosts.DesktopWorker";
-pub const MAX_PIXELS_BYTES: usize = remote_hosts_desktop_protocol::MAX_WORKER_PIXELS;
+pub const APP_ID: &str = "fun.hackerlife.octendra.desktop-worker";
+pub const MAX_PIXELS_BYTES: usize = octendra_desktop_protocol::MAX_WORKER_PIXELS;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

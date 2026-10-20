@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Persistent per-host macOS code-signing identity for Remote Hosts.
+"""Persistent per-host macOS code-signing identity for Octendra.
 
 The release artifact remains immutable and checksum-verified. On macOS, the
 updater signs a local install copy with one host-local certificate so TCC sees a
@@ -18,8 +18,8 @@ import subprocess
 import sys
 import tempfile
 
-CERT_NAME = "Remote Hosts Local Code Signing"
-CODE_IDENTIFIER = "com.remote-hosts.code-agent"
+CERT_NAME = "Octendra Local Code Signing"
+CODE_IDENTIFIER = "fun.hackerlife.octendra.agent"
 
 
 def sha(path):
@@ -34,9 +34,9 @@ def _paths(base):
     root = pathlib.Path(base) / "signing"
     return {
         "root": root,
-        "keychain": root / "remote-hosts-signing.keychain-db",
+        "keychain": root / "octendra-signing.keychain-db",
         "password": root / "keychain-password",
-        "certificate": root / "remote-hosts-code-signing.pem",
+        "certificate": root / "octendra-code-signing.pem",
         "metadata": root / "identity.json",
         "lock": root / "identity.lock",
         "installed": root / "installed.json",
@@ -61,14 +61,19 @@ def _security(*args, check=True, capture=False, timeout=30):
     )
 
 
-def _certificate_sha1(keychain):
-    result = _security("find-certificate", "-c", CERT_NAME, "-Z", keychain, capture=True)
+def _certificate_sha1(keychain, expected=None):
+    result = _security("find-certificate", "-a", "-Z", keychain, capture=True)
+    fingerprints = set()
     for line in result.stdout.splitlines():
         if line.startswith("SHA-1 hash: "):
             value = line.split(":", 1)[1].strip().lower()
             if len(value) == 40 and all(c in "0123456789abcdef" for c in value):
-                return value
-    raise RuntimeError("local signing certificate fingerprint unavailable")
+                fingerprints.add(value)
+    if expected is not None:
+        fingerprints.intersection_update({expected.lower()})
+    if len(fingerprints) != 1:
+        raise RuntimeError("exact local signing certificate fingerprint unavailable")
+    return fingerprints.pop()
 
 
 def _user_keychains():
@@ -94,7 +99,7 @@ def _valid_identity(keychain, fingerprint):
     result = _security("find-identity", "-v", "-p", "codesigning", keychain, check=False, capture=True)
     expected = fingerprint.upper()
     usable = any(
-        expected in line and CERT_NAME in line and "CSSMERR_" not in line
+        expected in line and "CSSMERR_" not in line
         for line in result.stdout.splitlines()
     )
     return result.returncode == 0 and usable and _keychain_in_search_list(keychain)
@@ -144,7 +149,10 @@ def _read_metadata(paths):
     if not paths["metadata"].is_file():
         return None
     value = json.loads(paths["metadata"].read_text())
-    if value.get("certificate_name") != CERT_NAME or value.get("code_identifier") != CODE_IDENTIFIER:
+    if (value.get("code_identifier") != CODE_IDENTIFIER
+            or not isinstance(value.get("certificate_sha1"), str)
+            or len(value["certificate_sha1"]) != 40
+            or any(c not in "0123456789abcdefABCDEF" for c in value["certificate_sha1"])):
         raise RuntimeError("local signing identity metadata changed")
     return value
 
@@ -164,7 +172,7 @@ def create(base):
             required = (paths["keychain"], paths["password"], paths["certificate"])
             if not all(path.is_file() for path in required):
                 raise RuntimeError("local signing identity is incomplete; refuse silent regeneration")
-            if _certificate_sha1(paths["keychain"]) != metadata["certificate_sha1"]:
+            if _certificate_sha1(paths["keychain"], metadata["certificate_sha1"]) != metadata["certificate_sha1"].lower():
                 raise RuntimeError("local signing certificate changed")
             return metadata
         partial = [paths[name] for name in ("keychain", "password", "certificate") if paths[name].exists()]
@@ -180,7 +188,7 @@ def create(base):
             keychain = stage / "signing.keychain-db"
             subprocess.run(
                 [openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "3650", "-sha256",
-                 "-subj", f"/CN={CERT_NAME}/O=Remote Hosts",
+                 "-subj", f"/CN={CERT_NAME}/O=Octendra",
                  "-addext", "basicConstraints=critical,CA:FALSE",
                  "-addext", "keyUsage=critical,digitalSignature",
                  "-addext", "extendedKeyUsage=codeSigning",
@@ -240,8 +248,8 @@ def status(base, create_if_missing=False):
     required = (paths["keychain"], paths["password"], paths["certificate"])
     if not all(path.is_file() for path in required):
         raise RuntimeError("local signing identity is incomplete")
-    fingerprint = _certificate_sha1(paths["keychain"])
-    if fingerprint != metadata["certificate_sha1"]:
+    fingerprint = _certificate_sha1(paths["keychain"], metadata["certificate_sha1"])
+    if fingerprint != metadata["certificate_sha1"].lower():
         raise RuntimeError("local signing certificate fingerprint changed")
     password = paths["password"].read_text().strip()
     _security("unlock-keychain", "-p", password, paths["keychain"])
@@ -315,7 +323,7 @@ def sign_copy(source, destination, base):
     password = paths["password"].read_text().strip()
     _security("unlock-keychain", "-p", password, paths["keychain"])
     _ensure_keychain_search_list(paths["keychain"])
-    with tempfile.NamedTemporaryFile(prefix=".remote-hosts-requirement-", dir=destination.parent) as requirement_file:
+    with tempfile.NamedTemporaryFile(prefix=".octendra-requirement-", dir=destination.parent) as requirement_file:
         requirement_file.write(("designated => " + value["designated_requirement"] + "\n").encode())
         requirement_file.flush()
         subprocess.run(
@@ -348,7 +356,7 @@ def installed_metadata(base):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=("status", "prepare", "authorize"))
-    parser.add_argument("--base", type=pathlib.Path, default=pathlib.Path.home() / ".local/share/remote-hosts-code")
+    parser.add_argument("--base", type=pathlib.Path, default=pathlib.Path.home() / ".local/share/octendra-code")
     args = parser.parse_args()
     if args.action == "prepare":
         create(args.base)

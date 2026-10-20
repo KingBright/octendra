@@ -2,7 +2,7 @@
 """Install the standalone code agent as a per-user macOS launch service.
 
 Run on each Mac after staging the binary and private agent configuration. Does not
-restart or modify the existing Remote Hosts connector or its database.
+restart or modify the existing Octendra connector or its database.
 """
 import argparse
 import os
@@ -17,24 +17,22 @@ def main():
     p.add_argument("--binary", required=True, type=pathlib.Path)
     p.add_argument("--config", required=True, type=pathlib.Path)
     args = p.parse_args()
-    label = "com.remote-hosts.code-agent"
+    label = "fun.hackerlife.octendra.agent"
     domain = f"gui/{os.getuid()}"
     if subprocess.run(["launchctl", "print", f"{domain}/{label}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
         raise SystemExit("Agent already loaded; inspect active terminals before a deliberate restart")
     release_binary, config = args.binary.resolve(), args.config.resolve()
-    base = pathlib.Path.home() / ".local/share/remote-hosts-code"
-    signing = macos_code_identity.status(base, create_if_missing=True)
+    base = pathlib.Path.home() / ".local/share/octendra-code"
+    signing = macos_code_identity.status(base)
     if signing.get("state") != "ready":
-        signing = macos_code_identity.authorize(base)
-    if signing.get("state") != "ready":
-        raise SystemExit("macOS code-signing trust must be approved before installing the agent")
-    binary = base / "bin/remote-hosts-code"
+        raise SystemExit("Existing macOS signing identity must be prepared and explicitly authorized before installation; no replacement identity was created")
+    binary = base / "bin/octendra-code"
     binary.parent.mkdir(parents=True, exist_ok=True)
     signed = macos_code_identity.sign_copy(release_binary, binary, base)
     version = subprocess.check_output([str(binary), "--version"], text=True, timeout=10).strip()
     subprocess.run([str(binary), "check", "--agent", "--config", str(config)], check=True)
     macos_code_identity.save_installed_metadata(base, {
-        "version": version.removeprefix("remote-hosts-code "),
+        "version": version.removeprefix("octendra-code "),
         "candidate_sha256": macos_code_identity.sha(release_binary),
         "installed_sha256": signed["installed_sha256"],
         "certificate_sha1": signing["certificate_sha1"],

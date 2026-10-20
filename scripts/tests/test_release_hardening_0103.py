@@ -84,7 +84,7 @@ class ReleaseHardening0103Tests(unittest.TestCase):
         completed = {'state':'completed','sha256':sha,'operation_id':'op-1'}
         client = FakeClient(completed)
         exported = {'artifact_id':'source-1','download_url':'https://example.invalid/file'}
-        bundle = pathlib.Path('remote-hosts-code-0.10.3-bundle.tgz')
+        bundle = pathlib.Path('octendra-code-0.10.3-bundle.tgz')
         result = fleet.verified_import(client, imported, exported, bundle, sha, '0.10.3', 'device-1')
         self.assertEqual(result, completed)
         self.assertEqual(client.calls[0][0], 'transfer_resume')
@@ -141,7 +141,7 @@ class ReleaseHardening0103Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = pathlib.Path(directory).resolve()
             slot = base/'slot'; slot.mkdir()
-            (slot/'slot.json').write_text(json.dumps({'schema_version':1,'purpose':'remote-hosts-release-slot'}))
+            (slot/'slot.json').write_text(json.dumps({'schema_version':1,'purpose':'octendra-release-slot'}))
             old_report = base/'old.json'; old_report.write_text(json.dumps({'state':'running','child_pid':2222}))
             (slot/'owner.json').write_text(json.dumps({'pid':1111,'report':str(old_report),'snapshot_id':'old','state':'running'}))
             with mock.patch.object(build_slot, 'process_alive', return_value=False):

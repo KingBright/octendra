@@ -6,14 +6,14 @@ Repository HEAD, generated package, installed version, running process and live 
 
 0.9.0 adds stable macOS updater/code identity foundations, native `russh` PTY resize/signal delivery, pooled port forwarding, Linux systemd user-service support, real-SSHD regressions including a verified 1 GiB transfer, and a two-process MCP regression proving Workspace/PTY isolation plus write-lease handoff over one pooled SSH transport.
 
-Remote Hosts now includes the `remote-hosts-code` executable with two roles:
+Octendra now includes the `octendra-code` executable with two roles:
 
 - `gateway`: single-owner OAuth 2.1 / PKCE authorization, Streamable HTTP MCP,
   device discovery, and durable request routing on the NAS.
 - `agent`: outbound authenticated polling from each computer, capability-confined
   file tools, optimistic edits, local shell/PTY execution, and durable receipts.
 
-This runs alongside the existing Remote Hosts operator API and SSH connector.
+This runs alongside the existing Octendra operator API and SSH connector.
 It does not expose the unauthenticated operator API or share its database. A
 device is an installation identity; an SSH host in the existing inventory is
 not automatically an authorized code device.
@@ -67,26 +67,26 @@ replay revokes the token family. Authentication endpoints are rate limited.
 Build using the workspace Rust toolchain:
 
 ```sh
-cargo test -p remote-hosts-code
-cargo clippy -p remote-hosts-code --all-targets -- -D warnings
-cargo build -p remote-hosts-code --release
-cargo zigbuild -p remote-hosts-code --release --target x86_64-unknown-linux-musl
+cargo test -p octendra-code
+cargo clippy -p octendra-code --all-targets -- -D warnings
+cargo build -p octendra-code --release
+cargo zigbuild -p octendra-code --release --target x86_64-unknown-linux-musl
 ```
 
 Generate gateway configuration outside the repository, then enroll each device:
 
 ```sh
-remote-hosts-code init-gateway \
+octendra-code init-gateway \
   --config /private/setup/gateway.json \
   --public-url https://mcp.example.com \
-  --state-dir /var/lib/remote-hosts-code \
+  --state-dir /var/lib/octendra-code \
   --password-file /private/setup/gateway-login-password.txt
 
-remote-hosts-code enroll \
+octendra-code enroll \
   --gateway-config /private/setup/gateway.json \
   --agent-config /private/setup/device-a-agent.json \
   --name Device-A \
-  --state-dir /home/YOUR_USER/.local/share/remote-hosts-code/state \
+  --state-dir /home/YOUR_USER/.local/share/octendra-code/state \
   --root /home/YOUR_USER/Workspace \
   --allow-write --allow-exec \
   --shell /bin/bash
@@ -102,12 +102,12 @@ On macOS, stage the native binary and that computer's private configuration, the
 
 ```sh
 python3 scripts/install-code-agent.py \
-  --binary ~/.local/share/remote-hosts-code/bin/remote-hosts-code \
-  --config ~/.local/share/remote-hosts-code/agent.json
+  --binary ~/.local/share/octendra-code/bin/octendra-code \
+  --config ~/.local/share/octendra-code/agent.json
 ```
 
-The per-user LaunchAgent is `com.remote-hosts.code-agent`. It does not restart the
-existing Remote Hosts services. It requires the user login session; sleep or
+The per-user LaunchAgent is `fun.hackerlife.octendra.agent`. It does not restart the
+existing Octendra services. It requires the user login session; sleep or
 logout makes the device unavailable. The script refuses to restart an already
 loaded agent. Inspect and finish/cancel its own active terminals before updates.
 
@@ -267,17 +267,17 @@ automatically destructive.
 Release 0.9.0 migrates the macOS code agent away from ad-hoc signing. Ad-hoc signatures have a
 designated requirement tied to one concrete binary, so replacing the executable can make macOS
 privacy and code-signing policy treat the next build as a different program. The 0.9.0 updater
-creates one private, per-host Remote Hosts code-signing identity under
-`~/.local/share/remote-hosts-code/signing`, keeps the signing key local, and signs only a verified
+creates one private, per-host Octendra code-signing identity under
+`~/.local/share/octendra-code/signing`, keeps the signing key local, and signs only a verified
 install copy. The immutable release artifact and its published checksum are never rewritten.
 
-The installed agent uses the stable identifier `com.remote-hosts.code-agent` and an explicit
+The installed agent uses the stable identifier `fun.hackerlife.octendra.agent` and an explicit
 designated requirement bound to the persistent certificate fingerprint. Trust is scoped to the
 macOS `codeSign` policy. The first migration may therefore require one logged-in-user confirmation
 on each Mac; an unattended timeout remains `authorization_required` and does not restart or replace
 the active agent. After that one migration, later releases reuse the same certificate, identifier,
 designated requirement, binary path, launchd agent label, updater label
-`com.remote-hosts.code-upgrade`, and stable updater runner path. A release is not accepted when the
+`fun.hackerlife.octendra.upgrade`, and stable updater runner path. A release is not accepted when the
 reported installed signing identity differs from the per-host identity.
 
 Do not regenerate a partially present identity to escape an authorization problem. A missing key,

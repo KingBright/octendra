@@ -119,10 +119,10 @@ class Client:
         self.access = access
         self.refresh = None
         self.sequence = 0
-        mode = transport or os.environ.get('REMOTE_HOSTS_RELEASE_TRANSPORT', 'auto')
+        mode = transport or os.environ.get('OCTENDRA_RELEASE_TRANSPORT', 'auto')
         if mode not in ('auto', 'native', 'legacy'):
             raise ValueError('invalid_release_transport')
-        configured = native_binary or os.environ.get('REMOTE_HOSTS_NATIVE_ADAPTER')
+        configured = native_binary or os.environ.get('OCTENDRA_NATIVE_ADAPTER')
         # Explicit legacy mode must not depend on an installed native runtime.
         binary = pathlib.Path(configured) if configured else (installed_binary() if mode != 'legacy' else None)
         available = binary is not None and binary.is_file() and os.access(binary, os.X_OK)
@@ -131,13 +131,13 @@ class Client:
         self.transport_mode = 'native' if mode == 'native' or (mode == 'auto' and available) else 'legacy'
         self.transport_reason = 'explicit_legacy' if mode == 'legacy' else ('canonical_native_available' if available else 'native_absent_before_any_rpc')
         self.native_binary = binary
-        state = native_state_dir or os.environ.get('REMOTE_HOSTS_NATIVE_STATE_DIR')
+        state = native_state_dir or os.environ.get('OCTENDRA_NATIVE_STATE_DIR')
         self.native_state_dir = pathlib.Path(state) if state else None
         self._native = None
         self._closed = False
         self.http_observations = []
         self.opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
-        self.opener.addheaders = [('User-Agent', 'RemoteHosts-Release/0.5.0')]
+        self.opener.addheaders = [('User-Agent', 'Octendra-Release/0.5.0')]
 
     def call(self, path, data=None, form=False, auth=False):
         # OAuth and occasional admin/artifact requests retain the existing proxy,
@@ -266,7 +266,7 @@ class Client:
             raise RuntimeError('authorization_identity_conflict')
         tokens = self.parsed('/oauth/token', {'grant_type': 'authorization_code', 'client_id': client['client_id'], 'code': returned['code'][0], 'code_verifier': verifier, 'redirect_uri': redirect, 'resource': metadata['resource']}, form=True)
         self.access, self.refresh = tokens['access_token'], tokens['refresh_token']
-        self.rpc('initialize', {'protocolVersion': '2025-11-25', 'capabilities': {}, 'clientInfo': {'name': 'remote-hosts-release', 'version': '0.5.0'}})
+        self.rpc('initialize', {'protocolVersion': '2025-11-25', 'capabilities': {}, 'clientInfo': {'name': 'octendra-release', 'version': '0.5.0'}})
         return self
 
     def rpc(self, method, params):

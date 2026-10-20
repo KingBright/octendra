@@ -106,7 +106,7 @@ class AgentService : Service() {
                 if (!alive) break
                 if (db.claim(job) != null) continue
                 val id = job.getString("id"); AgentRuntime.currentOperation = id
-                val wake = getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "RemoteHosts:operation")
+                val wake = getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Octendra:operation")
                 wake.acquire(210000)
                 try {
                     val completed = try { dispatcher.perform(job) } catch (e: Exception) { Policy.error(e) }
@@ -139,7 +139,7 @@ class AgentService : Service() {
         transport?.close(); AgentRuntime.bridge?.close(); AgentRuntime.bridge = null
         workers.shutdownNow()
         val db = journal
-        Thread({ try { if (workers.awaitTermination(35, TimeUnit.SECONDS)) db?.close() } catch (_: Exception) {} }, "rh-shutdown").start()
+        Thread({ try { if (workers.awaitTermination(35, TimeUnit.SECONDS)) db?.close() } catch (_: Exception) {} }, "octendra-shutdown").start()
         if (!AgentRuntime.state.startsWith("启动失败")) AgentRuntime.state = "已停止"
         AgentRuntime.changed(); stopForeground(STOP_FOREGROUND_REMOVE); super.onDestroy()
     }

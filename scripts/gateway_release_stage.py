@@ -13,8 +13,8 @@ import urllib.parse
 import urllib.request
 
 VERSION = "0.10.26"
-SERVICE = "remote-hosts-code-gateway.service"
-APPROVED_ROOT = Path("/opt/remote-hosts-code")
+SERVICE = "octendra-code-gateway.service"
+APPROVED_ROOT = Path("/opt/octendra-code")
 NAS_ROOT = None  # Bound to the explicit deployment plan before any remote probe.
 PROC_ROOT = Path("/proc")
 PUBLIC_HOST = "mcp.example.com"
@@ -95,7 +95,7 @@ def checked_identity(pid):
     value = os.readlink("/proc/" + str(pid) + "/exe")
     require(not value.endswith(" (deleted)"), "gateway_executable_deleted")
     binary = Path(value)
-    require(binary.name == "remote-hosts-code", "unexpected_gateway_executable")
+    require(binary.name == "octendra-code", "unexpected_gateway_executable")
     root = binary.parent
     require(approved_root(root), "gateway_outside_existing_installation")
     for parent in [root] + list(root.parents):
@@ -170,9 +170,9 @@ def discover_nas():
             value = os.readlink(str(entry / "exe"))
         except OSError:
             continue
-        if value == str(NAS_ROOT / "remote-hosts-code") + " (deleted)":
+        if value == str(NAS_ROOT / "octendra-code") + " (deleted)":
             raise StageError("gateway_executable_deleted")
-        if value == str(NAS_ROOT / "remote-hosts-code"):
+        if value == str(NAS_ROOT / "octendra-code"):
             matches.append(int(entry.name))
     require(len(matches) <= 1, "gateway_service_identity_ambiguous")
     require(bool(matches), "gateway_not_running")
@@ -233,7 +233,7 @@ def release_paths(identity):
         require(not directory.is_symlink(), "symlink_release_directory")
         if directory.exists():
             require(directory.is_dir(), "not_release_directory")
-    return release, release / ("remote-hosts-code-" + VERSION + "-bundle.tgz")
+    return release, release / ("octendra-code-" + VERSION + "-bundle.tgz")
 
 
 def small_json(path):
@@ -307,7 +307,7 @@ def inspect_bundle(path, plan):
         expected = set(artifacts) | {"manifest.json", "source-verification.json",
                                      "SHA256SUMS", "README.md"}
         require(set(names) == expected, "archive_inventory_mismatch")
-        require(artifacts.get("remote-hosts-code-linux-amd64", {}).get("sha256")
+        require(artifacts.get("octendra-code-linux-amd64", {}).get("sha256")
                 == plan["candidate_sha256"], "gateway_candidate_mismatch")
         for name, meta in artifacts.items():
             item = archive.getmember(name)
@@ -379,7 +379,7 @@ def probe(plan):
                 and ".." not in root.parts, "unverified_observation_root")
         for parent in [root] + list(root.parents):
             require(not parent.is_symlink(), "symlink_in_observation_root")
-        binary = root / "remote-hosts-code"
+        binary = root / "octendra-code"
         regular(binary)
         identity = {"root": root, "binary": binary, "pid": 0, "running": False,
                     "installed_sha256": digest(binary)}

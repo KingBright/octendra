@@ -18,13 +18,13 @@ launcher = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(launcher)
 
 
-@unittest.skipUnless(sys.platform == 'darwin' and os.environ.get('REMOTE_HOSTS_LAUNCHD_PROBE') == '1',
+@unittest.skipUnless(sys.platform == 'darwin' and os.environ.get('OCTENDRA_LAUNCHD_PROBE') == '1',
                      'requires explicit disposable macOS launchd probe opt-in')
 class LiveOneShotTest(unittest.TestCase):
     def counter_probe(self, exit_code):
-        label = 'com.remote-hosts.test.oneshot.'+uuid.uuid4().hex
+        label = 'com.octendra.test.oneshot.'+uuid.uuid4().hex
         service = 'gui/%d/%s' % (os.getuid(), label)
-        with tempfile.TemporaryDirectory(prefix='remote-hosts-oneshot-fixture-') as tmp:
+        with tempfile.TemporaryDirectory(prefix='octendra-oneshot-fixture-') as tmp:
             directory = pathlib.Path(tmp)
             script = directory/'counter.py'
             script.write_text('import pathlib,sys\np=pathlib.Path(__file__).with_name("runs.txt")\nwith p.open("a") as f: f.write("run\\n")\nsys.exit('+str(exit_code)+')\n')

@@ -112,7 +112,7 @@ def main():
             run_stage('rust_format',['cargo','fmt','--all','--','--check'],checkout,env,directory,state,120)
             for index,(target,name,_boundary) in enumerate(CASES,1):
                 selection=['--lib'] if target=='lib' else ['--test',target]
-                run_stage('rust_'+str(index),['cargo','test','--offline','--locked','-p','remote-hosts-code',
+                run_stage('rust_'+str(index),['cargo','test','--offline','--locked','-p','octendra-code',
                           *selection,name,'--','--exact','--nocapture'],checkout,env,directory,state)
             release_current.check_inputs(checkout,captured)
             state.update(state='passed',python_passed=state['stages']['python_coordinator']['passed'],

@@ -1,7 +1,7 @@
 mod config;
 mod lifecycle;
 mod native;
-use remote_hosts_desktop_protocol::{
+use octendra_desktop_protocol::{
     ErrorCode, RawPixels as PixelInfo, WorkerReply as Output, WorkerRequest as Envelope,
 };
 use std::io::{Read, Write};
@@ -82,13 +82,13 @@ async fn read_request(input: &AsyncFd<std::fs::File>) -> io::Result<Option<Envel
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
     if args.len() == 2 && args[1] == "--version" {
-        println!("remote-hosts-desktop-worker {}", env!("CARGO_PKG_VERSION"));
+        println!("octendra-desktop-worker {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     if args.len() == 2 && args[1] == "--capabilities" {
         println!(
             "{}",
-            serde_json::to_string(&remote_hosts_desktop_protocol::Capabilities::default())?
+            serde_json::to_string(&octendra_desktop_protocol::Capabilities::default())?
         );
         return Ok(());
     }
@@ -203,4 +203,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// Agent transport/journal tests run in remote-hosts-code, which owns its Store.
+// Agent transport/journal tests run in octendra-code, which owns its Store.

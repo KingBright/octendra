@@ -7,7 +7,7 @@ use host::{
     request_registered_portal_control_capture,
 };
 use protocol::InputEvent;
-use remote_hosts_desktop_protocol::*;
+use octendra_desktop_protocol::*;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
@@ -20,7 +20,7 @@ pub struct Reply {
     pub response: Response,
     pub pixels: Option<OwnedFrame>,
 }
-#[path = "../../crates/remote-hosts-desktop-protocol/src/hold.rs"]
+#[path = "../../crates/octendra-desktop-protocol/src/hold.rs"]
 pub mod hold;
 use hold::{Control, HoldError, HoldGuard};
 

@@ -240,7 +240,7 @@ class TransferRecoveryTests(unittest.TestCase):
             argv = ['fleet-upgrade.py', '--version', '0.10.24', '--package', str(package),
                     '--config', str(config), '--report-dir', str(root/'report')]
             with mock.patch.object(fleet, 'Client', return_value=self.client), \
-                 mock.patch.object(fleet, 'verify_package', return_value={'artifacts': {'remote-hosts-code-macos-arm64': {'sha256': SHA}}}), \
+                 mock.patch.object(fleet, 'verify_package', return_value={'artifacts': {'octendra-code-macos-arm64': {'sha256': SHA}}}), \
                  mock.patch.object(fleet, 'ensure_bundle', return_value=(bundle, SHA)), \
                  mock.patch.object(fleet, 'gateway_upgrade_api', return_value={'state': 'fixture'}), \
                  mock.patch.object(fleet, 'finish_observed_fleet', side_effect=[False, True]), \

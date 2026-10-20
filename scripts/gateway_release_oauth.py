@@ -192,7 +192,7 @@ class BrowserOAuth:
         durable_json(self.record_path, record)
         try:
             status, _, body = self.client.call("/oauth/register", {
-                "client_name": "Remote Hosts Gateway release 0.10.26",
+                "client_name": "Octendra Gateway release 0.10.26",
                 "redirect_uris": [callback.redirect_uri],
                 "token_endpoint_auth_method": "none",
                 "grant_types": ["authorization_code", "refresh_token"],
@@ -246,7 +246,7 @@ class BrowserOAuth:
             self.progress("waiting_owner_login", expires_at=int(time.time()) + 600,
                           client_id=client_id, browser_launch_confirmed=True,
                           authorization_origin=self.origin,
-                          page_title_from_source="Remote Hosts 授权")
+                          page_title_from_source="Octendra 授权")
             code = callback.wait()
             self.progress("token_exchange_requested", client_id=client_id)
             try:

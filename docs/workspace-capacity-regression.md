@@ -6,7 +6,7 @@
 - 提交 b036fc710e4f9f6d1a16bbe20db54841695d5713
   （refactor: remove built-in permission policies and unify MCP/Code channels）
   明确删除内建 ServerProtectionPolicy quotas。
-- crates/remote-hosts-core/src/policy.rs 的 production_default 文档说明：
+- crates/octendra-core/src/policy.rs 的 production_default 文档说明：
   Unrestricted channel baseline；default_max_active_workspaces_per_host 返回 u32::MAX。
   decide_workspace_creation 的文档明确不施加人工容量门槛。
 - 同一提交已将核心策略回归改为验证 1000 个逻辑 workspace 时仍允许创建。

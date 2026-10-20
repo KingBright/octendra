@@ -1,4 +1,4 @@
-# Remote Hosts 文档索引
+# Octendra 文档索引
 
 [项目中文 README](../README.md) | [English README](../README_EN.md)
 

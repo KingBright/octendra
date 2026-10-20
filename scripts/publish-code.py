@@ -35,8 +35,8 @@ def signed_install_ready(receipt):
             and signing.get('state')=='ready'
             and signing.get('installed_sha256')==installed
             and re.fullmatch(r'[0-9a-f]{40}',certificate) is not None
-            and signing.get('code_identifier')=='com.remote-hosts.code-agent'
-            and requirement==f'identifier "com.remote-hosts.code-agent" and certificate leaf = H"{certificate}"')
+            and signing.get('code_identifier')=='fun.hackerlife.octendra.agent'
+            and requirement==f'identifier "fun.hackerlife.octendra.agent" and certificate leaf = H"{certificate}"')
 
 
 def acceptance_ready(device, version, sha):
@@ -66,7 +66,7 @@ def validate(config):
     for key in ('root','binary_path','config_path','backup_root'):
         if key not in gateway or not pathlib.PurePosixPath(gateway[key]).is_absolute():
             raise ValueError('absolute gateway '+key+' required')
-    service=gateway.get('service_name','remote-hosts-code-gateway.service')
+    service=gateway.get('service_name','octendra-code-gateway.service')
     if '/' in service or not service.endswith('.service'):raise ValueError('invalid gateway service name')
     bind=gateway.get('gateway_bind','127.0.0.1:18787')
     host,sep,port=bind.rpartition(':')
@@ -138,7 +138,7 @@ def acceptance_scripts(root):
 def main():
     p=argparse.ArgumentParser();p.add_argument('--config',required=True,type=pathlib.Path);p.add_argument('--pipeline',required=True,type=pathlib.Path);p.add_argument('--report-dir',required=True,type=pathlib.Path);p.add_argument('--version',required=True);p.add_argument('--apply',action='store_true');p.add_argument('--accept-only',action='store_true',help='rerun acceptance for already verified installed agents; never install or restart');args=p.parse_args()
     config=validate(json.loads(args.config.read_text()));root=pathlib.Path(config.get('project_root',pathlib.Path(__file__).resolve().parents[1])).resolve(strict=True);plan=rr.verified_build(args.pipeline,args.version)
-    directory=args.report_dir.resolve();directory.mkdir(parents=True,exist_ok=True);package=root/'dist'/('remote-hosts-code-'+args.version)
+    directory=args.report_dir.resolve();directory.mkdir(parents=True,exist_ok=True);package=root/'dist'/('octendra-code-'+args.version)
     if not args.apply:print(json.dumps({'state':'verified_plan','version':args.version,'devices':[x['device_id'] for x in config['agents']],'manifest_sha256':plan['manifest_sha256']}));return
     if not package.exists():
         package.parent.mkdir(exist_ok=True)
@@ -147,7 +147,7 @@ def main():
     if rr.digest(package/'manifest.json')!=plan['manifest_sha256']:raise ValueError('existing release package differs')
     for name,info in plan['artifacts'].items():
         if rr.digest(package/name)!=info['sha256']:raise ValueError('artifact changed before publishing')
-    manifest=json.loads((package/'manifest.json').read_text());sha=manifest['artifacts']['remote-hosts-code-macos-arm64']['sha256']
+    manifest=json.loads((package/'manifest.json').read_text());sha=manifest['artifacts']['octendra-code-macos-arm64']['sha256']
     if args.accept_only:
         if not args.apply:raise ValueError('--accept-only requires --apply; it is a bounded live acceptance action')
         standard_script,collaboration_script=acceptance_scripts(root)
@@ -218,28 +218,28 @@ def main():
                 command(ssh+['umask 077; mkdir -p '+shlex.quote(remote)])
                 staged={}
                 scp=['scp','-O','-P',str(gateway['ssh_port']),'-o','BatchMode=yes','-o','StrictHostKeyChecking=yes']
-                for name in ('remote-hosts-code-linux-amd64','upgrade-code-gateway.py','manifest.json'):
+                for name in ('octendra-code-linux-amd64','upgrade-code-gateway.py','manifest.json'):
                     dest=remote+'/'+name;expected=rr.digest(package/name)
                     staged[name]=stage_remote_artifact(command,ssh,scp,gateway['ssh_host'],package/name,dest,expected)
                 return {'state':'staged','artifacts':staged}
             journal.step('stage',binding,stage_gateway)
             def update_gateway():
                 argv=['python3',remote+'/upgrade-code-gateway.py',
-                      '--candidate',remote+'/remote-hosts-code-linux-amd64',
-                      '--sha256',manifest['artifacts']['remote-hosts-code-linux-amd64']['sha256'],
+                      '--candidate',remote+'/octendra-code-linux-amd64',
+                      '--sha256',manifest['artifacts']['octendra-code-linux-amd64']['sha256'],
                       '--version',args.version,'--result',remote+'/deployment.json',
                       '--binary-path',gateway['binary_path'],'--config-path',gateway['config_path'],
                       '--backup-root',gateway['backup_root'],
-                      '--service-name',gateway.get('service_name','remote-hosts-code-gateway.service'),
+                      '--service-name',gateway.get('service_name','octendra-code-gateway.service'),
                       '--gateway-bind',gateway.get('gateway_bind','127.0.0.1:18787')]
                 command(ssh+[shlex.join(argv)],180)
                 value=json.loads(command(ssh+['cat '+shlex.quote(remote+'/deployment.json')]))
-                if value.get('state')!='upgraded' or value['installed_sha256']!=manifest['artifacts']['remote-hosts-code-linux-amd64']['sha256']:raise ValueError('gateway not verified')
+                if value.get('state')!='upgraded' or value['installed_sha256']!=manifest['artifacts']['octendra-code-linux-amd64']['sha256']:raise ValueError('gateway not verified')
                 rr.atomic_json(directory/'gateway-updater.json',value);return value
             state['gateway']=journal.step('upgrade',binding,update_gateway);save()
         state['phase']='independent_agent_pipelines';save()
         # Build once. Only binary and verified Python helpers are sent to a Mac.
-        names={n for n in manifest['artifacts'] if n.endswith('.py')}|{'remote-hosts-code-macos-arm64','manifest.json'}
+        names={n for n in manifest['artifacts'] if n.endswith('.py')}|{'octendra-code-macos-arm64','manifest.json'}
         archive=directory/'agent-package.tgz'
         if not archive.exists():
             with tarfile.open(archive,'x:gz') as t:
@@ -262,19 +262,19 @@ def main():
                     if agent.get('local'):
                         local_package=package
                     else:
-                        destination=agent['home']+'/.local/share/remote-hosts-code/releases/'+args.version
-                        remote_archive='.remote-hosts-release-staging-'+args.version+'/agent-package.tgz'
+                        destination=agent['home']+'/.local/share/octendra-code/releases/'+args.version
+                        remote_archive='.octendra-release-staging-'+args.version+'/agent-package.tgz'
                         remote_workspace=open_workspace(c,ident,agent['root'],'release-'+args.version+'-workspace-'+ident)
                         def stage_agent():
                             imported=c.tool('file_upload',{'workspace_id':remote_workspace,'path':remote_archive,'expected_version':'absent','sha256':archive_sha,'idempotency_key':'release-'+args.version+'-import-'+ident,'file':{'file_id':exported['artifact_id'],'download_url':exported['download_url'],'file_name':'agent-package.tgz'}})
                             if imported['state']!='completed' or imported['sha256']!=archive_sha:raise RuntimeError('staging transfer not completed; observe original operation')
-                            code="import pathlib,tarfile,hashlib,json\np=pathlib.Path("+repr(remote_archive)+");assert hashlib.sha256(p.read_bytes()).hexdigest()=="+repr(archive_sha)+"\nr=pathlib.Path("+repr(destination)+");r.mkdir(parents=True,exist_ok=True)\nwith tarfile.open(p) as t:\n assert set(t.getnames())=="+repr(names)+" and all(x.isfile() for x in t.getmembers())\n payload={n:t.extractfile(n).read() for n in t.getnames()}\n assert hashlib.sha256(payload['manifest.json']).hexdigest()=="+repr(plan['manifest_sha256'])+"\n manifest=json.loads(payload['manifest.json'])\n for n,b in payload.items():\n  if n!='manifest.json':assert hashlib.sha256(b).hexdigest()==manifest['artifacts'][n]['sha256']\n  q=r/n\n  if q.exists():assert q.read_bytes()==b\n  else:\n   with q.open('xb') as f:f.write(b)\n  q.chmod(0o755 if n=='remote-hosts-code-macos-arm64' else 0o600)\nprint('staged')"
+                            code="import pathlib,tarfile,hashlib,json\np=pathlib.Path("+repr(remote_archive)+");assert hashlib.sha256(p.read_bytes()).hexdigest()=="+repr(archive_sha)+"\nr=pathlib.Path("+repr(destination)+");r.mkdir(parents=True,exist_ok=True)\nwith tarfile.open(p) as t:\n assert set(t.getnames())=="+repr(names)+" and all(x.isfile() for x in t.getmembers())\n payload={n:t.extractfile(n).read() for n in t.getnames()}\n assert hashlib.sha256(payload['manifest.json']).hexdigest()=="+repr(plan['manifest_sha256'])+"\n manifest=json.loads(payload['manifest.json'])\n for n,b in payload.items():\n  if n!='manifest.json':assert hashlib.sha256(b).hexdigest()==manifest['artifacts'][n]['sha256']\n  q=r/n\n  if q.exists():assert q.read_bytes()==b\n  else:\n   with q.open('xb') as f:f.write(b)\n  q.chmod(0o755 if n=='octendra-code-macos-arm64' else 0o600)\nprint('staged')"
                             c.terminal(remote_workspace,'/opt/homebrew/bin/python3 -c '+shlex.quote(code),'release-'+args.version+'-extract-'+ident,60)
                             return {'state':'staged','import_operation':imported['operation_id'],'archive_sha256':archive_sha}
                         journal.step('stage',{'archive':archive_sha},stage_agent);local_package=pathlib.Path(destination)
                     phase='launch_updater';record()
                     def launch():
-                        argv=['/opt/homebrew/bin/python3',str(local_package/'launch-code-upgrade.py'),'--candidate',str(local_package/'remote-hosts-code-macos-arm64'),'--sha256',sha,'--version',args.version,'--start']
+                        argv=['/opt/homebrew/bin/python3',str(local_package/'launch-code-upgrade.py'),'--candidate',str(local_package/'octendra-code-macos-arm64'),'--sha256',sha,'--version',args.version,'--start']
                         output=command(argv,30) if agent.get('local') else c.terminal(remote_workspace,shlex.join(argv),'release-'+args.version+'-launch-'+ident,30)
                         value=json.loads(output)
                         if value.get('state') not in ('started','already_requested','authorization_required'):raise RuntimeError('updater launch not accepted')

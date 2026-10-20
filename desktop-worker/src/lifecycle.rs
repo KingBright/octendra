@@ -18,15 +18,15 @@ pub fn phase(request: Option<Uuid>, phase: &'static str) {
     }
 }
 pub async fn shutdown<
-    F: std::future::Future<Output = Result<(), remote_hosts_desktop_protocol::ErrorCode>>,
+    F: std::future::Future<Output = Result<(), octendra_desktop_protocol::ErrorCode>>,
 >(
     request: Option<Uuid>,
     future: F,
-) -> Result<(), remote_hosts_desktop_protocol::ErrorCode> {
+) -> Result<(), octendra_desktop_protocol::ErrorCode> {
     phase(request, "shutdown_started");
     let result = match tokio::time::timeout(std::time::Duration::from_secs(2), future).await {
         Ok(result) => result,
-        Err(_) => Err(remote_hosts_desktop_protocol::ErrorCode::OutcomeUnknown),
+        Err(_) => Err(octendra_desktop_protocol::ErrorCode::OutcomeUnknown),
     };
     phase(
         request,
@@ -47,14 +47,14 @@ mod tests {
             super::shutdown(None, std::future::pending())
                 .await
                 .unwrap_err(),
-            remote_hosts_desktop_protocol::ErrorCode::OutcomeUnknown
+            octendra_desktop_protocol::ErrorCode::OutcomeUnknown
         );
         assert!(start.elapsed() < std::time::Duration::from_secs(3));
     }
     #[tokio::test]
     async fn shutdown_failure_is_preserved() {
         let result = super::shutdown(None, async {
-            Err(remote_hosts_desktop_protocol::ErrorCode::OutcomeUnknown)
+            Err(octendra_desktop_protocol::ErrorCode::OutcomeUnknown)
         })
         .await;
         assert!(result.is_err());

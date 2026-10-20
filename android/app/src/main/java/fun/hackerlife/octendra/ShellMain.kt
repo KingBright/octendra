@@ -13,9 +13,9 @@ import java.util.concurrent.atomic.AtomicReference
 object ShellMain {
     @JvmStatic fun main(args: Array<String>) {
         val uid = Process.myUid()
-        System.err.println("RH_HELPER_STARTED uid=$uid")
-        if (args.size != 2 || (uid != 2000 && uid != 0) || !args[0].matches(Regex("rh-[0-9]+-[a-f0-9]{32}"))) {
-            System.err.println("RH_HELPER_REJECTED invalid_identity_or_arguments"); return
+        System.err.println("OCTENDRA_HELPER_STARTED uid=$uid")
+        if (args.size != 2 || (uid != 2000 && uid != 0) || !args[0].matches(Regex("octendra-[0-9]+-[a-f0-9]{32}"))) {
+            System.err.println("OCTENDRA_HELPER_REJECTED invalid_identity_or_arguments"); return
         }
         val appUid = args[1].toIntOrNull() ?: return
         if (appUid < 10000) return
@@ -40,7 +40,7 @@ object ShellMain {
             val output = DataOutputStream(pipeOutput)
             ShellBridge.writeFrame(output, obj("protocol" to 1, "uid" to uid, "pid" to Process.myPid()))
             stage = "session"
-            System.err.println("RH_HELPER_CONNECTED")
+            System.err.println("OCTENDRA_HELPER_CONNECTED")
             while (true) {
                 val request = ShellBridge.readFrame(input)
                 val size = request.optLong("stdin_bytes", 0)
@@ -49,7 +49,7 @@ object ShellMain {
                 var staged: File? = null
                 try {
                     if (size > 0) {
-                        staged = File.createTempFile("rh-stdin-", ".tmp", File("/data/local/tmp"))
+                        staged = File.createTempFile("octendra-stdin-", ".tmp", File("/data/local/tmp"))
                         staged.setReadable(false, false); staged.setReadable(true, true)
                         staged.setWritable(false, false); staged.setWritable(true, true)
                         FileOutputStream(staged).use { sink ->
@@ -71,7 +71,7 @@ object ShellMain {
                                 demand(path.startsWith('/') && !path.contains('\u0000'), "invalid_absolute_path")
                                 val source = File(path)
                                 demand(source.isFile && source.length() <= Policy.MAX_FILE, "source_unreadable_or_too_large")
-                                payload = File.createTempFile("rh-output-", ".tmp", File("/data/local/tmp"))
+                                payload = File.createTempFile("octendra-output-", ".tmp", File("/data/local/tmp"))
                                 payload!!.setReadable(false, false); payload!!.setReadable(true, true)
                                 val digest = MessageDigest.getInstance("SHA-256")
                                 var count = 0L
@@ -107,10 +107,10 @@ object ShellMain {
             // Sanitized startup diagnosis only: never print commands, tokens,
             // filenames, socket capabilities or screen contents.
             val errno = (e as? android.system.ErrnoException)?.errno ?: (e.cause as? android.system.ErrnoException)?.errno
-            System.err.println("RH_HELPER_ENDED stage=$stage type=${e.javaClass.simpleName} errno=${errno ?: -1}")
+            System.err.println("OCTENDRA_HELPER_ENDED stage=$stage type=${e.javaClass.simpleName} errno=${errno ?: -1}")
             if (BuildConfig.DEBUG && stage != "session") {
-                val diagnostic = (e.message ?: "").replace(Regex("rh-[0-9]+-[a-f0-9]{32}"), "<activation>").take(600)
-                System.err.println("RH_DEBUG_BOOTSTRAP: $diagnostic")
+                val diagnostic = (e.message ?: "").replace(Regex("octendra-[0-9]+-[a-f0-9]{32}"), "<activation>").take(600)
+                System.err.println("OCTENDRA_DEBUG_BOOTSTRAP: $diagnostic")
             }
         } finally {
             runCatching { pipeInput?.close() }; runCatching { pipeOutput?.close() }; runCatching { descriptor?.close() }
@@ -131,8 +131,8 @@ object ShellMain {
                     synchronized(bytes) { val keep = minOf(n, 65536 - bytes.size()); if (keep > 0) bytes.write(b, 0, keep); if (keep < n) truncated.set(true) }
                 }
             } }
-        }, "rh-shell-output").apply { isDaemon = true; start() }
-        val writer = Thread({ runCatching { process.outputStream.use { dst -> stdin?.inputStream()?.use { it.copyTo(dst, 65536) } } } }, "rh-shell-input").apply { isDaemon = true; start() }
+        }, "octendra-shell-output").apply { isDaemon = true; start() }
+        val writer = Thread({ runCatching { process.outputStream.use { dst -> stdin?.inputStream()?.use { it.copyTo(dst, 65536) } } } }, "octendra-shell-input").apply { isDaemon = true; start() }
         try {
             val done = process.waitFor(seconds.toLong(), TimeUnit.SECONDS)
             if (!done) { process.destroyForcibly(); process.waitFor(2, TimeUnit.SECONDS) }

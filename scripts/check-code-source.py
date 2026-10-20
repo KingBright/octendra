@@ -51,10 +51,10 @@ def inputs(root):
     paths.update((root/'scripts').glob('*.py'))
     paths.update((root/'scripts').glob('*.ps1'))
     for name in (
-        'remote-hosts-service',
-        'remote-hosts-systemd-service',
-        'remote-hosts-service.ps1',
-        'remote-hosts-code-gateway.service',
+        'octendra-service',
+        'octendra-systemd-service',
+        'octendra-service.ps1',
+        'octendra-code-gateway.service',
         'code-gateway.caddy',
     ):
         path = root/'scripts'/name
@@ -183,7 +183,7 @@ def run_verification(root, report, gates=None, timeout=900):
     logs = root/'target/source-verification'/run
     logs.mkdir(parents=True)
     try:
-        result.update(version=tomllib.loads((root/'crates/remote-hosts-code/Cargo.toml').read_text())['package']['version'],
+        result.update(version=tomllib.loads((root/'crates/octendra-code/Cargo.toml').read_text())['package']['version'],
                       run_id=run, scope='native source verification, not deployment', source_inputs=inputs(root), state='running',
                       execution_root=str(root.resolve()), snapshot_id=snapshot_identity(root))
         publish(report, result)
@@ -192,13 +192,13 @@ def run_verification(root, report, gates=None, timeout=900):
         gate_timeouts = {'rust_tests': 2700, 'workspace': 1800} if gates is None else {}
         if gates is None:
             gates = [
-                ('fmt', ['cargo', 'fmt', '-p', 'remote-hosts-code', '-p', 'remote-hosts-release', '--', '--check']),
-                ('clippy', ['cargo', 'clippy', '-p', 'remote-hosts-code', '-p', 'remote-hosts-release', '--all-targets', '--locked', '--', '-D', 'warnings']),
+                ('fmt', ['cargo', 'fmt', '--all', '--', '--check']),
+                ('clippy', ['cargo', 'clippy', '-p', 'octendra-code', '-p', 'octendra-release', '--all-targets', '--locked', '--', '-D', 'warnings']),
+                ('python_tests', [sys.executable, '-W', 'error::ResourceWarning', '-m', 'unittest', 'discover', '-s', 'scripts/tests', '-v']),
                 # Concurrency fixtures create their own parallel actors. Keep
                 # unrelated fsync-heavy cases from distorting their watchdogs;
                 # do not weaken assertions, deadlines, or in-test concurrency.
-                ('rust_tests', ['cargo', 'test', '-p', 'remote-hosts-code', '-p', 'remote-hosts-mcp', '-p', 'remote-hosts-release', '-p', 'remote-hosts-token-output', '--locked', '--no-fail-fast', '--', '--test-threads=1', '--color', 'never']),
-                ('python_tests', [sys.executable, '-W', 'error::ResourceWarning', '-m', 'unittest', 'discover', '-s', 'scripts/tests', '-v']),
+                ('rust_tests', ['bash', 'scripts/test.sh', '--locked', '--no-fail-fast', '--', '--test-threads=1', '--color', 'never']),
                 ('workspace', ['cargo', 'check', '--workspace', '--locked']),
             ]
         env = dict(os.environ, CARGO_TERM_COLOR='never', PYTHONUNBUFFERED='1')

@@ -21,7 +21,7 @@ class FinalGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             snapshot = root/'snapshot'
-            crate = snapshot/'crates/remote-hosts-code'
+            crate = snapshot/'crates/octendra-code'
             crate.mkdir(parents=True)
             (crate/'Cargo.toml').write_text('[package]\nversion="0.0.1"\n')
             checkout = root/'checkout'

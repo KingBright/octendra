@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stable launchd entrypoint for immutable Remote Hosts upgrade requests."""
+"""Stable launchd entrypoint for immutable Octendra upgrade requests."""
 import argparse
 import hashlib
 import json

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Converge one Remote Hosts Code gateway and its authorized Agent fleet.
+"""Converge one Octendra Code gateway and its authorized Agent fleet.
 
 One invocation owns one immutable package/manifest identity. The gateway is
 upgraded first. Agents are discovered from `fleet_status`, one release bundle is
@@ -273,8 +273,8 @@ def gateway_upgrade_ssh(config,package,manifest,version,directory):
     with rr.StepJournal(directory/'gateway-steps.json',binding) as journal:
         def stage():
             command(ssh+['umask 077; mkdir -p '+shlex.quote(remote)])
-            stage_names = ['remote-hosts-code-linux-amd64','upgrade-code-gateway.py','manifest.json']
-            for extra in ('remote-hosts-code-macos-arm64','remote-hosts-code-windows-amd64.exe'):
+            stage_names = ['octendra-code-linux-amd64','upgrade-code-gateway.py','manifest.json']
+            for extra in ('octendra-code-macos-arm64','octendra-code-windows-amd64.exe'):
                 if (package/extra).is_file() and extra in manifest.get('artifacts', {}):
                     stage_names.append(extra)
             for name in stage_names:
@@ -284,16 +284,16 @@ def gateway_upgrade_ssh(config,package,manifest,version,directory):
             return {'state':'staged','artifacts':stage_names}
         journal.step('stage',binding,stage)
         def upgrade():
-            args=['python3',remote+'/upgrade-code-gateway.py','--candidate',remote+'/remote-hosts-code-linux-amd64',
-                  '--sha256',manifest['artifacts']['remote-hosts-code-linux-amd64']['sha256'],'--version',version,
-                  '--result',remote+'/deployment.json','--binary-path',gateway.get('binary_path',gateway['root']+'/remote-hosts-code'),
+            args=['python3',remote+'/upgrade-code-gateway.py','--candidate',remote+'/octendra-code-linux-amd64',
+                  '--sha256',manifest['artifacts']['octendra-code-linux-amd64']['sha256'],'--version',version,
+                  '--result',remote+'/deployment.json','--binary-path',gateway.get('binary_path',gateway['root']+'/octendra-code'),
                   '--config-path',gateway.get('config_path',gateway['root']+'/gateway.json'),
                   '--backup-root',gateway.get('backup_root',gateway['root']+'/releases'),
-                  '--service-name',gateway.get('service_name','remote-hosts-code-gateway.service'),
+                  '--service-name',gateway.get('service_name','octendra-code-gateway.service'),
                   '--gateway-bind',gateway.get('gateway_bind','127.0.0.1:18787')]
             command(ssh+[shlex.join(args)],240)
             value=json.loads(command(ssh+['cat '+shlex.quote(remote+'/deployment.json')]))
-            if value.get('state')!='upgraded' or value.get('installed_sha256')!=manifest['artifacts']['remote-hosts-code-linux-amd64']['sha256']:
+            if value.get('state')!='upgraded' or value.get('installed_sha256')!=manifest['artifacts']['octendra-code-linux-amd64']['sha256']:
                 raise RuntimeError('gateway upgrade not verified')
             return value
         return journal.step('upgrade',binding,upgrade)
@@ -315,15 +315,15 @@ def extract_command(device,remote_bundle,destination,bundle_sha):
 
 def launch_command(device,destination,manifest,version):
     if platform(device)=='macos':
-        sha=manifest['artifacts']['remote-hosts-code-macos-arm64']['sha256']
-        return shlex.join(['python3',destination+'/launch-code-upgrade.py','--candidate',destination+'/remote-hosts-code-macos-arm64','--sha256',sha,'--version',version,'--start'])
+        sha=manifest['artifacts']['octendra-code-macos-arm64']['sha256']
+        return shlex.join(['python3',destination+'/launch-code-upgrade.py','--candidate',destination+'/octendra-code-macos-arm64','--sha256',sha,'--version',version,'--start'])
     if platform(device)=='linux':
-        sha=manifest['artifacts']['remote-hosts-code-linux-amd64']['sha256'];unit='remote-hosts-code-upgrade-'+version.replace('.','-')
-        args=['systemd-run','--user','--unit',unit,'--collect','--working-directory',destination,'python3',destination+'/upgrade-code-agent-linux.py','--candidate',destination+'/remote-hosts-code-linux-amd64','--sha256',sha,'--version',version,'--result',destination+'/upgrade-result.json']
+        sha=manifest['artifacts']['octendra-code-linux-amd64']['sha256'];unit='octendra-code-upgrade-'+version.replace('.','-')
+        args=['systemd-run','--user','--unit',unit,'--collect','--working-directory',destination,'python3',destination+'/upgrade-code-agent-linux.py','--candidate',destination+'/octendra-code-linux-amd64','--sha256',sha,'--version',version,'--result',destination+'/upgrade-result.json']
         return shlex.join(args)
-    sha=manifest['artifacts']['remote-hosts-code-windows-amd64.exe']['sha256']
+    sha=manifest['artifacts']['octendra-code-windows-amd64.exe']['sha256']
     return ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File '+ps_quote(destination+'\\launch-code-upgrade-windows.ps1')+
-            ' -Updater '+ps_quote(destination+'\\upgrade-code-agent-windows.ps1')+' -Candidate '+ps_quote(destination+'\\remote-hosts-code-windows-amd64.exe')+
+            ' -Updater '+ps_quote(destination+'\\upgrade-code-agent-windows.ps1')+' -Candidate '+ps_quote(destination+'\\octendra-code-windows-amd64.exe')+
             ' -Sha256 '+sha+' -Version '+version+' -Result '+ps_quote(destination+'\\upgrade-result.json'))
 
 
@@ -462,10 +462,10 @@ def main():
             ident=device['device_id'];state['agents'][ident]={'name':device['name'],'platform':platform(device),'state':'already_converged' if device['converged'] else 'staging'};save()
             if device['converged']: continue
             ws=open_workspace(client,ident,root_path(device),'fleet-'+args.version+'-'+ident)
-            remote_bundle='.remote-hosts-release-staging-'+args.version+'/'+bundle.name
+            remote_bundle='.octendra-release-staging-'+args.version+'/'+bundle.name
             imported=client.tool('file_upload',{'workspace_id':ws,'path':remote_bundle,'expected_version':'absent','sha256':bundle_sha,'max_bytes':268435456,'idempotency_key':'fleet-'+args.version+'-bundle-import-'+ident,'file':{'file_id':exported['artifact_id'],'download_url':exported['download_url'],'file_name':bundle.name}},allow_incomplete=True)
             imported=verified_import(client,imported,exported,bundle,bundle_sha,args.version,ident)
-            h=home(device);destination=(h+'/.local/share/remote-hosts-code/releases/'+args.version) if platform(device)!='windows' else (h+'\\.local\\share\\remote-hosts-code\\releases\\'+args.version)
+            h=home(device);destination=(h+'/.local/share/octendra-code/releases/'+args.version) if platform(device)!='windows' else (h+'\\.local\\share\\octendra-code\\releases\\'+args.version)
             client.terminal(ws,extract_command(device,remote_bundle,destination,bundle_sha),'fleet-'+args.version+'-extract-'+ident,120)
             output=client.terminal(ws,launch_command(device,destination,manifest,args.version),'fleet-'+args.version+'-launch-'+ident,60)
             state['agents'][ident].update(state='upgrading',launch_output=output[-2048:]);save()

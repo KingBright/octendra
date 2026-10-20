@@ -1,17 +1,17 @@
 # Android controlled-device agent 0.1.0
 
-This is a separate, configurable APK for controlling an owner's Android phone through the existing Remote Hosts Code gateway. It is not the Remote Play phone-to-desktop client. Minimum Android 11 (API 30); target API 36. One pure-DEX APK serves arm64, ARM and x86 Android runtimes. Kotlin implements Android lifecycle/platform APIs and the existing wire-2 contract; the existing Rust gateway and desktop agents are not rewritten.
+This is a separate, configurable APK for controlling an owner's Android phone through the existing Octendra Code gateway. It is not the Weavelo phone-to-desktop client. Minimum Android 11 (API 30); target API 36. One pure-DEX APK serves arm64, ARM and x86 Android runtimes. Kotlin implements Android lifecycle/platform APIs and the existing wire-2 contract; the existing Rust gateway and desktop agents are not rewritten.
 
 ## Installation and enrollment
 
 The release APK contains no gateway URL, device token, owner account, test CA, instrumentation, advertising or analytics SDK. It is non-debuggable and signed by an owner-held release key. Signing material is outside the repository in the builder's private application state.
 
-Install `remote-hosts-android-0.1.0.apk`. The gateway administrator must first register a **new, independently revocable device** using the existing gateway CLI. Do not reuse a computer's device ID/token: that would make two devices compete for the same identity.
+Install `octendra-android-0.1.0.apk`. The gateway administrator must first register a **new, independently revocable device** using the existing gateway CLI. Do not reuse a computer's device ID/token: that would make two devices compete for the same identity.
 
 Run on the gateway's administrative host with its actual configuration path:
 
 ```sh
-remote-hosts-code enroll \
+octendra-code enroll \
   --gateway-config /actual/private/gateway.json \
   --agent-config /actual/private/android-device.json \
   --name Android-Phone \
@@ -24,7 +24,7 @@ The CLI writes a private device configuration. Reload the gateway configuration 
 
 Import the generated JSON in the APK, or enter `gateway_url` (HTTPS origin, including port), `device_id` (UUID) and `device_token`. The APK derives its real shared-directory root and reports it to the gateway; the CLI's placeholder roots are not exposed as arbitrary Android filesystem roots. Configuration is encrypted with Android Keystore AES-GCM and excluded from Android backups. Do not send device tokens in chat or commit them.
 
-Enable Remote Hosts under Android Accessibility settings for UI observation/actions. On some sideloaded installations, the phone's app settings require manually allowing restricted settings first. Grant notifications, then choose **开启远程控制**. Stop from the APK or its ongoing notification at any time. The configuration Activity is FLAG_SECURE and password fields are redacted in structured observations. Different permissions are reported independently.
+Enable Octendra under Android Accessibility settings for UI observation/actions. On some sideloaded installations, the phone's app settings require manually allowing restricted settings first. Grant notifications, then choose **开启远程控制**. Stop from the APK or its ongoing notification at any time. The configuration Activity is FLAG_SECURE and password fields are redacted in structured observations. Different permissions are reported independently.
 
 ## From the existing ChatGPT connector
 
@@ -82,7 +82,7 @@ Build on the owner's authorized development machine:
 python3 scripts/build-android.py
 python3 scripts/test-android-integration.py \
   --serial emulator-5580 \
-  --gateway-binary /actual/verified/remote-hosts-code-macos-arm64
+  --gateway-binary /actual/verified/octendra-code-macos-arm64
 ```
 
 Gradle 8.13 distribution checksum, AGP 8.13.2, Kotlin 2.3.21 and JDK 17 are pinned. Unit checks, release lint, debug instrumentation and R8 release assembly run on owner hardware. The integration test refuses physical phones and uses its own gateway configuration, TLS certificate and registered emulator. Its Python TLS fixture binds only to loopback and forwards only to the explicitly selected isolated local gateway; it does not change the release APK's trust policy. Its CA and ProbeActivity exist **only in the distinct debug application**. The real release APK is inspected, installed via the shell bridge, and launch-smoke-tested; a physical phone is a separate acceptance step. JSON receipts state exactly which checks completed. Never substitute the existence of this test script for a passed receipt.
@@ -94,3 +94,7 @@ python3 scripts/publish-android.py --acceptance android/build/integration/ACTUAL
 ```
 
 The publisher requires matching APK SHA-256 across build, packaging and successful integration receipts, checks every built Android source hash, requires passing unit tests and lint, and reruns the mixed-fleet regressions. Build success alone cannot publish; the old build-only `--publish` switch explicitly refuses. Publication exclusively creates a new version directory and writes `COMPLETE` last. No signing keys or device credentials enter that directory. The bundled receipts distinguish emulator validation from still-required physical-phone and production enrollment acceptance.
+
+## Current release identity
+
+`android/version.properties` is the version source for Gradle, build receipts and APK verification. The current source declares 0.12.0 / 1200 with application ID `fun.hackerlife.octendra`. Build with the existing owner signing directory (`--signing-directory` when it is not at the canonical location); the builder selects the existing alias by the reviewed public certificate fingerprint and refuses to create a replacement identity. All signing environment variables use the `OCTENDRA_ANDROID_` prefix. The certificate and application ID remain the upgrade identity; a successful build does not establish physical-phone acceptance.

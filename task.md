@@ -1,8 +1,8 @@
-# Task: Production Remote Hosts System
+# Task: Production Octendra System
 
 ## Goal
 
-Build the production-grade Rust implementation of the remote host knowledge, access, state, and execution center described in `REMOTE_HOSTS_PRODUCT_TECH_PLAN.md`.
+Build the production-grade Rust implementation of the remote host knowledge, access, state, and execution center described in `OCTENDRA_PRODUCT_TECH_PLAN.md`.
 
 ## Completed
 
@@ -103,7 +103,7 @@ Build the production-grade Rust implementation of the remote host knowledge, acc
 - [x] Embedded local administration console with server registry, route health, topology SVG, filtering, snapshot import, resource details, and credential capture.
 - [x] Loopback-only safety boundary for an HTTP process with an unlocked credential vault.
 - [x] launchd API wrapper passes the generated local vault password file so topology credential capture is usable after install/update.
-- [x] Repository-owned Remote Hosts Agent Skill with topology workflow guidance and automatic Codex/Antigravity synchronization during service install/update.
+- [x] Repository-owned Octendra Agent Skill with topology workflow guidance and automatic Codex/Antigravity synchronization during service install/update.
 - [x] Grouped and collapsible topology console with dynamic swimlane layout, bounded relationship rendering, topology search, focus mode, and an atomically hot-swappable external admin HTML file.
 - [x] Native Windows runtime through the cross-platform `russh` connector, with Unix-only OpenSSH mux dependencies excluded from MSVC builds.
 - [x] Rust-native Windows MSVC cross-compilation and ZIP packaging through `cargo-xwin`, including SHA-256 release output, admin UI, and Agent Skill.

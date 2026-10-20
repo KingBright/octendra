@@ -23,9 +23,9 @@ def checked_plan(a):
   if len(value)!=64 or any(c not in '0123456789abcdef' for c in value):raise ValueError('invalid_identity')
  if sha(a.candidate)!=a.sha256:raise ValueError('candidate_hash_mismatch')
  static_linux_x64(a.candidate)
- if subprocess.check_output([str(a.candidate),'--version'],text=True,timeout=10).strip()!='remote-hosts-code '+a.version:raise ValueError('candidate_version_mismatch')
+ if subprocess.check_output([str(a.candidate),'--version'],text=True,timeout=10).strip()!='octendra-code '+a.version:raise ValueError('candidate_version_mismatch')
  if sha(a.config_path)!=a.expected_config_sha256:raise ValueError('configuration_changed_stop')
- current_sha=sha(a.binary_path);current_version=subprocess.check_output([str(a.binary_path),'--version'],text=True,timeout=10).strip().replace('remote-hosts-code ', '', 1)
+ current_sha=sha(a.binary_path);current_version=subprocess.check_output([str(a.binary_path),'--version'],text=True,timeout=10).strip().replace('octendra-code ', '', 1)
  same=current_sha==a.sha256 and current_version==a.version
  if current_version==a.version and not same:raise ValueError('same_version_different_hash_refused')
  if not same and current_sha!=a.expected_current_sha256:raise ValueError('running_baseline_changed_stop')

@@ -2,16 +2,16 @@
 
 本文面向两类读者：
 
-1. **已经有一套 Remote Hosts Code Gateway，只想新增一台电脑或服务器。**
+1. **已经有一套 Octendra Code Gateway，只想新增一台电脑或服务器。**
 2. **第一次部署，准备自己搭建 Gateway、接入 ChatGPT，并持续加入多台设备。**
 
-这里讨论的是 `remote-hosts-code` 这一条链路：ChatGPT 通过公网 HTTPS/OAuth/MCP 访问 Gateway，
+这里讨论的是 `octendra-code` 这一条链路：ChatGPT 通过公网 HTTPS/OAuth/MCP 访问 Gateway，
 每台设备运行本机 Agent 并主动向 Gateway 建立出站连接。它和仓库中的 SSH/operator control
-plane 是两套独立运行状态，不要把 `remote-hosts-code agent`、`remote-hosts worker-daemon` 和
-`scripts/remote-hosts-systemd-service` 混为一谈。
+plane 是两套独立运行状态，不要把 `octendra-code agent`、`octendra worker-daemon` 和
+`scripts/octendra-systemd-service` 混为一谈。
 
 > 当前仓库发布版本为 0.9.0。0.9.0 的正式 release pipeline 已验证 macOS ARM64 和 Linux
-> x86_64-musl `remote-hosts-code` 产物。Linux ARM64/aarch64 暂未作为正式二进制产物进入该
+> x86_64-musl `octendra-code` 产物。Linux ARM64/aarch64 暂未作为正式二进制产物进入该
 > release matrix，需要在目标机或可信构建机上从固定源码构建。
 
 ## 1. 先理解完整链路
@@ -22,7 +22,7 @@ plane 是两套独立运行状态，不要把 `remote-hosts-code agent`、`remot
 flowchart LR
   C[ChatGPT] -->|HTTPS 443 + OAuth + MCP| P[Public hostname / Cloudflare]
   P -->|HTTPS origin| R[Reverse proxy / Caddy]
-  R -->|loopback HTTP| G[remote-hosts-code Gateway]
+  R -->|loopback HTTP| G[octendra-code Gateway]
   G <-->|outbound HTTPS poll/results| A1[Device Agent A]
   G <-->|outbound HTTPS poll/results| A2[Device Agent B]
   A1 --> W1[Workspace / Files / Terminal / PTY]
@@ -49,7 +49,7 @@ flowchart TB
   GPT[ChatGPT / OpenAI MCP client]
   EDGE[Public HTTPS Edge\nCloudflare or equivalent]
   RP[Reverse Proxy\nCaddy / nginx / Traefik]
-  GW[remote-hosts-code Gateway\n127.0.0.1:18787]
+  GW[octendra-code Gateway\n127.0.0.1:18787]
   STATE[(Gateway state)]
   A[Device Agent A]
   B[Device Agent B]
@@ -86,10 +86,10 @@ flowchart TB
 
 | 组件 | 放在哪里 | 典型监听/连接 | 是否需要公网入站 |
 | --- | --- | --- | --- |
-| `remote-hosts-code gateway` | NAS/VPS/长期在线 Linux 服务器 | 默认 `127.0.0.1:18787` | 否，必须放在反向代理后 |
+| `octendra-code gateway` | NAS/VPS/长期在线 Linux 服务器 | 默认 `127.0.0.1:18787` | 否，必须放在反向代理后 |
 | Caddy / 其他反向代理 | Gateway 所在服务器或同网段入口 | HTTPS origin，例如 443/8443 | 视公网方案而定 |
 | Cloudflare | 公网边缘 | 对 ChatGPT 暴露标准 HTTPS 443 | 是公网入口 |
-| `remote-hosts-code agent` | 每台 Mac/Linux/Windows 设备 | 主动出站 HTTPS 到 Gateway | **不需要** |
+| `octendra-code agent` | 每台 Mac/Linux/Windows 设备 | 主动出站 HTTPS 到 Gateway | **不需要** |
 | ChatGPT | OpenAI 托管侧 | 访问 `https://<hostname>/mcp` | 需要能访问你的公网域名 |
 
 Gateway 源程序强制绑定 loopback。不要为了“省一层代理”把 Gateway 直接监听到 `0.0.0.0`。
@@ -121,7 +121,7 @@ Gateway 源程序强制绑定 loopback。不要为了“省一层代理”把 Ga
 ### 3.3 ChatGPT
 
 当前 ChatGPT Developer mode 支持把远程 MCP Server 添加为开发者 app，支持 streaming HTTP/SSE，
-并支持 OAuth。Remote Hosts Code Gateway 使用 streaming HTTP + OAuth。按 OpenAI 当前文档，Developer
+并支持 OAuth。Octendra Code Gateway 使用 streaming HTTP + OAuth。按 OpenAI 当前文档，Developer
 mode 可在 Web 端用于 Pro、Plus、Business、Enterprise 和 Education 账户；产品资格和菜单位置以后可能变化。
 OpenAI 官方文档：
 
@@ -137,7 +137,7 @@ ChatGPT 产品 UI 会变化，以产品当前显示的回调 URI 和认证配置
 ChatGPT 的 MCP 客户端运行在 OpenAI 侧，因此**不能只让你自己的浏览器能访问 Gateway**。公网域名必须
 能从境外互联网稳定访问，OAuth discovery、登录、token exchange、`/mcp`、文件下载等路径都要走通。
 
-Remote Hosts 当前生产拓扑使用 Cloudflare 作为公网前门。Cloudflare 有两种完全不同的用法：
+Octendra 当前生产拓扑使用 Cloudflare 作为公网前门。Cloudflare 有两种完全不同的用法：
 
 ### 4.1 方案 A：公网源站 + Cloudflare Proxy + Origin Rule 端口改写
 
@@ -157,7 +157,7 @@ ChatGPT
   -> home/NAS public endpoint :8443
   -> Caddy
   -> http://127.0.0.1:18787
-  -> remote-hosts-code gateway
+  -> octendra-code gateway
 ```
 
 Cloudflare 官方 Origin Rules 支持覆盖 destination port；Cloudflare 默认代理也支持 HTTPS 8443。
@@ -200,7 +200,7 @@ Tunnel 不需要公网 IP，也不需要开放入站端口：
   `Referrer-Policy` 等行为。
 - 如果绕过 Caddy 直接把 Tunnel 指向 `127.0.0.1:18787`，必须显式复现正确的 HTTP Host 和安全头；
   Gateway 会校验公网 authority。没有做过这一层验证时不要把“Tunnel Healthy”误认为 OAuth/MCP 已经健康。
-- Cloudflare Tunnel 只是网络入口，不替代 Remote Hosts 自己的 OAuth 和设备认证。
+- Cloudflare Tunnel 只是网络入口，不替代 Octendra 自己的 OAuth 和设备认证。
 
 ### 4.3 如何选择三种网络方案
 
@@ -270,7 +270,7 @@ flowchart LR
 优先使用正式 release 产物；如果需要自行构建，固定到明确 commit/tag 后再构建：
 
 ```bash
-cargo build -p remote-hosts-code --release --locked
+cargo build -p octendra-code --release --locked
 ```
 
 Linux x86_64 可以使用 release pipeline 生成的 `x86_64-unknown-linux-musl` 产物。不要把 macOS
@@ -279,8 +279,8 @@ Linux x86_64 可以使用 release pipeline 生成的 `x86_64-unknown-linux-musl`
 安装示例：
 
 ```bash
-sudo install -m 0755 remote-hosts-code /usr/local/bin/remote-hosts-code
-remote-hosts-code --version
+sudo install -m 0755 octendra-code /usr/local/bin/octendra-code
+octendra-code --version
 ```
 
 发布包有 manifest/SHA-256 时先校验 hash，再安装。
@@ -288,10 +288,10 @@ remote-hosts-code --version
 ### 5.2 创建独立服务用户和目录
 
 ```bash
-sudo useradd --system --home /var/lib/remote-hosts-code --shell /usr/sbin/nologin remote-hosts-code || true
-sudo install -d -o remote-hosts-code -g remote-hosts-code -m 0700 /var/lib/remote-hosts-code
-sudo install -d -o root -g root -m 0755 /etc/remote-hosts-code
-sudo install -d -o root -g root -m 0700 /root/remote-hosts-setup
+sudo useradd --system --home /var/lib/octendra-code --shell /usr/sbin/nologin octendra-code || true
+sudo install -d -o octendra-code -g octendra-code -m 0700 /var/lib/octendra-code
+sudo install -d -o root -g root -m 0755 /etc/octendra-code
+sudo install -d -o root -g root -m 0700 /root/octendra-setup
 ```
 
 Gateway 运行用户只需要写自己的 state directory，不需要 root。
@@ -301,12 +301,12 @@ Gateway 运行用户只需要写自己的 state directory，不需要 root。
 `public-url` 必须是 HTTPS origin，不带 trailing slash：
 
 ```bash
-sudo remote-hosts-code init-gateway \
-  --config /root/remote-hosts-setup/gateway.json \
+sudo octendra-code init-gateway \
+  --config /root/octendra-setup/gateway.json \
   --public-url https://mcp.example.com \
-  --state-dir /var/lib/remote-hosts-code \
+  --state-dir /var/lib/octendra-code \
   --owner "your-owner-name" \
-  --password-file /root/remote-hosts-setup/gateway-login-password.txt
+  --password-file /root/octendra-setup/gateway-login-password.txt
 ```
 
 这会生成：
@@ -320,9 +320,9 @@ sudo remote-hosts-code init-gateway \
 
 ```bash
 sudo install \
-  -o remote-hosts-code -g remote-hosts-code -m 0400 \
-  /root/remote-hosts-setup/gateway.json \
-  /etc/remote-hosts-code/gateway.json
+  -o octendra-code -g octendra-code -m 0400 \
+  /root/octendra-setup/gateway.json \
+  /etc/octendra-code/gateway.json
 ```
 
 Owner password file 不需要给 Gateway service 读取；把它保存在管理员密码管理器或离线安全位置。
@@ -330,8 +330,8 @@ Owner password file 不需要给 Gateway service 读取；把它保存在管理�
 忘记 owner 密码时，管理员可以在 Gateway 所在主机的本地终端或 SSH TTY 中运行：
 
 ```bash
-sudo remote-hosts-code reset-owner-password \
-  --config /etc/remote-hosts-code/gateway.json
+sudo octendra-code reset-owner-password \
+  --config /etc/octendra-code/gateway.json
 ```
 
 使用该主机已安装的实际可执行文件和运行中配置路径。命令隐藏输入两次新密码，再要求本人输入 `RESET` 确认；输入确认字样也不回显。它不接受密码参数、密码环境变量、密码文件、管道输入或跳过确认。不要把真实密码交给聊天、代理工具或终端录制系统；实际输入和提交由管理员本人完成。
@@ -346,15 +346,15 @@ OAuth 授权、设备凭据、权限、状态库和现有网页会话不变。�
 
 ```ini
 [Unit]
-Description=Remote Hosts Code Gateway
+Description=Octendra Code Gateway
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=remote-hosts-code
-Group=remote-hosts-code
-ExecStart=/usr/local/bin/remote-hosts-code gateway --config /etc/remote-hosts-code/gateway.json
+User=octendra-code
+Group=octendra-code
+ExecStart=/usr/local/bin/octendra-code gateway --config /etc/octendra-code/gateway.json
 Restart=on-failure
 RestartSec=5
 UMask=0077
@@ -362,7 +362,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/var/lib/remote-hosts-code
+ReadWritePaths=/var/lib/octendra-code
 
 [Install]
 WantedBy=multi-user.target
@@ -372,8 +372,8 @@ WantedBy=multi-user.target
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now remote-hosts-code-gateway.service
-sudo systemctl status remote-hosts-code-gateway.service
+sudo systemctl enable --now octendra-code-gateway.service
+sudo systemctl status octendra-code-gateway.service
 ```
 
 Gateway 默认应只监听 loopback `127.0.0.1:18787`。
@@ -384,12 +384,12 @@ Gateway 默认应只监听 loopback `127.0.0.1:18787`。
 
 ```bash
 sudo python3 scripts/install-code-gateway.py \
-  --binary /usr/local/bin/remote-hosts-code \
-  --config /etc/remote-hosts-code/gateway.json \
-  --state-dir /var/lib/remote-hosts-code \
+  --binary /usr/local/bin/octendra-code \
+  --config /etc/octendra-code/gateway.json \
+  --state-dir /var/lib/octendra-code \
   --public-host mcp.example.com \
-  --service-user remote-hosts-code \
-  --service-group remote-hosts-code
+  --service-user octendra-code \
+  --service-group octendra-code
 ```
 
 这个 installer 的域名、service user/group、状态目录、binary/config 路径、Caddy 路径和 Gateway bind 都是部署参数；公共仓库不再为任何具体 NAS/VPS 写死这些值。首次执行默认拒绝覆盖已有不同 unit/site；确认内容完全一致时才使用 `--resume`。不使用 Caddy 时可传 `--skip-caddy`。
@@ -457,19 +457,19 @@ MacBook agent.json -> 复制到 Linux
 示例：
 
 ```bash
-sudo install -d -m 0700 /root/remote-hosts-enroll
-sudo cp /etc/remote-hosts-code/gateway.json /root/remote-hosts-enroll/gateway.json
-sudo chmod 0600 /root/remote-hosts-enroll/gateway.json
+sudo install -d -m 0700 /root/octendra-enroll
+sudo cp /etc/octendra-code/gateway.json /root/octendra-enroll/gateway.json
+sudo chmod 0600 /root/octendra-enroll/gateway.json
 ```
 
 假设新设备名为 `Linux-Workstation`：
 
 ```bash
-sudo remote-hosts-code enroll \
-  --gateway-config /root/remote-hosts-enroll/gateway.json \
-  --agent-config /root/remote-hosts-enroll/linux-workstation-agent.json \
+sudo octendra-code enroll \
+  --gateway-config /root/octendra-enroll/gateway.json \
+  --agent-config /root/octendra-enroll/linux-workstation-agent.json \
   --name Linux-Workstation \
-  --state-dir /home/YOUR_USER/.local/share/remote-hosts-code/state \
+  --state-dir /home/YOUR_USER/.local/share/octendra-code/state \
   --root /home/YOUR_USER/Workspace \
   --allow-write \
   --allow-exec \
@@ -499,18 +499,18 @@ Linux 上建议显式传 `--shell /bin/bash`；CLI 默认 shell 是 `/bin/zsh`�
 先保留可回滚备份，然后按服务用户恢复 owner/mode：
 
 ```bash
-sudo cp -p /etc/remote-hosts-code/gateway.json \
-  /etc/remote-hosts-code/gateway.json.before-new-device
+sudo cp -p /etc/octendra-code/gateway.json \
+  /etc/octendra-code/gateway.json.before-new-device
 
 sudo install \
-  -o remote-hosts-code -g remote-hosts-code -m 0400 \
-  /root/remote-hosts-enroll/gateway.json \
-  /etc/remote-hosts-code/gateway.json.new
+  -o octendra-code -g octendra-code -m 0400 \
+  /root/octendra-enroll/gateway.json \
+  /etc/octendra-code/gateway.json.new
 
-sudo mv /etc/remote-hosts-code/gateway.json.new \
-  /etc/remote-hosts-code/gateway.json
+sudo mv /etc/octendra-code/gateway.json.new \
+  /etc/octendra-code/gateway.json
 
-sudo systemctl restart remote-hosts-code-gateway.service
+sudo systemctl restart octendra-code-gateway.service
 ```
 
 然后重新检查公网 `/healthz`。Gateway 当前不会自动热加载 enroll 后的配置，重启是注册生效边界。
@@ -523,8 +523,8 @@ x86_64 Linux 使用对应 release artifact：
 
 ```bash
 mkdir -p ~/.local/bin
-install -m 0755 remote-hosts-code-linux-amd64 ~/.local/bin/remote-hosts-code
-~/.local/bin/remote-hosts-code --version
+install -m 0755 octendra-code-linux-amd64 ~/.local/bin/octendra-code
+~/.local/bin/octendra-code --version
 ```
 
 使用正式 release manifest 给出的 SHA-256 校验文件，不要只看文件名。
@@ -536,45 +536,45 @@ ARM64 Linux 在 0.9.0 暂无正式预构建 artifact，需要从固定源码 nat
 把该设备刚生成的 `agent.json` 通过可信通道传到目标机：
 
 ```bash
-mkdir -p ~/.local/share/remote-hosts-code/state
-chmod 700 ~/.local/share/remote-hosts-code
-chmod 700 ~/.local/share/remote-hosts-code/state
+mkdir -p ~/.local/share/octendra-code/state
+chmod 700 ~/.local/share/octendra-code
+chmod 700 ~/.local/share/octendra-code/state
 install -m 0600 /tmp/linux-workstation-agent.json \
-  ~/.local/share/remote-hosts-code/agent.json
+  ~/.local/share/octendra-code/agent.json
 rm -f /tmp/linux-workstation-agent.json
 ```
 
 验证但不启动：
 
 ```bash
-~/.local/bin/remote-hosts-code check \
+~/.local/bin/octendra-code check \
   --agent \
-  --config ~/.local/share/remote-hosts-code/agent.json
+  --config ~/.local/share/octendra-code/agent.json
 ```
 
 ### 7.3 首次前台运行
 
 ```bash
-RUST_LOG=info ~/.local/bin/remote-hosts-code agent \
-  --config ~/.local/share/remote-hosts-code/agent.json
+RUST_LOG=info ~/.local/bin/octendra-code agent \
+  --config ~/.local/share/octendra-code/agent.json
 ```
 
 新设备只需要出站 HTTPS 到 Gateway 公网 origin，不需要为 Agent 开放 SSH、MCP 或任意公网监听端口。
 
 ### 7.4 Linux systemd user service
 
-0.9.0 的 `scripts/remote-hosts-systemd-service` 管理的是 Remote Hosts operator API/SSH connector，
-**不是** `remote-hosts-code agent`。Code Agent 在 Linux 上当前建议使用单独的 user unit：
+0.9.0 的 `scripts/octendra-systemd-service` 管理的是 Octendra operator API/SSH connector，
+**不是** `octendra-code agent`。Code Agent 在 Linux 上当前建议使用单独的 user unit：
 
 ```ini
 [Unit]
-Description=Remote Hosts Code Agent
+Description=Octendra Code Agent
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/remote-hosts-code agent --config %h/.local/share/remote-hosts-code/agent.json
+ExecStart=%h/.local/bin/octendra-code agent --config %h/.local/share/octendra-code/agent.json
 Restart=on-failure
 RestartSec=5
 UMask=0077
@@ -589,15 +589,15 @@ WantedBy=default.target
 保存为：
 
 ```text
-~/.config/systemd/user/remote-hosts-code-agent.service
+~/.config/systemd/user/octendra-code-agent.service
 ```
 
 启用：
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now remote-hosts-code-agent.service
-systemctl --user status remote-hosts-code-agent.service
+systemctl --user enable --now octendra-code-agent.service
+systemctl --user status octendra-code-agent.service
 ```
 
 如果需要“用户未登录也持续在线”，由管理员明确决定是否启用 linger：
@@ -609,7 +609,7 @@ sudo loginctl enable-linger "$USER"
 日志：
 
 ```bash
-journalctl --user -u remote-hosts-code-agent.service -f
+journalctl --user -u octendra-code-agent.service -f
 ```
 
 ## 8. macOS 新设备
@@ -618,8 +618,8 @@ macOS 使用每用户 LaunchAgent。先把 native binary 和该机器独有的 `
 
 ```bash
 python3 scripts/install-code-agent.py \
-  --binary ~/.local/share/remote-hosts-code/bin/remote-hosts-code \
-  --config ~/.local/share/remote-hosts-code/agent.json
+  --binary ~/.local/share/octendra-code/bin/octendra-code \
+  --config ~/.local/share/octendra-code/agent.json
 ```
 
 每台 Mac 仍然必须单独 enroll。不要复制另一台 Mac 的身份文件。
@@ -640,9 +640,9 @@ Windows 仍遵守同一原则：
 - 让 Agent 主动连接 Gateway，不开放额外入站端口；
 - 使用当前用户 Task Scheduler/服务包装保持常驻。
 
-Windows 平台已有 operator control plane 的安装脚本，但它和 `remote-hosts-code agent` 不是同一个服务。
+Windows 平台已有 operator control plane 的安装脚本，但它和 `octendra-code agent` 不是同一个服务。
 如果没有正式 Code Agent installer，宁可显式创建一个只运行
-`remote-hosts-code agent --config ...` 的当前用户任务，也不要错误复用 SSH connector service。
+`octendra-code agent --config ...` 的当前用户任务，也不要错误复用 SSH connector service。
 
 ## 10. 在 ChatGPT 中连接 Gateway
 
@@ -667,7 +667,7 @@ Windows 平台已有 operator control plane 的安装脚本，但它和 `remote-
 7. 完成 owner 登录和授权。
 8. 刷新 app/tool schema 后，再从新对话测试 `devices_list`。
 
-Remote Hosts Gateway 已实现 protected-resource metadata、OAuth metadata、Authorization Code + S256
+Octendra Gateway 已实现 protected-resource metadata、OAuth metadata、Authorization Code + S256
 PKCE、DCR 和 issuer identification。OpenAI 当前要求 OAuth MCP Server 正确发布 protected-resource
 metadata、OAuth metadata、`resource`、S256 PKCE，并对 callback issuer 做一致性校验。不要为了“先跑通”
 关闭这些检查。
@@ -679,16 +679,16 @@ metadata、OAuth metadata、`resource`、S256 PKCE，并对 callback issuer 做�
 ### Gateway
 
 ```bash
-systemctl status remote-hosts-code-gateway.service
+systemctl status octendra-code-gateway.service
 curl -fsS https://mcp.example.com/healthz
 ```
 
 ### Agent
 
 ```bash
-remote-hosts-code check --agent --config <agent.json>
+octendra-code check --agent --config <agent.json>
 # Linux:
-systemctl --user status remote-hosts-code-agent.service
+systemctl --user status octendra-code-agent.service
 ```
 
 ### ChatGPT
@@ -767,7 +767,7 @@ Caddy 或 MCP 正常。继续从公网逐个检查 `/healthz` 和 well-known met
 
 1. 准备长期在线 Linux/NAS Gateway。
 2. 准备域名 `mcp.<domain>`。
-3. 安装 `remote-hosts-code`，执行 `init-gateway`。
+3. 安装 `octendra-code`，执行 `init-gateway`。
 4. Gateway 仅监听 `127.0.0.1:18787`。
 5. 配 Caddy/TLS。
 6. 有公网入站：Cloudflare Proxy + Origin Rule 443 -> origin 8443。
@@ -795,7 +795,7 @@ Caddy 或 MCP 正常。继续从公网逐个检查 `/healthz` 和 well-known met
 Gateway config 并重启**。后续值得增加：
 
 - 一次性、短时有效 enrollment token；
-- `remote-hosts-code join` 自助注册；
+- `octendra-code join` 自助注册；
 - Linux/Windows Code Agent 一键 installer；
 - Linux ARM64 正式 release artifact；
 - enrollment 后 Gateway 的安全热加载/设备注册 API。

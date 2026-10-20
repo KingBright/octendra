@@ -153,7 +153,7 @@ class MainActivity : Activity() {
                     val c = ConfigStore(this).read() ?: throw AgentError("请先保存配置")
                     val root = exposedRoot(this, c); val folder = File(root, "imports").apply { mkdirs() }
                     demand(root.usableSpace > Policy.MAX_FILE + 64L * 1024 * 1024, "存储空间不足")
-                    val tmp = File.createTempFile("rh-import-", ".tmp", cacheDir)
+                    val tmp = File.createTempFile("octendra-import-", ".tmp", cacheDir)
                     try {
                         contentResolver.openInputStream(uri)?.use { input -> FileOutputStream(tmp).use { FileTools.copy(input, it, Policy.MAX_FILE) } } ?: throw AgentError("无法读取文件")
                         var displayName = "imported-file"

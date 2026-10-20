@@ -1,6 +1,6 @@
 # Infrastructure Topology
 
-Remote Hosts models infrastructure as a generic directed graph. It can represent physical hosts,
+Octendra models infrastructure as a generic directed graph. It can represent physical hosts,
 virtual machines, clusters, reverse proxies, middleware, databases, caches, queues, storage, and
 business services without introducing one schema or MCP tool family per technology.
 
@@ -59,7 +59,7 @@ names, menu sequence numbers, or ephemeral addresses as identity.
 
 ## Agent Workflow
 
-Remote Hosts does not add Kubernetes-, Harbor-, database-, or middleware-specific MCP tools. Agents
+Octendra does not add Kubernetes-, Harbor-, database-, or middleware-specific MCP tools. Agents
 use the relevant CLI through `shell.posix`, `shell.powershell`, or a persistent PTY and normalize a
 successful discovery into the topology contract:
 
@@ -90,4 +90,4 @@ management console must be accessed remotely.
 - `POST /v1/topology/nodes/{node_id}/credentials`
 - `GET /v1/admin/overview`
 
-The route definitions in `remote-hosts-api` remain the authoritative request and response contract.
+The route definitions in `octendra-api` remain the authoritative request and response contract.

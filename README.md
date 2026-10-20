@@ -4,9 +4,9 @@
 
 **中文** | [English](README_EN.md)
 
-> Octendra 采用定稿萌章鱼品牌形象，重点是简单、高效、稳定、可靠。品牌迁移正在进行：下文现有 `remote-hosts` 命令、包名及仓库链接仍是当前实际入口，尚未发布改名后的安装包或新域名。详见[一次性品牌迁移计划](docs/octendra-migration.md)。
+> 当前源码、命令和包名已统一为 Octendra。改名后的部署仍须通过逐设备切换与验收；详见[当前命名与交付状态](docs/octendra-branding-20261020.md)。
 
-Octendra（原 Remote Hosts）是一套面向 AI Agent 与人类运维者的远程操作与代码协作平台。它把可复用的 SSH 控制面与独立的 ChatGPT 代码网关组合在一起，让 Agent 能够高效、安全、可恢复地操作你自己的多台电脑和服务器，而不需要为每一种产品、每一台机器重新设计一套工具。
+Octendra是一套面向 AI Agent 与人类运维者的远程操作与代码协作平台。它把可复用的 SSH 控制面与独立的 ChatGPT 代码网关组合在一起，让 Agent 能够高效、安全、可恢复地操作你自己的多台电脑和服务器，而不需要为每一种产品、每一台机器重新设计一套工具。
 
 项目重点不是“能不能执行命令”，而是四件事：**调用足够少、执行可恢复、权限边界明确、交付结果可验证**。长任务有持久状态，重试不会静默重复副作用，文件传输支持恢复，发布结果绑定固定源码输入，每台设备始终是显式目标，不会在失败时偷偷切换到另一台机器。
 
@@ -23,7 +23,7 @@ Octendra（原 Remote Hosts）是一套面向 AI Agent 与人类运维者的远�
 
 ### ChatGPT 代码网关
 
-`remote-hosts-code` 由一台长期在线服务器上的 OAuth/MCP Gateway 和各设备上的出站 Agent 组成。Gateway 不直接暴露本机 operator API；每台设备都有自己的身份、授权根目录和运行能力。
+`octendra-code` 由一台长期在线服务器上的 OAuth/MCP Gateway 和各设备上的出站 Agent 组成。Gateway 不直接暴露本机 operator API；每台设备都有自己的身份、授权根目录和运行能力。
 
 当前代码网关包含这些核心能力：
 
@@ -42,7 +42,7 @@ Octendra（原 Remote Hosts）是一套面向 AI Agent 与人类运维者的远�
 - 工具 schema 指纹与 Agent feature 上报，可以区分“服务器已支持”与“当前 ChatGPT 会话实际暴露了什么”。
 - 可选 compact 文本响应，同时保留完整 structured content。
 
-当前服务端目录包含 **21 个 code gateway 工具**。ChatGPT 某个已存在会话仍可能因为宿主缓存旧 schema 而只看到其中一部分，这种差异会被单独报告，不会被解释成服务器没有升级。
+当前服务端目录包含 **27 个 code gateway 工具**。ChatGPT 某个已存在会话仍可能因为宿主缓存旧 schema 而只看到其中一部分，这种差异会被单独报告，不会被解释成服务器没有升级。
 
 ## 架构
 
@@ -54,7 +54,7 @@ flowchart LR
   M1 --> F1[Local Workspace / Terminal / Files]
   M2 --> F2[Local Workspace / Terminal / Files]
 
-  U -->|MCP / CLI| C[Remote Hosts Control Plane]
+  U -->|MCP / CLI| C[Octendra Control Plane]
   C --> X[Reusable SSH Connectors]
   X --> H[Servers / NAS / Workstations]
 ```
@@ -66,8 +66,8 @@ flowchart LR
 ### macOS 服务
 
 ```bash
-scripts/remote-hosts-service install
-scripts/remote-hosts-service status
+scripts/octendra-service install
+scripts/octendra-service status
 ```
 
 本机管理界面：`http://127.0.0.1:8787/admin`
@@ -75,19 +75,19 @@ scripts/remote-hosts-service status
 常用命令：
 
 ```bash
-scripts/remote-hosts-service update
-scripts/remote-hosts-service restart
-scripts/remote-hosts-service logs
-scripts/remote-hosts-service ui
-scripts/remote-hosts-service skills
+scripts/octendra-service update
+scripts/octendra-service restart
+scripts/octendra-service logs
+scripts/octendra-service ui
+scripts/octendra-service skills
 ```
 
 ### Windows
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\remote-hosts-service.ps1 Install
-.\remote-hosts-service.ps1 Status
+.\octendra-service.ps1 Install
+.\octendra-service.ps1 Status
 ```
 
 完整说明见 [Windows 安装与运维](docs/windows.md)。
@@ -106,23 +106,19 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 ## 可靠性模型
 
-Remote Hosts 明确区分：**请求已接收、执行已完成、版本已安装、进程已运行、现场验收已通过**。这些不是同一件事。
+Octendra 明确区分：**请求已接收、执行已完成、版本已安装、进程已运行、现场验收已通过**。这些不是同一件事。
 
 - 写操作使用稳定幂等键和持久本地记录。
 - 进程崩溃后，结果未知的任意 shell 命令不会自动重跑。
 - 文件恢复沿用原 `operation_id` 和已经确认的检查点身份。
 - 多文件普通写入保证“每个文件原子”，不虚构整个文件系统级全局原子事务；部分失败会准确返回已完成项。
-- 发布前创建固定源码快照，测试回执和最终产物必须来自同一输入身份。
+- 发布在 primary main 固定输入指纹，测试回执和最终产物必须来自同一输入身份。
 - 协议需要时先升级 Gateway，再升级 Agent。
 - Agent 更新使用 maintenance lease、稳定就绪检查和按目标独立验收；一台机器忙不应阻塞另一台已经健康的机器完成发布。
 
 ## 当前版本
 
-当前最近一次不可变 packaged release 为 **0.9.2**。该 0.9.2 固定源码 pipeline 通过 **379 项测试：241 Rust + 138 Python，0 失败**（另有 3 项按环境跳过），并通过格式检查、严格 Clippy、workspace check，以及 macOS ARM64、Linux x86_64-musl、Windows x86_64-msvc 三个平台的 release 构建。正式 package manifest SHA-256 为 `f5ed05af547f83f28ab184167a5fbc139726813abcc1e5c1ed37063c0283eaa7`。
-
-0.9.2 延续 0.9.1 的 Windows 原生 shell 参数与正式 Windows x64 release artifact，并进一步处理 PowerShell/pwsh 在 ConPTY 启动时发出的 ANSI DSR 光标位置查询。Agent 会在 Windows PowerShell PTY 内部自动应答 `ESC[6n`，调用者不再需要先模拟终端光标响应才能获得 READY 或发送交互输入；Unix shell、cmd 和非交互终端行为保持不变。
-
-**repository HEAD、已生成 release package 和现场已部署版本是不同状态。** 不要根据本 README 推断 Gateway、Mac、Windows 或其他设备已经完成 0.9.2 安装；现场版本应以对应 deployment receipt、服务状态或 `devices_list` 实际结果为准。历史版本的发布证据仍保存在 `docs/releases/`。
+Gateway/Agent 与 Android 当前源码版本为 **0.12.0**。代码、生成产物和现场部署分别验收；源码版本不证明设备已经升级。具体交付状态见[本次命名收口记录](docs/octendra-branding-20261020.md)，历史发布证据保留在 `docs/releases/`。
 
 ## 开发与发布
 
@@ -150,16 +146,16 @@ python3 scripts/release-code.py \
 
 ```text
 crates/
-  remote-hosts-domain       公共实体与状态类型
-  remote-hosts-core         策略、监督、脱敏与传输抽象
-  remote-hosts-vault        本地加密凭据
-  remote-hosts-db           SQLx migrations 与 repositories
-  remote-hosts-connector    SSH transport、连接池、PTY 与 worker
-  remote-hosts-api          HTTP API 与管理界面
-  remote-hosts-mcp          主 MCP 服务与 schema
-  remote-hosts-sync         实例同步
-  remote-hosts-cli          服务与管理 CLI
-  remote-hosts-code         ChatGPT Code Gateway 与本机 Agent
+  octendra-domain       公共实体与状态类型
+  octendra-core         策略、监督、脱敏与传输抽象
+  octendra-vault        本地加密凭据
+  octendra-db           SQLx migrations 与 repositories
+  octendra-connector    SSH transport、连接池、PTY 与 worker
+  octendra-api          HTTP API 与管理界面
+  octendra-mcp          主 MCP 服务与 schema
+  octendra-sync         实例同步
+  octendra-cli          服务与管理 CLI
+  octendra-code         ChatGPT Code Gateway 与本机 Agent
 migrations/                 数据库迁移
 scripts/                    安装、升级、验证与发布自动化
 skills/                     仓库维护的 Agent Skills
@@ -186,4 +182,4 @@ docs/                       架构、运维、发布证据和产品问题清单
 
 凭据在本地数据库加密保存，凭据工具不会返回明文。Code Gateway 的 OAuth scope 与设备权限独立检查。Workspace 文件工具受授权根目录约束；**终端执行拥有本地用户的操作系统权限，并不是文件系统沙箱**。输出脱敏只是 best effort，不能替代“不把密码放进命令”。临时文件下载 URL 是短期 bearer capability，应视为私密信息。
 
-Remote Hosts 不绕过 ChatGPT 或操作系统自身的安全/权限机制。宿主工具审批、管理员权限、Full Disk Access 等仍然属于外部边界。
+Octendra 不绕过 ChatGPT 或操作系统自身的安全/权限机制。宿主工具审批、管理员权限、Full Disk Access 等仍然属于外部边界。

@@ -16,16 +16,16 @@ import release_current
 
 ROOT = Path(__file__).resolve().parents[1]
 OWNED = [
-    "crates/remote-hosts-code/src/task_authorization.rs",
-    "crates/remote-hosts-code/src/task_authorization_tests.rs",
-    "crates/remote-hosts-code/src/gateway.rs",
-    "crates/remote-hosts-code/src/receipts.rs",
-    "crates/remote-hosts-code/src/activity.rs",
-    "crates/remote-hosts-code/src/diagnostics.rs",
-    "crates/remote-hosts-code/src/job_dispatch.rs",
-    "crates/remote-hosts-code/src/tools.rs",
-    "crates/remote-hosts-code/src/lib.rs",
-    "crates/remote-hosts-code/src/capabilities.rs",
+    "crates/octendra-code/src/task_authorization.rs",
+    "crates/octendra-code/src/task_authorization_tests.rs",
+    "crates/octendra-code/src/gateway.rs",
+    "crates/octendra-code/src/receipts.rs",
+    "crates/octendra-code/src/activity.rs",
+    "crates/octendra-code/src/diagnostics.rs",
+    "crates/octendra-code/src/job_dispatch.rs",
+    "crates/octendra-code/src/tools.rs",
+    "crates/octendra-code/src/lib.rs",
+    "crates/octendra-code/src/capabilities.rs",
 ]
 
 def stage(argv, checkout, target, report, name, state, limit):
@@ -99,7 +99,7 @@ def main():
             build_slot.atomic_json(report,state)
             stage(["rustfmt","--edition","2024","--check","--config","skip_children=true",*OWNED],
                   checkout,target,report,"format",state,60)
-            selected=["cargo","test","--offline","--locked","-p","remote-hosts-code","--lib"]
+            selected=["cargo","test","--offline","--locked","-p","octendra-code","--lib"]
             stage([*selected,"task_authorization","--","--nocapture"],
                   checkout,target,report,"task_authorization",state,300)
             if args.extended:
@@ -110,8 +110,8 @@ def main():
                 stage([*selected,"diagnostics","--","--nocapture"],
                       checkout,target,report,"diagnostics",state,120)
             if args.export_contract:
-                stage(["cargo","run","--offline","--locked","-p","remote-hosts-code",
-                       "--bin","remote-hosts-code","--","adapter-contract","--output",
+                stage(["cargo","run","--offline","--locked","-p","octendra-code",
+                       "--bin","octendra-code","--","adapter-contract","--output",
                        str(evidence/"adapter-contract.json")],
                       checkout,target,report,"contract_export",state,300)
             if args.acceptance:
@@ -122,7 +122,7 @@ def main():
                       checkout,target,report,"release_manifest",state,120)
                 stage([*selected,"contract","--","--nocapture"],
                       checkout,target,report,"catalog_contract",state,120)
-                stage(["cargo","test","--offline","--locked","-p","remote-hosts-code",
+                stage(["cargo","test","--offline","--locked","-p","octendra-code",
                        "--test","experience_contract","--","--nocapture"],
                       checkout,target,report,"experience_contract",state,300)
         state.update(state="passed",phase="complete")

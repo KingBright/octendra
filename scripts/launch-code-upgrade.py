@@ -19,7 +19,7 @@ import tempfile
 import macos_code_identity
 
 FILES = ('upgrade-code-agent.py', 'agent_upgrade_support.py', 'maintenance_client.py', 'macos_code_identity.py', 'job.plist')
-STABLE_LABEL = 'com.remote-hosts.code-upgrade'
+STABLE_LABEL = 'fun.hackerlife.octendra.upgrade'
 RUNNER_FILE = 'code_upgrade_runner.py'
 
 
@@ -100,7 +100,7 @@ def cleanup_legacy_jobs(domain):
     result = subprocess.run(['launchctl', 'print', domain], text=True, capture_output=True, timeout=10)
     if result.returncode != 0:
         return None
-    labels = sorted(set(re.findall(r'com\.remote-hosts\.code(?:-agent)?-upgrade\.[A-Za-z0-9._-]+', result.stdout or '')))
+    labels = sorted(set(re.findall(r'fun\.hackerlife\.octendra\.(?:agent-)?upgrade\.[A-Za-z0-9._-]+', result.stdout or '')))
     removed = 0
     for label in labels:
         state = service_state(domain, label)
@@ -172,7 +172,7 @@ def prepare(args, base, python=None):
     jobs = base/'releases'/'upgrade-jobs'
     jobs.mkdir(parents=True, mode=0o700, exist_ok=True)
     directory = jobs/identity
-    label = 'com.remote-hosts.code-upgrade.'+identity
+    label = 'fun.hackerlife.octendra.upgrade.'+identity
     # Preparation is transactional: a crash cannot publish a half-written job.
     with (jobs/'.prepare.lock').open('a+b') as lock:
         os.fchmod(lock.fileno(), 0o600)
@@ -221,11 +221,11 @@ def _start_once_locked(record, require_identity=True):
         return {'state': 'already_requested', 'result': record['result'], 'service_changed': False,
                 'recovery': 'inspect the stable updater and saved result; do not automatically resubmit'}
     if require_identity:
-        signing = macos_code_identity.status(base, create_if_missing=True)
+        signing = macos_code_identity.status(base)
         if signing.get('state') != 'ready':
             return {'state': 'authorization_required', 'result': record['result'],
                     'service_changed': False, 'signing': signing,
-                    'next_action': 'authorize the Remote Hosts local signing identity once, then retry this same launch'}
+                    'next_action': 'authorize the Octendra local signing identity once, then retry this same launch'}
     domain = 'gui/%d' % os.getuid()
     current = service_state(domain)
     if current['running'] or (current['loaded'] and current.get('state') != 'not running'):
@@ -294,7 +294,7 @@ def main():
     if sys.platform != 'darwin':
         p.error('launchd upgrades require macOS')
     os.umask(0o077)
-    record = prepare(args, pathlib.Path.home()/'.local/share/remote-hosts-code')
+    record = prepare(args, pathlib.Path.home()/'.local/share/octendra-code')
     result = start_once(record) if args.start else record
     print(json.dumps(result))
     if result['state'] not in ('prepared', 'started', 'already_requested', 'authorization_required'):

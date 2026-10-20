@@ -24,7 +24,7 @@ def toml_value(value):
 
 def capture(root:Path,destination:Path):
     workspace=tomllib.loads((root/'Cargo.toml').read_text())['workspace']
-    source=root/'crates/remote-hosts-admin'
+    source=root/'crates/octendra-admin'
     crate=tomllib.loads((source/'Cargo.toml').read_text())
     lines=['[workspace]','', '[package]']
     for key,value in crate['package'].items():

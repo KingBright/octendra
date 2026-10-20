@@ -24,9 +24,9 @@ class UpdaterTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.home = pathlib.Path(self.tmp.name)
-        self.base = self.home / '.local/share/remote-hosts-code'
+        self.base = self.home / '.local/share/octendra-code'
         (self.base / 'bin').mkdir(parents=True)
-        self.binary = self.base / 'bin/remote-hosts-code'
+        self.binary = self.base / 'bin/octendra-code'
         self.binary.write_bytes(b'new-candidate-fixture')
         self.candidate = self.home / 'candidate'
         self.candidate.write_bytes(self.binary.read_bytes())
@@ -36,9 +36,9 @@ class UpdaterTests(unittest.TestCase):
         self.checksum = UPGRADE.sha(self.candidate)
         self.args = argparse.Namespace(candidate=self.candidate, sha256=self.checksum,
                                        version='0.3.1', result=self.result, idle_timeout=0)
-        self.signing = {'state':'ready','certificate_name':'Remote Hosts Local Code Signing',
-                        'certificate_sha1':'a'*40,'code_identifier':'com.remote-hosts.code-agent',
-                        'designated_requirement':'identifier "com.remote-hosts.code-agent" and certificate leaf = H"'+'a'*40+'"'}
+        self.signing = {'state':'ready','certificate_name':'Octendra Local Code Signing',
+                        'certificate_sha1':'a'*40,'code_identifier':'fun.hackerlife.octendra.agent',
+                        'designated_requirement':'identifier "fun.hackerlife.octendra.agent" and certificate leaf = H"'+'a'*40+'"'}
         self.installed_meta = {'version':'0.3.1','candidate_sha256':self.checksum,
                                'installed_sha256':UPGRADE.sha(self.binary),'certificate_sha1':'a'*40}
         self.signing_status_patch=mock.patch.object(UPGRADE.macos_code_identity,'status',return_value=self.signing)
@@ -85,7 +85,7 @@ class UpdaterTests(unittest.TestCase):
     def test_repeated_identical_candidate_does_not_restart_or_replace_receipt(self):
         # No config exists: a no-op must not enter health checks or idle waiting.
         output = io.StringIO()
-        with mock.patch.object(UPGRADE.subprocess, 'check_output', return_value='remote-hosts-code 0.3.1\n'), \
+        with mock.patch.object(UPGRADE.subprocess, 'check_output', return_value='octendra-code 0.3.1\n'), \
              mock.patch.object(UPGRADE.subprocess, 'run') as run, \
              mock.patch.object(UPGRADE.sqlite3, 'connect', side_effect=AssertionError('must not query live state')), \
              contextlib.redirect_stdout(output):
@@ -104,7 +104,7 @@ class UpdaterTests(unittest.TestCase):
 
     def test_no_change_has_a_receipt_when_job_has_no_previous_result(self):
         self.result.unlink()
-        with mock.patch.object(UPGRADE.subprocess, 'check_output', return_value='remote-hosts-code 0.3.1'), \
+        with mock.patch.object(UPGRADE.subprocess, 'check_output', return_value='octendra-code 0.3.1'), \
              mock.patch.object(UPGRADE.subprocess, 'run') as run, contextlib.redirect_stdout(io.StringIO()):
             self.invoke()
         run.assert_not_called()
@@ -124,7 +124,7 @@ class UpdaterTests(unittest.TestCase):
 
     def test_version_mismatch_never_restarts_service(self):
         with mock.patch.object(UPGRADE.macos_code_identity, 'installed_metadata', return_value=None), \
-             mock.patch.object(UPGRADE.subprocess, 'check_output', return_value='remote-hosts-code 9.9.9'), \
+             mock.patch.object(UPGRADE.subprocess, 'check_output', return_value='octendra-code 9.9.9'), \
              mock.patch.object(UPGRADE.subprocess, 'run') as run, contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(SystemExit):
                 self.invoke()
@@ -174,7 +174,7 @@ class UpdaterTests(unittest.TestCase):
         def run(command, **kwargs):
             text = 'service = {\n\tstate = running\n\tpid = 2020\n}\n' if command[:2] == ['launchctl', 'print'] else ''
             return subprocess.CompletedProcess(command, 0, stdout=text, stderr='')
-        with mock.patch.object(UPGRADE.subprocess, 'check_output', return_value='remote-hosts-code 0.3.1'), \
+        with mock.patch.object(UPGRADE.subprocess, 'check_output', return_value='octendra-code 0.3.1'), \
              mock.patch.object(UPGRADE.subprocess, 'run', side_effect=run) as runs, contextlib.redirect_stdout(io.StringIO()):
             self.invoke()
         record = json.loads(self.result.read_text())
@@ -196,7 +196,7 @@ class UpdaterTests(unittest.TestCase):
                 if len(kicks) == 1:
                     raise subprocess.CalledProcessError(1, command)
             return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
-        with mock.patch.object(UPGRADE.subprocess, 'check_output', return_value='remote-hosts-code 0.3.1'), \
+        with mock.patch.object(UPGRADE.subprocess, 'check_output', return_value='octendra-code 0.3.1'), \
              mock.patch.object(UPGRADE.subprocess, 'run', side_effect=run), contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(SystemExit):
                 self.invoke()
@@ -210,7 +210,7 @@ class UpdaterTests(unittest.TestCase):
         self.binary.write_bytes(b'old-verified-binary')
         self.database()
         self.gateway_mock.side_effect = RuntimeError('gateway_readiness_unavailable')
-        with mock.patch.object(UPGRADE.subprocess, 'check_output', return_value='remote-hosts-code 0.3.1'), \
+        with mock.patch.object(UPGRADE.subprocess, 'check_output', return_value='octendra-code 0.3.1'), \
              mock.patch.object(UPGRADE.subprocess, 'run') as run, contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(SystemExit):
                 self.invoke()
@@ -221,7 +221,7 @@ class UpdaterTests(unittest.TestCase):
         self.binary.write_bytes(b'old-verified-binary')
         self.database()
         self.readiness_mock.side_effect = [RuntimeError('readiness_timeout'), {'gateway_verified':True}]
-        with mock.patch.object(UPGRADE.subprocess, 'check_output', return_value='remote-hosts-code 0.3.1'), \
+        with mock.patch.object(UPGRADE.subprocess, 'check_output', return_value='octendra-code 0.3.1'), \
              mock.patch.object(UPGRADE.subprocess, 'run', return_value=subprocess.CompletedProcess([],0)), contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(SystemExit):
                 self.invoke()

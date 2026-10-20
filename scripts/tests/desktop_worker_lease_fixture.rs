@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 extern crate self as host;
 extern crate self as protocol;
-use remote_hosts_desktop_protocol::*;
+use octendra_desktop_protocol::*;
 use std::{
     sync::{Mutex, OnceLock},
     time::Duration,

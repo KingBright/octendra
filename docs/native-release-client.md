@@ -1,16 +1,16 @@
 # Local release client: native MCP transport
 
-The local release client reuses the **installed Rust `remote-hosts-code adapter`** for the lifetime of each `Client`. Rust owns HTTPS connection reuse, generated tool catalog verification, per-call request identities, and durable operation receipts. The Python layer is only OAuth bootstrap, stdio framing, and existing release coordination. This is not a claim that the entire release pipeline is Python-free.
+The local release client reuses the **installed Rust `octendra-code adapter`** for the lifetime of each `Client`. Rust owns HTTPS connection reuse, generated tool catalog verification, per-call request identities, and durable operation receipts. The Python layer is only OAuth bootstrap, stdio framing, and existing release coordination. This is not a claim that the entire release pipeline is Python-free.
 
 ## Selection and evidence
 
 `Client(...)` defaults to `auto`: use the canonical installed adapter when it is available. If it is absent, select the legacy client **before any MCP request** and report `native_absent_before_any_rpc`. Production checks may require `transport='native'`; this fails closed if the binary is missing. `transport='legacy'` is an explicit comparison/recovery option, not an automatic response to a timeout.
 
-`REMOTE_HOSTS_RELEASE_TRANSPORT` accepts `auto`, `native`, or `legacy`. `REMOTE_HOSTS_NATIVE_ADAPTER` selects an explicit executable, and `REMOTE_HOSTS_NATIVE_STATE_DIR` selects the local evidence root. Explicit arguments override environment defaults. No binary is fetched from the network, no Agent is registered, and no service is restarted by selecting a client.
+`OCTENDRA_RELEASE_TRANSPORT` accepts `auto`, `native`, or `legacy`. `OCTENDRA_NATIVE_ADAPTER` selects an explicit executable, and `OCTENDRA_NATIVE_STATE_DIR` selects the local evidence root. Explicit arguments override environment defaults. No binary is fetched from the network, no Agent is registered, and no service is restarted by selecting a client.
 
 A `Client` keeps one owned adapter subprocess. `transport_info()` reports the chosen route, executable hash, startup duration, RPC count and evidence directory. The native adapter automatically reports its own authorized catalog; final host exposure remains unknown unless the actual host supplies a separate report.
 
-The default evidence root is `~/.local/share/remote-hosts-code/release-clients/`. Each session has a private directory with the Rust adapter's original request receipts, an adapter stderr log, and session metadata. Credentials are passed through private files, never command arguments. Close the client in a `finally` block: normal and failed sessions remove temporary token/config files, retain receipts, and reap only their owned subprocess. Failed OAuth revocation is not reported as success and retains the refresh handle for an explicit cleanup retry.
+The default evidence root is `~/.local/share/octendra-code/release-clients/`. Each session has a private directory with the Rust adapter's original request receipts, an adapter stderr log, and session metadata. Credentials are passed through private files, never command arguments. Close the client in a `finally` block: normal and failed sessions remove temporary token/config files, retain receipts, and reap only their owned subprocess. Failed OAuth revocation is not reported as success and retains the refresh handle for an explicit cleanup retry.
 
 ## Failure and recovery
 

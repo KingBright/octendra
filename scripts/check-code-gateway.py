@@ -179,7 +179,7 @@ def main():
     if not args.run_id.replace("-", "").isalnum():
         raise SystemExit("run-id must be alphanumeric with optional hyphens")
     opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
-    opener.addheaders = [("User-Agent", "RemoteHosts-Acceptance/" + args.expected_version)]
+    opener.addheaders = [("User-Agent", "Octendra-Acceptance/" + args.expected_version)]
 
     def call(path, data=None, form=False, bearer=None):
         headers = {"Accept": "application/json, text/event-stream"}
@@ -221,7 +221,7 @@ def main():
         assert b"Heartbeat is not counted as business progress" in body
         assert "no-store" in headers.get("Cache-Control", "")
     if parsed_version >= (0, 10, 4):
-        spark_redirect = "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-remote-hosts-acceptance-" + args.run_id
+        spark_redirect = "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-octendra-acceptance-" + args.run_id
         spark = parsed("/oauth/register", {"redirect_uris": [spark_redirect], "client_name": "Gemini Spark acceptance"})
         assert spark["redirect_uris"] == [spark_redirect]
         assert spark["token_endpoint_auth_method"] == "client_secret_basic"
@@ -245,7 +245,7 @@ def main():
     atexit.register(mcp.close)
     rpc = mcp.rpc
 
-    rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "remote-hosts-live-acceptance", "version": "1"}})
+    rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "octendra-live-acceptance", "version": "1"}})
     catalog = rpc("tools/list", {})
     names = [tool['name'] for tool in catalog['tools']]
     required_tools = required_tool_names(args.expected_version)
@@ -319,7 +319,7 @@ def main():
         key = args.run_id + "-" + device["device_id"]
         opened = tool("workspace_open", {"device_id": device["device_id"], "root": root, "idempotency_key": key + "-open"})
         ws = opened["workspace"]["id"]
-        path = ".remote-hosts-code-acceptance-" + args.run_id + "/probe.py"
+        path = ".octendra-code-acceptance-" + args.run_id + "/probe.py"
         content = "def answer():\n    return 41\n\nprint(answer())\n"
         created = tool("code_apply_edits", {"workspace_id": ws, "idempotency_key": key + "-create", "files": [{"path": path, "expected_version": "absent", "action": "create", "content": content}]})
         version = created["changed"][0]["version"]

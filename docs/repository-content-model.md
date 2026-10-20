@@ -1,6 +1,6 @@
 # Repository Content Model
 
-Remote Hosts 的公共仓库、某一套真实部署的配置，以及实时运行状态是三种不同的数据域。它们不能互相代替，也不应该继续混在同一个 Git 历史里。
+Octendra 的公共仓库、某一套真实部署的配置，以及实时运行状态是三种不同的数据域。它们不能互相代替，也不应该继续混在同一个 Git 历史里。
 
 本文定义从现在开始的仓库边界。
 
@@ -8,7 +8,7 @@ Remote Hosts 的公共仓库、某一套真实部署的配置，以及实时运�
 
 ### A. Public product repository
 
-公共产品仓库回答的问题是：**Remote Hosts 是什么、如何构建、如何部署一套新的实例、代码是否通过可复现验证。**
+公共产品仓库回答的问题是：**Octendra 是什么、如何构建、如何部署一套新的实例、代码是否通过可复现验证。**
 
 这里可以放：
 
@@ -26,7 +26,7 @@ Remote Hosts 的公共仓库、某一套真实部署的配置，以及实时运�
 
 ### B. Private deployment profile
 
-私有部署配置回答的问题是：**某个团队/个人自己的这一套 Remote Hosts 实例具体怎么连。**
+私有部署配置回答的问题是：**某个团队/个人自己的这一套 Octendra 实例具体怎么连。**
 
 它应该独立于公共仓库，推荐放在单独的私有 ops/config 仓库或配置管理系统中。即使使用私有 Git，也不要直接提交 secret 明文。
 
@@ -45,7 +45,7 @@ Remote Hosts 的公共仓库、某一套真实部署的配置，以及实时运�
 建议私有 ops 仓库采用类似结构：
 
 ```text
-remote-hosts-ops/                 # private repository
+octendra-ops/                 # private repository
   README.md
   environments/
     production.yaml               # no plaintext secrets
@@ -111,7 +111,7 @@ deployment evidence 应进入私有 ops/archive，或由部署系统保留。公
 公共文档、测试和模板默认使用：
 
 - 域名：`example.com`、`mcp.example.com`；
-- 用户：`YOUR_USER`、`remote-hosts-code`；
+- 用户：`YOUR_USER`、`octendra-code`；
 - home：`/home/YOUR_USER` 或 `~`；
 - UUID：明显的 fixture UUID，不使用真实设备 ID；
 - IP：RFC 5737 / RFC 3849 文档地址，或 loopback；

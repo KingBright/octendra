@@ -48,7 +48,7 @@ class UpgradePolicyTests(unittest.TestCase):
                 "--config-path", str(self.config), "--backup-root", str(self.root / "backup")]
         def output(command, **kwargs):
             if command[-1] == "--version":
-                return "remote-hosts-code 0.10.99"
+                return "octendra-code 0.10.99"
             self.assertEqual(command[-1], "release-manifest")
             return json.dumps((manifest or {}) if command[0] == str(self.candidate)
                               else (previous_manifest if previous_manifest is not None else (manifest or {})))

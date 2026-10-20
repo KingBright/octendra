@@ -29,8 +29,8 @@ def installed_binary() -> pathlib.Path:
         base = os.environ.get('LOCALAPPDATA')
         if not base:
             raise ValueError('native_adapter_localappdata_missing')
-        return pathlib.Path(base) / 'RemoteHostsCode' / 'bin' / 'remote-hosts-code.exe'
-    return pathlib.Path.home() / '.local/share/remote-hosts-code/bin/remote-hosts-code'
+        return pathlib.Path(base) / 'OctendraCode' / 'bin' / 'octendra-code.exe'
+    return pathlib.Path.home() / '.local/share/octendra-code/bin/octendra-code'
 
 
 class NativeTransportError(RuntimeError):
@@ -62,7 +62,7 @@ class NativeSession:
             raise ValueError('native_adapter_binary_unavailable')
         with self.binary.open('rb') as source:
             binary_sha256 = hashlib.file_digest(source, 'sha256').hexdigest()
-        root = state_root or pathlib.Path.home() / '.local/share/remote-hosts-code/release-clients'
+        root = state_root or pathlib.Path.home() / '.local/share/octendra-code/release-clients'
         root = pathlib.Path(root).absolute()
         for path in (root, *root.parents):
             if path.is_symlink():
@@ -187,7 +187,7 @@ class NativeSession:
                 self._writer_thread.start()
                 self._init = self._exchange('initialize', {
                     'protocolVersion': '2025-11-25', 'capabilities': {},
-                    'clientInfo': {'name': 'remote-hosts-local-release', 'version': '1'},
+                    'clientInfo': {'name': 'octendra-local-release', 'version': '1'},
                 })
                 if not isinstance(self._init, dict) or not isinstance(self._init.get('protocolVersion'), str):
                     self._fail('native_adapter_initialize_invalid')

@@ -11,12 +11,12 @@ target=rp/"target"; report=pathlib.Path(a.report).resolve()
 if not target.is_dir(): raise SystemExit("existing RP target required")
 if report.exists(): raise SystemExit("new report path required; inspect original before rerunning")
 if shutil.disk_usage(target).free<5*1024**3: raise SystemExit("5 GiB preflight reserve required")
-lock=open(target/".rh-desktop-worker-check.lock","a")
+lock=open(target/".octendra-desktop-worker-check.lock","a")
 try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
 except BlockingIOError: raise SystemExit("another owned native check is active")
-source_files=list((rh/"desktop-worker/src").glob("*.rs"))+list((rh/"crates/remote-hosts-desktop-protocol").rglob("*.rs"))
-source_files += [rh/"crates/remote-hosts-code/src/computer_use/transport.rs",rh/"crates/remote-hosts-code/src/computer_use/transport_tests.rs"]
-source_files += [rh/"desktop-worker/Cargo.toml",rh/"desktop-worker/Cargo.lock",rh/"crates/remote-hosts-desktop-protocol/Cargo.toml"]
+source_files=list((rh/"desktop-worker/src").glob("*.rs"))+list((rh/"crates/octendra-desktop-protocol").rglob("*.rs"))
+source_files += [rh/"crates/octendra-code/src/computer_use/transport.rs",rh/"crates/octendra-code/src/computer_use/transport_tests.rs"]
+source_files += [rh/"desktop-worker/Cargo.toml",rh/"desktop-worker/Cargo.lock",rh/"crates/octendra-desktop-protocol/Cargo.toml"]
 source_files += [rp/"Cargo.toml",rp/"Cargo.lock"]
 for name in ["host","protocol","remote_core","remote_platform","third_party/screencapturekit"]:
     for directory, children, files in os.walk(rp/name):
@@ -66,7 +66,7 @@ try:
     if not fmt[0]: raise RuntimeError("installed rustfmt required")
     receipt["source_before"]=hashes();save()
     # Never format the RP worktree.
-    fmt_files=list((rh/"desktop-worker/src").glob("*.rs"))+list((rh/"crates/remote-hosts-desktop-protocol").rglob("*.rs"))
+    fmt_files=list((rh/"desktop-worker/src").glob("*.rs"))+list((rh/"crates/octendra-desktop-protocol").rglob("*.rs"))
     run("format",["rustup","run","1.99.1","rustfmt","--edition","2024","--config","skip_children=true","--check"]+[str(f) for f in fmt_files],rh,30)
     cargo=["cargo","+1.99.1"]
     manifest=rh/"desktop-worker/Cargo.toml"
@@ -82,10 +82,10 @@ try:
     receipt["worker_tests"]=sum(int(n) for n in re.findall(r"test result: ok\. (\d+) passed;",test_log.read_text()));save()
     if receipt["worker_tests"] < 2: raise RuntimeError("worker tests not executed")
     run("worker_build",cargo+["build","--manifest-path",str(manifest),"--locked","--offline"]+patch,rh,600)
-    binary=target/"debug/remote-hosts-desktop-worker"
+    binary=target/"debug/octendra-desktop-worker"
     receipt["worker_sha256"]=hashlib.sha256(binary.read_bytes()).hexdigest()
     version_log=run("worker_version",[str(binary),"--version"],rh,10)
-    if version_log.read_text().strip()!="remote-hosts-desktop-worker "+version: raise RuntimeError("worker version mismatch")
+    if version_log.read_text().strip()!="octendra-desktop-worker "+version: raise RuntimeError("worker version mismatch")
     receipt["worker_version"]=version
     run("disabled_capabilities",[str(binary),"--capabilities"],rh,10)
     run("disabled_pipe_exits",["python3","-I","-B","-u",str(rh/"scripts/check-desktop-worker-exits.py"),"--worker",str(binary),"--report",str(report)+".exits.json"],rh,30)

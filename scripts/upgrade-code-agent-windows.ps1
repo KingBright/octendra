@@ -5,7 +5,7 @@ param(
   [Parameter(Mandatory=$true)][string]$Result,
   [string]$BinaryPath="",
   [string]$ConfigPath="",
-  [string]$TaskName="Remote Hosts Code Agent",
+  [string]$TaskName="Octendra Code Agent",
   [int]$IdleTimeout=180
 )
 $ErrorActionPreference='Stop'
@@ -21,8 +21,8 @@ if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
   if ($match.Success) {
     if ($match.Groups[1].Success) { $ConfigPath=$match.Groups[1].Value } else { $ConfigPath=$match.Groups[2].Value }
   } else {
-    $preferred=Join-Path $env:LOCALAPPDATA 'RemoteHostsCode\agent.json'
-    $legacy=Join-Path $env:USERPROFILE '.local\share\remote-hosts-code\agent.json'
+    $preferred=Join-Path $env:LOCALAPPDATA 'OctendraCode\agent.json'
+    $legacy=Join-Path $env:USERPROFILE '.local\share\octendra-code\agent.json'
     if (Test-Path -LiteralPath $preferred) { $ConfigPath=$preferred } elseif (Test-Path -LiteralPath $legacy) { $ConfigPath=$legacy } else { $ConfigPath=$preferred }
   }
 }
@@ -35,13 +35,13 @@ try {
   # GUI-subsystem executables must participate in a pipeline so PowerShell waits
   # and captures stdout even when Task Scheduler starts us without a console.
   $candidateVersion = (& $Candidate --version | Out-String).Trim()
-  if ($LASTEXITCODE -ne 0 -or $candidateVersion -ne "remote-hosts-code $Version") { throw 'candidate version mismatch or nonzero exit' }
+  if ($LASTEXITCODE -ne 0 -or $candidateVersion -ne "octendra-code $Version") { throw 'candidate version mismatch or nonzero exit' }
   $config=Get-Content -Raw -LiteralPath $ConfigPath|ConvertFrom-Json
   $headers=@{Authorization=('Bearer '+$config.device_token);'Cache-Control'='no-cache'};$before=Invoke-RestMethod -Method Get -Uri ($config.gateway_url+'/device/readiness') -Headers $headers -TimeoutSec 10
   Maintenance-Call 'acquire';$maintenance=$true
   $deadline=(Get-Date).AddSeconds($IdleTimeout)
   do {
-    $agents=@(Get-Process remote-hosts-code -ErrorAction SilentlyContinue)
+    $agents=@(Get-Process octendra-code -ErrorAction SilentlyContinue)
     $agentIds=@($agents|ForEach-Object {$_.Id})
     $children=@(Get-CimInstance Win32_Process|Where-Object {$agentIds -contains $_.ParentProcessId -and $_.Name -notin @('conhost.exe','OpenConsole.exe')})
     $record.active_children=$children.Count
@@ -49,7 +49,7 @@ try {
     if ((Get-Date) -ge $deadline) {throw 'agent still has active child work; upgrade not applied'}
     Start-Sleep -Seconds 2
   } while ($true)
-  $backupRoot=Join-Path $env:LOCALAPPDATA ("remote-hosts-code\releases\before-$Version-"+(Get-Date -Format yyyyMMddTHHmmss)+'-'+[guid]::NewGuid().ToString('N').Substring(0,8));New-Item -ItemType Directory -Force $backupRoot|Out-Null;$backup=Join-Path $backupRoot 'remote-hosts-code.exe';Copy-Item -LiteralPath $BinaryPath -Destination $backup
+  $backupRoot=Join-Path $env:LOCALAPPDATA ("octendra-code\releases\before-$Version-"+(Get-Date -Format yyyyMMddTHHmmss)+'-'+[guid]::NewGuid().ToString('N').Substring(0,8));New-Item -ItemType Directory -Force $backupRoot|Out-Null;$backup=Join-Path $backupRoot 'octendra-code.exe';Copy-Item -LiteralPath $BinaryPath -Destination $backup
   $record.backup=$backup;$record.previous_sha256=(Get-FileHash -Algorithm SHA256 $backup).Hash.ToLowerInvariant();$record.state='installing'
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue;Start-Sleep -Seconds 2
   $temp="$BinaryPath.new";Copy-Item -LiteralPath $Candidate -Destination $temp -Force;Move-Item -LiteralPath $temp -Destination $BinaryPath -Force;$record.service_changed=$true

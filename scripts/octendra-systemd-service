@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$(uname -s)" != "Linux" && "${OCTENDRA_ALLOW_NON_LINUX_TEST:-0}" != "1" ]]; then
+  echo "octendra-systemd-service requires Linux" >&2
+  exit 64
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+CONFIG_DIR="${OCTENDRA_CONFIG_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/octendra}"
+CONFIG_FILE="${OCTENDRA_SERVICE_ENV:-${CONFIG_DIR}/service.env}"
+DATA_DIR="${OCTENDRA_DATA_DIR:-${XDG_DATA_HOME:-${HOME}/.local/share}/octendra}"
+STATE_DIR="${OCTENDRA_STATE_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/octendra}"
+BIN_DIR="${OCTENDRA_BIN_DIR:-${HOME}/.local/bin}"
+BIN_PATH="${BIN_DIR}/octendra"
+RUN_DIR="${DATA_DIR}/run"
+LOG_DIR="${STATE_DIR}/logs"
+UNIT_DIR="${OCTENDRA_SYSTEMD_USER_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user}"
+API_UNIT="${UNIT_DIR}/octendra-api.service"
+CONNECTOR_UNIT="${UNIT_DIR}/octendra-connector.service"
+SYSTEMCTL="${OCTENDRA_SYSTEMCTL:-systemctl}"
+JOURNALCTL="${OCTENDRA_JOURNALCTL:-journalctl}"
+DEFAULT_VAULT_MASTER_PASSWORD_FILE="${CONFIG_DIR}/vault-master-password"
+
+usage() {
+  cat <<EOF
+Usage: scripts/octendra-systemd-service <command>
+
+Commands:
+  install       build/install/migrate, write user units, enable and start
+  stage         build/install/migrate and refresh units without restart
+  start         start both user services
+  stop          stop both user services
+  restart       restart both user services
+  status        show both user service states
+  logs          follow both user journals
+  migrate       run database migrations
+  doctor        run octendra doctor
+  print-config  print resolved paths
+  render        only render config/wrappers/units; intended for packaging tests
+EOF
+}
+
+ensure_dirs() {
+  mkdir -p "${CONFIG_DIR}" "${DATA_DIR}" "${STATE_DIR}" "${BIN_DIR}" "${RUN_DIR}" "${LOG_DIR}" "${UNIT_DIR}"
+  chmod 0700 "${CONFIG_DIR}" "${DATA_DIR}" "${STATE_DIR}" "${RUN_DIR}"
+}
+
+uuid() {
+  if command -v uuidgen >/dev/null 2>&1; then uuidgen | tr '[:upper:]' '[:lower:]';
+  else python3 -c 'import uuid; print(uuid.uuid4())'; fi
+}
+
+write_default_config() {
+  ensure_dirs
+  [[ -f "${CONFIG_FILE}" ]] && return
+  local connector_id environment_id
+  connector_id="$(uuid)"; environment_id="$(uuid)"
+  cat >"${CONFIG_FILE}" <<EOF
+OCTENDRA_CONFIG_VERSION=3
+OCTENDRA_BIN=${BIN_PATH}
+OCTENDRA_DATABASE_URL=sqlite://${DATA_DIR}/octendra.sqlite
+OCTENDRA_BIND=127.0.0.1:8787
+OCTENDRA_PEER_SYNC_BIND=
+OCTENDRA_ARTIFACT_ROOT=${DATA_DIR}/artifacts
+OCTENDRA_CONNECTOR_ID=${connector_id}
+OCTENDRA_CONNECTOR_NAME=local-linux-connector
+OCTENDRA_ENVIRONMENT_ID=${environment_id}
+OCTENDRA_ENVIRONMENT_NAME=local-linux
+OCTENDRA_CURRENT_NETWORK=local
+OCTENDRA_HOST_KEY_POLICY=add
+OCTENDRA_CONNECT_TIMEOUT_SECONDS=10
+OCTENDRA_SSH_BACKEND=russh
+OCTENDRA_PTY_BACKEND_MODE=auto
+OCTENDRA_VAULT_MASTER_PASSWORD_FILE=${DEFAULT_VAULT_MASTER_PASSWORD_FILE}
+OCTENDRA_KNOWN_HOSTS_PATH=
+OCTENDRA_RUSSH_INACTIVITY_TIMEOUT_SECONDS=30
+OCTENDRA_PTY_IDLE_TTL_SECONDS=3600
+OCTENDRA_PTY_BUSY_TTL_SECONDS=86400
+OCTENDRA_LOG=octendra=info,octendra_cli=info
+EOF
+  chmod 0600 "${CONFIG_FILE}"
+}
+
+load_config() {
+  write_default_config
+  set -a
+  # shellcheck disable=SC1090
+  . "${CONFIG_FILE}"
+  set +a
+}
+
+ensure_vault() {
+  load_config
+  mkdir -p "$(dirname "${OCTENDRA_VAULT_MASTER_PASSWORD_FILE}")"
+  if [[ ! -s "${OCTENDRA_VAULT_MASTER_PASSWORD_FILE}" ]]; then
+    (umask 077; python3 -c 'import secrets; print(secrets.token_urlsafe(48))' >"${OCTENDRA_VAULT_MASTER_PASSWORD_FILE}")
+  fi
+  chmod 0600 "${OCTENDRA_VAULT_MASTER_PASSWORD_FILE}"
+}
+
+build_release() {
+  if [[ -n "${OCTENDRA_PREBUILT_BINARY:-}" ]]; then return; fi
+  cargo build --release -p octendra-cli --bin octendra
+}
+
+release_binary() {
+  if [[ -n "${OCTENDRA_PREBUILT_BINARY:-}" ]]; then printf '%s\n' "${OCTENDRA_PREBUILT_BINARY}"; return; fi
+  cargo metadata --no-deps --format-version=1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"]+"/release/octendra")'
+}
+
+install_binary() {
+  local source
+  source="$(release_binary)"
+  [[ -x "${source}" ]] || { echo "release binary missing: ${source}" >&2; exit 1; }
+  install -m 0755 "${source}" "${BIN_PATH}"
+}
+
+write_wrappers() {
+  load_config
+  cat >"${RUN_DIR}/octendra-api" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+set -a; . "${CONFIG_FILE}"; set +a
+export RUST_LOG="\${OCTENDRA_LOG:-octendra=info,octendra_cli=info}"
+args=(serve --database-url "\${OCTENDRA_DATABASE_URL}" --bind "\${OCTENDRA_BIND:-127.0.0.1:8787}")
+[[ -n "\${OCTENDRA_VAULT_MASTER_PASSWORD_FILE:-}" ]] && args+=(--vault-master-password-file "\${OCTENDRA_VAULT_MASTER_PASSWORD_FILE}")
+[[ -n "\${OCTENDRA_PEER_SYNC_BIND:-}" ]] && args+=(--peer-sync-bind "\${OCTENDRA_PEER_SYNC_BIND}")
+exec "\${OCTENDRA_BIN}" "\${args[@]}"
+EOF
+  cat >"${RUN_DIR}/octendra-connector" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+set -a; . "${CONFIG_FILE}"; set +a
+export RUST_LOG="\${OCTENDRA_LOG:-octendra=info,octendra_cli=info}"
+args=(worker-daemon --database-url "\${OCTENDRA_DATABASE_URL}" --connector-id "\${OCTENDRA_CONNECTOR_ID}" --current-network "\${OCTENDRA_CURRENT_NETWORK:-local}" --host-key-policy "\${OCTENDRA_HOST_KEY_POLICY:-add}" --connect-timeout-seconds "\${OCTENDRA_CONNECT_TIMEOUT_SECONDS:-10}" --ssh-backend "\${OCTENDRA_SSH_BACKEND:-russh}" --pty-backend-mode "\${OCTENDRA_PTY_BACKEND_MODE:-auto}" --russh-inactivity-timeout-seconds "\${OCTENDRA_RUSSH_INACTIVITY_TIMEOUT_SECONDS:-30}" --pty-idle-ttl-seconds "\${OCTENDRA_PTY_IDLE_TTL_SECONDS:-3600}" --pty-busy-ttl-seconds "\${OCTENDRA_PTY_BUSY_TTL_SECONDS:-86400}" --artifact-root "\${OCTENDRA_ARTIFACT_ROOT}")
+[[ -n "\${OCTENDRA_VAULT_MASTER_PASSWORD_FILE:-}" ]] && args+=(--vault-master-password-file "\${OCTENDRA_VAULT_MASTER_PASSWORD_FILE}")
+[[ -n "\${OCTENDRA_KNOWN_HOSTS_PATH:-}" ]] && args+=(--known-hosts-path "\${OCTENDRA_KNOWN_HOSTS_PATH}")
+exec "\${OCTENDRA_BIN}" "\${args[@]}"
+EOF
+  chmod 0755 "${RUN_DIR}/octendra-api" "${RUN_DIR}/octendra-connector"
+}
+
+write_units() {
+  ensure_dirs
+  cat >"${API_UNIT}" <<EOF
+[Unit]
+Description=Octendra API
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${RUN_DIR}/octendra-api
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=default.target
+EOF
+  cat >"${CONNECTOR_UNIT}" <<EOF
+[Unit]
+Description=Octendra Connector
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${RUN_DIR}/octendra-connector
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=default.target
+EOF
+  chmod 0644 "${API_UNIT}" "${CONNECTOR_UNIT}"
+}
+
+migrate() {
+  load_config
+  "${BIN_PATH}" migrate --database-url "${OCTENDRA_DATABASE_URL}"
+}
+
+bootstrap_connector() {
+  load_config
+  mkdir -p "${OCTENDRA_ARTIFACT_ROOT}"
+  "${BIN_PATH}" bootstrap-connector --database-url "${OCTENDRA_DATABASE_URL}" --connector-id "${OCTENDRA_CONNECTOR_ID}" --connector-name "${OCTENDRA_CONNECTOR_NAME:-local-linux-connector}" --environment-id "${OCTENDRA_ENVIRONMENT_ID}" --environment-name "${OCTENDRA_ENVIRONMENT_NAME:-local-linux}" --environment-kind home-lan --trust-level owned --environment-description "Local Linux systemd user environment" --environment-notes "Created by scripts/octendra-systemd-service" --current-network "${OCTENDRA_CURRENT_NETWORK:-local}" >/dev/null
+}
+
+reload_units() { "${SYSTEMCTL}" --user daemon-reload; }
+
+stage() {
+  ensure_dirs; write_default_config; ensure_vault; build_release; install_binary
+  migrate; bootstrap_connector; write_wrappers; write_units; reload_units
+}
+
+command="${1:-}"
+case "${command}" in
+  install)
+    stage
+    "${SYSTEMCTL}" --user enable --now octendra-api.service octendra-connector.service
+    ;;
+  stage) stage ;;
+  render) ensure_dirs; write_default_config; ensure_vault; write_wrappers; write_units ;;
+  start) reload_units; "${SYSTEMCTL}" --user start octendra-api.service octendra-connector.service ;;
+  stop) "${SYSTEMCTL}" --user stop octendra-connector.service octendra-api.service ;;
+  restart) reload_units; "${SYSTEMCTL}" --user restart octendra-api.service octendra-connector.service ;;
+  status) "${SYSTEMCTL}" --user --no-pager status octendra-api.service octendra-connector.service ;;
+  logs) exec "${JOURNALCTL}" --user -f -u octendra-api.service -u octendra-connector.service ;;
+  migrate) load_config; migrate ;;
+  doctor) load_config; exec "${BIN_PATH}" doctor --database-url "${OCTENDRA_DATABASE_URL}" ;;
+  print-config)
+    write_default_config
+    printf 'config=%s\ndata=%s\nstate=%s\nbinary=%s\nunit_dir=%s\n' "${CONFIG_FILE}" "${DATA_DIR}" "${STATE_DIR}" "${BIN_PATH}" "${UNIT_DIR}"
+    ;;
+  *) usage; exit 64 ;;
+esac

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build on an owner's development machine; signing secrets never enter source or command arguments."""
-import argparse, hashlib, json, os, pathlib, secrets, shutil, subprocess, time
+import argparse, hashlib, json, os, pathlib, shutil, subprocess, time
+import android_identity
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 def digest(path):
@@ -12,7 +13,9 @@ def digest(path):
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--publish', action='store_true')
-    parser.add_argument('--existing-signing', action='store_true', help='Require the existing owner signing identity; never create or chmod signing material.')
+    parser.add_argument('--existing-signing', action='store_true', help='Existing signing is always required; retained for current build invocations.')
+    parser.add_argument('--signing-directory', type=pathlib.Path, default=pathlib.Path.home()/'.local/share/octendra-code/android-signing',
+                        help='Existing owner-private signing directory. Never create, rename, or chmod signing material.')
     parser.add_argument('--fixture-ca', type=pathlib.Path, help='Reuse an existing public debug fixture CA without generating private fixture material.')
     args=parser.parse_args()
     if args.publish:
@@ -21,21 +24,11 @@ def main():
     env=os.environ.copy(); env['ANDROID_HOME']=str(sdk); env['ANDROID_SDK_ROOT']=str(sdk)
     env.setdefault('JAVA_HOME','/Library/Java/JavaVirtualMachines/ibm-semeru-open-17.jdk/Contents/Home')
     env['PATH']=str(pathlib.Path(env['JAVA_HOME'])/'bin')+os.pathsep+env.get('PATH','')
-    secret=pathlib.Path.home()/'.local/share/remote-hosts-code/android-signing'
-    password=secret/'password'; key=secret/'release.p12'
-    if args.existing_signing:
-        if not password.is_file() or not key.is_file():
-            raise SystemExit('Existing owner signing identity unavailable; refusing to create a replacement.')
-    else:
-        secret.mkdir(parents=True,exist_ok=True,mode=0o700); secret.chmod(0o700)
-    if not password.exists():
-        with os.fdopen(os.open(password,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w') as f: f.write(secrets.token_urlsafe(48))
-    env['RH_ANDROID_STORE_PASSWORD']=password.read_text().strip(); env['RH_ANDROID_KEYSTORE']=str(key)
-    if not key.exists():
-        subprocess.run(['keytool','-genkeypair','-keystore',str(key),'-storetype','PKCS12','-storepass:env','RH_ANDROID_STORE_PASSWORD',
-          '-keypass:env','RH_ANDROID_STORE_PASSWORD','-alias','remote-hosts-android','-keyalg','RSA','-keysize','3072','-validity','10000',
-          '-dname','CN=Remote Hosts Android,OU=Owner Build,O=Remote Hosts'],env=env,check=True,capture_output=True)
-        key.chmod(0o600)
+    identity=android_identity.release_identity(ROOT)
+    try:
+        android_identity.configure_signing(env,args.signing_directory)
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
     if args.fixture_ca is not None:
         cert=args.fixture_ca.resolve(strict=True)
         if not cert.is_file(): raise SystemExit('Public fixture CA unavailable')
@@ -58,12 +51,12 @@ def main():
     tools=sdk/'build-tools/35.0.0'
     verify=subprocess.run([str(tools/'apksigner'),'verify','--verbose','--print-certs',str(apk)],env=env,check=True,capture_output=True,text=True).stdout
     badging=subprocess.run([str(tools/'aapt'),'dump','badging',str(apk)],check=True,capture_output=True,text=True).stdout
-    if 'f84d9b71f1a00f4b5e3084420e5cee3327053389983b2428d9bec71755e5539d' not in verify: raise SystemExit('Owner signing identity changed')
-    if 'application-debuggable' in badging: raise SystemExit('release is debuggable')
+    android_identity.verify_apk(badging,verify,identity)
     declared=[p for p in (ROOT/'android').rglob('*') if p.is_file() and not any(part in {'build','.gradle','.kotlin','.idea'} for part in p.relative_to(ROOT/'android').parts) and p.name!='local.properties']
     sources={str(p.relative_to(ROOT)):digest(p) for p in sorted(declared)}
-    report={'version':'0.11.1','version_code':1101,'source_commit':subprocess.run(['git','rev-parse','HEAD'],cwd=ROOT,check=True,capture_output=True,text=True).stdout.strip(),'package':'fun.hackerlife.octendra','apk_sha256':digest(apk),'bytes':apk.stat().st_size,'built_at':int(time.time()),
-      'source_hashes':sources,'signature':verify,'badging':badging,'runtime_acceptance':'separate receipt required','signing_material_in_package':False}
+    report={**identity,'source_commit':subprocess.run(['git','rev-parse','HEAD'],cwd=ROOT,check=True,capture_output=True,text=True).stdout.strip(),'apk_sha256':digest(apk),'bytes':apk.stat().st_size,'built_at':int(time.time()),
+      'source_hashes':sources,'signing_certificate_sha256':android_identity.OWNER_CERT_SHA256,'signature_verified':True,
+      'badging':badging,'runtime_acceptance':'separate receipt required','signing_material_in_package':False}
     reports=ROOT/'android/app/build/reports'; reports.mkdir(parents=True,exist_ok=True)
     (reports/'delivery.json').write_text(json.dumps(report,indent=2,ensure_ascii=False)+'\n')
     print(json.dumps({'apk':str(apk.relative_to(ROOT)),'sha256':report['apk_sha256'],'bytes':report['bytes'],'signed_release':True}))

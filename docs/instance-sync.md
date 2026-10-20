@@ -1,6 +1,13 @@
 # Instance Sync
 
-`Instance Sync` lets independently installed Remote Hosts instances exchange durable operational
+The Octendra source uses protocol version 2, the `x-octendra-sync-token`
+header, and the version-2 credential envelope domain. Upgrade both endpoints
+together before resuming synchronization. A mixed-version envelope is rejected;
+the durable instance UUID, stored credentials, and existing peer permissions are
+preserved. Changing the advertised wire version does not rewrite the original
+instance identity record.
+
+`Instance Sync` lets independently installed Octendra instances exchange durable operational
 knowledge and user-authorized SSH credentials directly. It replaces a handoff made from a SQLite
 copy, Git bundles, ad-hoc archives, temporary incoming folders, and a second round of manual
 reconstruction.
@@ -46,10 +53,10 @@ The API exposes three endpoints:
 - `POST /v1/instance-sync/export`: authenticated export for pull workflows.
 - `POST /v1/instance-sync/receive`: authenticated push and apply.
 
-The token is carried in `x-remote-hosts-sync-token`. A peer must be explicitly configured on each
+The token is carried in `x-octendra-sync-token`. A peer must be explicitly configured on each
 receiving side. The normal operator API remains loopback-only when the local vault is unlocked.
 For a direct peer, start the restricted listener on a separate port, for example
-`remote-hosts serve --bind 127.0.0.1:8787 --peer-sync-bind 0.0.0.0:8788`. That listener exposes
+`octendra serve --bind 127.0.0.1:8787 --peer-sync-bind 0.0.0.0:8788`. That listener exposes
 only health, identity, export, and receive routes; it cannot serve the admin UI, credential
 inspection or management routes, Workspaces, PTYs, or command APIs. Use HTTPS for any routed or
 public endpoint. HTTP is supported only for an explicitly trusted private network or an SSH/VPN
@@ -67,9 +74,9 @@ rejected. One bad record does not corrupt or invalidate already applied records.
 
 The compact MCP profile adds two tools:
 
-1. `remote_hosts_configure_instance_sync_peer` stores one approved peer endpoint and pairing token
+1. `octendra_configure_instance_sync_peer` stores one approved peer endpoint and pairing token
    locally. The default collection set is `inventory`, `knowledge`, and `credentials`.
-2. `remote_hosts_sync_instance_peer` pushes the bounded durable envelope and returns only
+2. `octendra_sync_instance_peer` pushes the bounded durable envelope and returns only
    sent/applied/duplicate/conflict/rejected counts plus short actionable details.
 
 Both sides need the same pairing token configured for the direction they accept. For bidirectional
@@ -80,7 +87,7 @@ receipts. A task should inspect nonzero `conflicts` rather than repeatedly retry
 ## What This Fixes
 
 The Smart Mine handoff that motivated this work mixed a 6.3 GiB cache/archive package with a raw
-`remote-hosts.sqlite` snapshot, active repositories, paused markers, checksums, and a manually
+`octendra.sqlite` snapshot, active repositories, paused markers, checksums, and a manually
 selected incoming directory. It could prove a historical snapshot, but it could not safely apply
 live state and could not converge later changes.
 

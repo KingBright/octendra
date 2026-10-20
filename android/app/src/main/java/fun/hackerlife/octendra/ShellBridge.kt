@@ -41,7 +41,7 @@ class ShellBridge(private val context: Context) {
     @Synchronized fun open() {
         if (socketName != null) return
         demand(controls(context).getBoolean("shell_enabled", false), "shell_not_enabled_locally")
-        socketName = "rh-${Process.myUid()}-${nonce().take(32)}"
+        socketName = "octendra-${Process.myUid()}-${nonce().take(32)}"
     }
     /** Called only by BridgeProvider after a real Binder UID check. */
     @Synchronized fun attach(name: String, peerUid: Int): ParcelFileDescriptor {
@@ -65,7 +65,7 @@ class ShellBridge(private val context: Context) {
             } catch (_: Exception) {
                 discard(candidate)
             }
-        }, "rh-shell-handshake").apply { isDaemon = true; start() }
+        }, "octendra-shell-handshake").apply { isDaemon = true; start() }
         return pair[1]
     }
     @Synchronized private fun discard(candidate: Channel) {

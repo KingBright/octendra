@@ -1,7 +1,7 @@
 # Desktop code access
 
 Codex can connect directly to the same Code Gateway as ChatGPT and Gemini Spark.
-This is separate from the older `remote-hosts mcp-stdio` SSH inventory/transport
+This is separate from the older `octendra mcp-stdio` SSH inventory/transport
 service; keep that service for managed SSH and infrastructure operations.
 
 Gateway 0.10.19 adds native OAuth callbacks for `http://127.0.0.1:<port>/callback`
@@ -17,8 +17,8 @@ current listener's exact origin; this does not add a browser CORS origin.
 Use the deployment's canonical public HTTPS origin, without an alternate port:
 
 ```sh
-codex mcp add remote-hosts-code --url https://YOUR_GATEWAY/mcp
-codex mcp login remote-hosts-code
+codex mcp add octendra-code --url https://YOUR_GATEWAY/mcp
+codex mcp login octendra-code
 ```
 
 If adding the server already completed login, a second login is unnecessary.
@@ -31,7 +31,7 @@ configured as an indefinitely authenticated desktop service.
 The resulting user-level entry is:
 
 ```toml
-[mcp_servers.remote-hosts-code]
+[mcp_servers.octendra-code]
 url = "https://YOUR_GATEWAY/mcp"
 startup_timeout_sec = 30
 tool_timeout_sec = 60

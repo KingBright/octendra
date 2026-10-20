@@ -105,9 +105,8 @@ def remove_path(path: Path) -> int:
 
 
 WORKSPACE_ARTIFACT_PREFIXES = (
-    "remote_hosts",
-    "remote-hosts",
-    "libremote_hosts",
+    "octendra",
+    "liboctendra",
     "review_regressions",
     "reliability_",
     "experience_contract",
@@ -465,9 +464,9 @@ def serve_worker(queue_dir: Path = QUEUE_DIR, once: bool = False):
 
 
 def verify_static_contracts(root: Path):
-    cargo_toml = tomllib.loads((root / "crates/remote-hosts-code/Cargo.toml").read_text())
+    cargo_toml = tomllib.loads((root / "crates/octendra-code/Cargo.toml").read_text())
     version = cargo_toml["package"]["version"]
-    contract_path = root / "crates/remote-hosts-code/adapter-contract.json"
+    contract_path = root / "crates/octendra-code/adapter-contract.json"
     contract = json.loads(contract_path.read_text())
 
     if contract.get("version") != version:
@@ -496,11 +495,11 @@ def verify_static_contracts(root: Path):
     if missing_schemes:
         raise ValueError(f"tools missing _meta.securitySchemes: {missing_schemes}")
 
-    skill_dir = root / "skills/remote-hosts-agent"
+    skill_dir = root / "skills/octendra-agent"
     if not (skill_dir / "SKILL.md").is_file():
-        raise ValueError("missing skills/remote-hosts-agent/SKILL.md")
+        raise ValueError("missing skills/octendra-agent/SKILL.md")
 
-    for crate in ("remote-hosts-code", "remote-hosts-mcp", "remote-hosts-api", "remote-hosts-cli"):
+    for crate in ("octendra-code", "octendra-mcp", "octendra-api", "octendra-cli"):
         build_rs = root / "crates" / crate / "build.rs"
         if not build_rs.is_file() or "/usr/lib/swift" not in build_rs.read_text():
             raise ValueError(f"missing macOS Swift Concurrency rpath in {build_rs.relative_to(root)}")
@@ -622,14 +621,14 @@ def run_cargo_checks(root: Path, toolchain: dict, mode: str):
         return {"mode": "full", "report": str(report.relative_to(root)), "cache_prune": step.get("cache_prune")}
 
     commands = [
-        ["cargo", "fmt", "-p", "remote-hosts-code", "-p", "remote-hosts-release", "--", "--check"],
-        ["cargo", "clippy", "-p", "remote-hosts-code", "-p", "remote-hosts-release", "--all-targets", "--locked", "--", "-D", "warnings"],
-        ["cargo", "test", "-p", "remote-hosts-mcp", "--lib", "--locked"],
+        ["cargo", "fmt", "-p", "octendra-code", "-p", "octendra-release", "--", "--check"],
+        ["cargo", "clippy", "-p", "octendra-code", "-p", "octendra-release", "--all-targets", "--locked", "--", "-D", "warnings"],
+        ["cargo", "test", "-p", "octendra-mcp", "--lib", "--locked"],
         [
             "cargo",
             "test",
             "-p",
-            "remote-hosts-code",
+            "octendra-code",
             "--lib",
             "--test",
             "review_regressions",
@@ -660,7 +659,7 @@ def main():
     parser.add_argument("--prune", action="store_true", help="prune superseded build artifacts and retired slot targets immediately")
     parser.add_argument("--release", action="store_true", help="run full release-code.py packaging pipeline and prune build cache")
     parser.add_argument("--deploy", type=Path, metavar="CONFIG_JSON", help="deploy verified current release to Gateway and observe Agent auto-upgrade convergence")
-    parser.add_argument("--binary", type=Path, help="optional compiled remote-hosts-code binary for isolated CLI smoke tests")
+    parser.add_argument("--binary", type=Path, help="optional compiled octendra-code binary for isolated CLI smoke tests")
     parser.add_argument("--exec", nargs=argparse.REMAINDER, help="execute an allowed build/test command directly or via host worker")
     args = parser.parse_args()
 
@@ -684,8 +683,8 @@ def main():
         return
     if args.deploy:
         cfg = args.deploy.resolve(strict=True)
-        ver = tomllib.loads((ROOT / "crates/remote-hosts-code/Cargo.toml").read_text())["package"]["version"]
-        pkg = ROOT / "dist" / "remote-hosts-code-current"
+        ver = tomllib.loads((ROOT / "crates/octendra-code/Cargo.toml").read_text())["package"]["version"]
+        pkg = ROOT / "dist" / "octendra-code-current"
         rep_dir = ROOT / "target" / "dev-verify" / f"deploy-{ver}-{int(time.time())}"
         res = execute_step(
             [

@@ -1,10 +1,10 @@
-# Remote Hosts Android 0.1.0
+# Octendra Android 0.1.0
 
-这是安卓**被控设备端**：手机在完成接入和授权后，可由 Remote Hosts 网关及其已授权调用方操作。它不是用来控制电脑的 Remote Play 客户端。
+这是安卓**被控设备端**：手机在完成接入和授权后，可由 Octendra 网关及其已授权调用方操作。它不是用来控制电脑的 Weavelo 客户端。
 
 ## 安装和配置
 
-安装 `remote-hosts-android-0.1.0.apk`，打开 Remote Hosts。安装包没有内置服务器地址、设备令牌、登录密码或用户数据。
+安装 `octendra-android-0.1.0.apk`，打开 Octendra。安装包没有内置服务器地址、设备令牌、登录密码或用户数据。
 
 在服务端为手机注册一个独立设备，得到配置。不要复用电脑的设备 ID 或令牌。应用支持手动填写，也支持导入 JSON。必填字段：
 
@@ -47,7 +47,7 @@ python3 scripts/android-activate-shell.py --serial <ADB设备序列号>
 
 ## 在聊天中使用
 
-手机注册、连接并完成所需授权后，可让已连接 Remote Hosts 的助手先检查设备列表，再读取该手机的能力。上层复用现有 `workspace_open`、`terminal_exec`、`file_upload`、`file_download` 和操作回执工具，安卓动作由 `android ...` 命令分发，因此不依赖新增聊天工具入口。
+手机注册、连接并完成所需授权后，可让已连接 Octendra 的助手先检查设备列表，再读取该手机的能力。上层复用现有 `workspace_open`、`terminal_exec`、`file_upload`、`file_download` 和操作回执工具，安卓动作由 `android ...` 命令分发，因此不依赖新增聊天工具入口。
 
 例如可以提出“查看这台手机当前页面”“打开某应用并检查页面”“安装我提供的 APK，然后确认包名和版本”。涉及发送、删除、付款等实际副作用的操作仍须遵守用户的具体授权。
 

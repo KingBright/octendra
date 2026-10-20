@@ -13,7 +13,7 @@ FORBIDDEN = (
     "Mac-" + "Studio",
     "ba3bf113" + "-",
     "8af88e35" + "-",
-    "/volume1/docker/" + "remote-hosts-code",
+    "/volume1/docker/" + "octendra-code",
     "root@" + "hackerlife" + ".fun",
 )
 

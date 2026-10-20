@@ -139,7 +139,7 @@ def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=N
     manifest = release_current.snapshot_evidence(snapshot, ROOT)
     if expected_source_id is not None and manifest['snapshot_id'] != expected_source_id:
         raise ValueError('main inputs changed after launch; preserve the original operation and edits')
-    version = tomllib.loads((ROOT/'crates/remote-hosts-code/Cargo.toml').read_text())['package']['version']
+    version = tomllib.loads((ROOT/'crates/octendra-code/Cargo.toml').read_text())['package']['version']
     report.parent.mkdir(parents=True, exist_ok=True)
     if report.exists():
         previous = load(report)
@@ -191,9 +191,9 @@ def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=N
             state['verification_gate'] = 'passed'
             build_slot.atomic_json(report, state)
             if not verify_only:
-                for name, args in [('macos_release', ['cargo', 'build', '-p', 'remote-hosts-code', '-p', 'remote-hosts-cli', '--release', '--locked']),
-                                   ('linux_release', ['cargo', 'zigbuild', '-p', 'remote-hosts-code', '-p', 'remote-hosts-cli', '--release', '--locked', '--target', 'x86_64-unknown-linux-musl']),
-                                   ('windows_release', ['cargo', 'xwin', 'build', '-p', 'remote-hosts-code', '-p', 'remote-hosts-cli', '--release', '--locked', '--target', 'x86_64-pc-windows-msvc'])]:
+                for name, args in [('macos_release', ['cargo', 'build', '-p', 'octendra-code', '-p', 'octendra-cli', '--release', '--locked']),
+                                   ('linux_release', ['cargo', 'zigbuild', '-p', 'octendra-code', '-p', 'octendra-cli', '--release', '--locked', '--target', 'x86_64-unknown-linux-musl']),
+                                   ('windows_release', ['cargo', 'xwin', 'build', '-p', 'octendra-code', '-p', 'octendra-cli', '--release', '--locked', '--target', 'x86_64-pc-windows-msvc'])]:
                     # The native executable supplies the release machine contract,
                     # including when only cross-platform binaries are packaged.
                     if name != 'macos_release' and name.removesuffix('_release') not in platforms:

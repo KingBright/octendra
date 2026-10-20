@@ -1,6 +1,6 @@
 # Windows Installation and Operations
 
-Remote Hosts runs natively on 64-bit Windows 10/11 and Windows Server. The release is cross-compiled
+Octendra runs natively on 64-bit Windows 10/11 and Windows Server. The release is cross-compiled
 to the MSVC target from macOS or Linux with Rust and `cargo-xwin`; a Windows build machine, Visual
 Studio, NSSM, and WinSW are not required.
 
@@ -10,8 +10,8 @@ Extract the Windows ZIP, open Windows PowerShell in the extracted directory, and
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\remote-hosts-service.ps1 Install
-.\remote-hosts-service.ps1 Status
+.\octendra-service.ps1 Install
+.\octendra-service.ps1 Status
 ```
 
 Open <http://127.0.0.1:8787/admin> after both tasks report `Running`.
@@ -19,8 +19,8 @@ Open <http://127.0.0.1:8787/admin> after both tasks report `Running`.
 The installer does not require an administrator shell. It creates two current-user Task Scheduler
 tasks that start at logon and restart after failures:
 
-- `Remote Hosts API`
-- `Remote Hosts Connector`
+- `Octendra API`
+- `Octendra Connector`
 
 Current-user tasks are deliberate. The connector keeps access to the same SSH Agent, private keys,
 `known_hosts`, user profile, and encrypted local vault used by Codex or Antigravity. A LocalSystem
@@ -28,22 +28,22 @@ Windows service would have a different identity and would make those credentials
 
 ## Lifecycle
 
-Run the installed manager at `%LOCALAPPDATA%\RemoteHosts\bin\remote-hosts-service.ps1`, or use the
+Run the installed manager at `%LOCALAPPDATA%\Octendra\bin\octendra-service.ps1`, or use the
 copy in a newly extracted release for `Update`:
 
 ```powershell
-.\remote-hosts-service.ps1 Stage
-.\remote-hosts-service.ps1 Update
-.\remote-hosts-service.ps1 Restart
-.\remote-hosts-service.ps1 Start
-.\remote-hosts-service.ps1 Stop
-.\remote-hosts-service.ps1 Status
-.\remote-hosts-service.ps1 Logs
-.\remote-hosts-service.ps1 Ui
-.\remote-hosts-service.ps1 Skills
-.\remote-hosts-service.ps1 Doctor
-.\remote-hosts-service.ps1 OptimizeStorage
-.\remote-hosts-service.ps1 PrintConfig
+.\octendra-service.ps1 Stage
+.\octendra-service.ps1 Update
+.\octendra-service.ps1 Restart
+.\octendra-service.ps1 Start
+.\octendra-service.ps1 Stop
+.\octendra-service.ps1 Status
+.\octendra-service.ps1 Logs
+.\octendra-service.ps1 Ui
+.\octendra-service.ps1 Skills
+.\octendra-service.ps1 Doctor
+.\octendra-service.ps1 OptimizeStorage
+.\octendra-service.ps1 PrintConfig
 ```
 
 `Stage` installs the new executable into a versioned release directory while the old executable is
@@ -66,16 +66,16 @@ when the database, vault key, artifacts, logs, and installed releases should als
 
 | Purpose | Default path |
 | --- | --- |
-| Root | `%LOCALAPPDATA%\RemoteHosts` |
-| Configuration | `%LOCALAPPDATA%\RemoteHosts\config\service.json` |
-| Vault master key | `%LOCALAPPDATA%\RemoteHosts\config\vault-master-password` |
-| SQLite database | `%LOCALAPPDATA%\RemoteHosts\data\remote-hosts.sqlite` |
-| Output artifacts | `%LOCALAPPDATA%\RemoteHosts\data\artifacts` |
-| Hot-swappable UI | `%LOCALAPPDATA%\RemoteHosts\data\ui\admin.html` |
-| Versioned binaries | `%LOCALAPPDATA%\RemoteHosts\releases` |
-| Stable MCP launcher | `%LOCALAPPDATA%\RemoteHosts\bin\remote-hosts-launcher.exe` |
-| Logs | `%LOCALAPPDATA%\RemoteHosts\logs` |
-| Service manager | `%LOCALAPPDATA%\RemoteHosts\bin\remote-hosts-service.ps1` |
+| Root | `%LOCALAPPDATA%\Octendra` |
+| Configuration | `%LOCALAPPDATA%\Octendra\config\service.json` |
+| Vault master key | `%LOCALAPPDATA%\Octendra\config\vault-master-password` |
+| SQLite database | `%LOCALAPPDATA%\Octendra\data\octendra.sqlite` |
+| Output artifacts | `%LOCALAPPDATA%\Octendra\data\artifacts` |
+| Hot-swappable UI | `%LOCALAPPDATA%\Octendra\data\ui\admin.html` |
+| Versioned binaries | `%LOCALAPPDATA%\Octendra\releases` |
+| Stable MCP launcher | `%LOCALAPPDATA%\Octendra\bin\octendra-launcher.exe` |
+| Logs | `%LOCALAPPDATA%\Octendra\logs` |
+| Service manager | `%LOCALAPPDATA%\Octendra\bin\octendra-service.ps1` |
 
 The generated vault key is protected with a current-user ACL. Host passwords and private keys stay
 inside the encrypted database and are never written into `service.json`.
@@ -85,7 +85,7 @@ does not add the Unix-only third slash used by absolute macOS paths.
 ## Direct Instance Sync
 
 `service.json` keeps `PeerSyncBind` empty by default, so the full API stays on
-`127.0.0.1:8787`. To accept direct synchronization from one approved Remote Hosts peer, set
+`127.0.0.1:8787`. To accept direct synchronization from one approved Octendra peer, set
 `PeerSyncBind` to an otherwise unused address such as `0.0.0.0:8788`, then run `Update` during a
 drained maintenance window. This second listener exposes only health, identity, and authenticated
 instance-sync routes; it does not expose the UI, credential inspection or management routes,
@@ -98,8 +98,8 @@ Use a private LAN, VPN, or SSH tunnel. A routed or public listener must be prote
 
 `Install`, `Update`, and `Skills` synchronize the bundled Skill into:
 
-- `%USERPROFILE%\.codex\skills\remote-hosts-agent`
-- `%USERPROFILE%\.gemini\config\skills\remote-hosts-agent`
+- `%USERPROFILE%\.codex\skills\octendra-agent`
+- `%USERPROFILE%\.gemini\config\skills\octendra-agent`
 
 Run `PrintConfig` to display the exact `mcp-stdio` command and paths for the current installation.
 The MCP configuration points to the small stable native launcher, which reads
@@ -115,7 +115,7 @@ bounded SSH transport pool.
 The Windows connector uses the native Rust `russh` backend. It supports pooled exec channels,
 PowerShell, native PTYs, SFTP upload/download, output artifacts, password fallback, and bounded
 public-key bootstrap. It can authenticate through the Windows OpenSSH Agent named pipe, Pageant,
-default user keys, or encrypted Remote Hosts credentials.
+default user keys, or encrypted Octendra credentials.
 
 The Unix-only OpenSSH `ControlMaster` compatibility backend is intentionally unavailable. Selecting
 `--ssh-backend openssh` on Windows returns an explicit platform error instead of silently falling
@@ -137,12 +137,12 @@ scripts/build-windows-cross.sh
 On Debian or Ubuntu, install `nasm` and `zip` from the system package manager. The build script
 requires the already installed MSVC target, `cargo-xwin` 0.23.0 or newer and NASM, then compiles
 with `--locked --release` and one job in primary main using the established `~/rust-target`.
-It replaces the fixed `dist/remote-hosts-windows-x86_64-current` directory, matching `.zip` and
+It replaces the fixed `dist/octendra-windows-x86_64-current` directory, matching `.zip` and
 `.zip.sha256` through the shared current transaction after validating package bytes. The archive
 contains both native CLI and launcher executables, service manager, external admin UI, release
 manifest, Windows guide, and Agent Skill. It records source identity, artifact hashes and the
 build receipt; cross-compilation is not Windows runtime or signing acceptance. Alternate
-`REMOTE_HOSTS_DIST_DIR` paths are refused; old version/commit packages and evidence are preserved.
+`OCTENDRA_DIST_DIR` paths are refused; old version/commit packages and evidence are preserved.
 Failure or the next entry recovers only this transaction's owned, inactive temporary paths.
 
 The MSVC runtime is normally present on supported Windows systems. If Windows reports a missing

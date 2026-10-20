@@ -1,11 +1,11 @@
 # Architecture and Runtime
 
-This document describes the implementation details behind Remote Hosts. For product positioning and
+This document describes the implementation details behind Octendra. For product positioning and
 the shortest setup path, start with the [README](../README.md).
 
 ## System Planes
 
-Remote Hosts separates four concerns while keeping them in one deployable Rust workspace:
+Octendra separates four concerns while keeping them in one deployable Rust workspace:
 
 - The **Knowledge Plane** stores canonical hosts, facts, software installs, durable notes, and
   operation history.
@@ -24,15 +24,15 @@ alive solely because an old database row says a logical session was connected.
 
 | Crate | Responsibility |
 | --- | --- |
-| `remote-hosts-domain` | Shared IDs, entities, state enums, and operation types |
-| `remote-hosts-core` | Command profiles, policy, redaction, state aggregation, and supervision |
-| `remote-hosts-vault` | Argon2id and XChaCha20-Poly1305 local credential encryption |
-| `remote-hosts-db` | SQLx migrations and repositories |
-| `remote-hosts-connector` | OpenSSH and `russh` transports, pooling, PTYs, and workers |
-| `remote-hosts-api` | Axum HTTP API and administration UI |
-| `remote-hosts-mcp` | MCP profiles, schemas, handlers, and Agent Session identity |
-| `remote-hosts-sync` | Direct instance-sync protocol for inventory, knowledge, and peer-sealed credentials; receipts, conflicts, and HTTP client |
-| `remote-hosts-cli` | Doctor, migration, API, MCP, and connector entry points |
+| `octendra-domain` | Shared IDs, entities, state enums, and operation types |
+| `octendra-core` | Command profiles, policy, redaction, state aggregation, and supervision |
+| `octendra-vault` | Argon2id and XChaCha20-Poly1305 local credential encryption |
+| `octendra-db` | SQLx migrations and repositories |
+| `octendra-connector` | OpenSSH and `russh` transports, pooling, PTYs, and workers |
+| `octendra-api` | Axum HTTP API and administration UI |
+| `octendra-mcp` | MCP profiles, schemas, handlers, and Agent Session identity |
+| `octendra-sync` | Direct instance-sync protocol for inventory, knowledge, and peer-sealed credentials; receipts, conflicts, and HTTP client |
+| `octendra-cli` | Doctor, migration, API, MCP, and connector entry points |
 
 ## Transport Reuse and Capacity
 
@@ -178,7 +178,7 @@ write lease, and then allows Workspace expiry.
 
 ## File Transfer
 
-`remote_hosts_upload_file` and `remote_hosts_download_file` are queued Workspace operations. They
+`octendra_upload_file` and `octendra_download_file` are queued Workspace operations. They
 enforce size, timeout, overwrite, destination, and mode policy; verify SHA-256; and atomically place
 data from a same-directory temporary file.
 
@@ -256,12 +256,12 @@ performs the same bounded reconciliation at startup and on heartbeats. Agent Ses
 not relaxed: one task never reuses another task's Workspace even when both share one pooled SSH
 transport.
 
-`remote_hosts_wait_runtime_events` and the HTTP runtime wait endpoint require explicit `live_only` or
+`octendra_wait_runtime_events` and the HTTP runtime wait endpoint require explicit `live_only` or
 `after_cursor` behavior. This prevents retained history from being mistaken for a new event and
 allows callers to resume from the snapshot cursor without losing transitions.
 
 Agent Work Context version 1 adds a session-scoped decision surface without changing runtime
-snapshot version 11. `remote_hosts_get_agent_work_context` implicitly binds the current MCP Agent
+snapshot version 11. `octendra_get_agent_work_context` implicitly binds the current MCP Agent
 Session and supports either `snapshot` or cursor-based `wait`. It returns active work across hosts,
 new terminal results after the supplied cursor, type-only PTY interaction, exact coordination
 scopes, bounded transfer progress, active-host route/transport/channel digests, and one
@@ -306,27 +306,27 @@ transport failure may degrade SSH health.
 
 The default `agent` profile exposes 22 task-oriented tools:
 
-- `remote_hosts_list_hosts`
-- `remote_hosts_ensure_host`
-- `remote_hosts_store_host_credential`
-- `remote_hosts_search_knowledge`
-- `remote_hosts_record_knowledge`
-- `remote_hosts_get_host_runtime_snapshot`
-- `remote_hosts_get_agent_work_context`
-- `remote_hosts_prepare_workspace`
-- `remote_hosts_run_in_workspace`
-- `remote_hosts_upload_file`
-- `remote_hosts_download_file`
-- `remote_hosts_wait_workspace_state`
-- `remote_hosts_get_workspace_result`
-- `remote_hosts_read_output_artifact_content`
-- `remote_hosts_open_workspace_pty_session`
-- `remote_hosts_queue_pty_input`
-- `remote_hosts_read_pty_output`
-- `remote_hosts_close_pty_session`
-- `remote_hosts_wait_runtime_events`
-- `remote_hosts_configure_instance_sync_peer`
-- `remote_hosts_sync_instance_peer`
+- `octendra_list_hosts`
+- `octendra_ensure_host`
+- `octendra_store_host_credential`
+- `octendra_search_knowledge`
+- `octendra_record_knowledge`
+- `octendra_get_host_runtime_snapshot`
+- `octendra_get_agent_work_context`
+- `octendra_prepare_workspace`
+- `octendra_run_in_workspace`
+- `octendra_upload_file`
+- `octendra_download_file`
+- `octendra_wait_workspace_state`
+- `octendra_get_workspace_result`
+- `octendra_read_output_artifact_content`
+- `octendra_open_workspace_pty_session`
+- `octendra_queue_pty_input`
+- `octendra_read_pty_output`
+- `octendra_close_pty_session`
+- `octendra_wait_runtime_events`
+- `octendra_configure_instance_sync_peer`
+- `octendra_sync_instance_peer`
 
 The `admin` profile adds low-level host, environment, credential-reference, access-path, fact,
 connector, and Workspace maintenance. The `full` profile exists for development and debugging.
@@ -345,7 +345,7 @@ The loopback API groups its endpoints by responsibility:
 - Command catalog: `/v1/command-profiles`
 - Instance Sync: `/v1/instance-sync/identity`, authenticated export, and authenticated receive
 
-The source routes and request schemas in `remote-hosts-api` are authoritative; this grouped list
+The source routes and request schemas in `octendra-api` are authoritative; this grouped list
 avoids duplicating every route signature in overview documentation.
 
 ## Compact Agent Responses and Operator Activity
@@ -366,7 +366,7 @@ returns raw private input payloads or secret material.
 
 ## Security Boundaries
 
-Remote Hosts intentionally avoids third-party vault coupling. Its local vault key is generated with
+Octendra intentionally avoids third-party vault coupling. Its local vault key is generated with
 mode `0600`; encrypted credentials live in the database, and only metadata leaves credential APIs.
 The full operator HTTP API is restricted to a loopback bind regardless of vault state.
 Only the separate authenticated, restricted peer-sync listener may use a non-loopback bind.

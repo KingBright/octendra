@@ -3000,14 +3000,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
-name = "remote-hosts-admin"
+name = "octendra-admin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "fs2",
  "nix 0.30.1",
- "remote-hosts-admin-win32",
+ "octendra-admin-win32",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3017,7 +3017,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "remote-hosts-admin-win32"
+name = "octendra-admin-win32"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3025,16 +3025,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "remote-hosts-api"
+name = "octendra-api"
 version = "0.1.0"
 dependencies = [
  "axum",
- "remote-hosts-core",
- "remote-hosts-db",
- "remote-hosts-domain",
- "remote-hosts-mcp",
- "remote-hosts-sync",
- "remote-hosts-vault",
+ "octendra-core",
+ "octendra-db",
+ "octendra-domain",
+ "octendra-mcp",
+ "octendra-sync",
+ "octendra-vault",
  "secrecy",
  "serde",
  "serde_json",
@@ -3049,18 +3049,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "remote-hosts-cli"
+name = "octendra-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "remote-hosts-api",
- "remote-hosts-connector",
- "remote-hosts-core",
- "remote-hosts-db",
- "remote-hosts-domain",
- "remote-hosts-mcp",
- "remote-hosts-vault",
+ "octendra-api",
+ "octendra-connector",
+ "octendra-core",
+ "octendra-db",
+ "octendra-domain",
+ "octendra-mcp",
+ "octendra-vault",
  "secrecy",
  "serde_json",
  "tokio",
@@ -3069,8 +3069,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "remote-hosts-code"
-version = "0.11.2"
+name = "octendra-code"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "argon2 0.5.3",
@@ -3088,9 +3088,9 @@ dependencies = [
  "nix 0.30.1",
  "portable-pty",
  "regex",
- "remote-hosts-admin",
- "remote-hosts-desktop-protocol",
- "remote-hosts-token-output",
+ "octendra-admin",
+ "octendra-desktop-protocol",
+ "octendra-token-output",
  "reqwest",
  "rmcp",
  "screencapturekit",
@@ -3119,7 +3119,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "remote-hosts-connector"
+name = "octendra-connector"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3127,10 +3127,10 @@ dependencies = [
  "md-5",
  "openssh",
  "openssh-sftp-client",
- "remote-hosts-core",
- "remote-hosts-db",
- "remote-hosts-domain",
- "remote-hosts-vault",
+ "octendra-core",
+ "octendra-db",
+ "octendra-domain",
+ "octendra-vault",
  "reqwest",
  "russh",
  "russh-sftp",
@@ -3149,12 +3149,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "remote-hosts-core"
+name = "octendra-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "regex",
- "remote-hosts-domain",
+ "octendra-domain",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3165,11 +3165,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "remote-hosts-db"
+name = "octendra-db"
 version = "0.1.0"
 dependencies = [
  "postcard",
- "remote-hosts-domain",
+ "octendra-domain",
  "serde",
  "serde_json",
  "sqlx",
@@ -3182,7 +3182,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "remote-hosts-desktop-protocol"
+name = "octendra-desktop-protocol"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -3190,7 +3190,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "remote-hosts-domain"
+name = "octendra-domain"
 version = "0.1.0"
 dependencies = [
  "schemars",
@@ -3201,20 +3201,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "remote-hosts-launcher"
+name = "octendra-launcher"
 version = "0.1.0"
 
 [[package]]
-name = "remote-hosts-mcp"
+name = "octendra-mcp"
 version = "0.1.0"
 dependencies = [
- "remote-hosts-code",
- "remote-hosts-core",
- "remote-hosts-db",
- "remote-hosts-domain",
- "remote-hosts-sync",
- "remote-hosts-token-output",
- "remote-hosts-vault",
+ "octendra-code",
+ "octendra-core",
+ "octendra-db",
+ "octendra-domain",
+ "octendra-sync",
+ "octendra-token-output",
+ "octendra-vault",
  "reqwest",
  "rmcp",
  "schemars",
@@ -3231,7 +3231,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "remote-hosts-release"
+name = "octendra-release"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3246,14 +3246,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "remote-hosts-sync"
+name = "octendra-sync"
 version = "0.1.0"
 dependencies = [
  "base64",
  "chacha20poly1305",
- "remote-hosts-db",
- "remote-hosts-domain",
- "remote-hosts-vault",
+ "octendra-db",
+ "octendra-domain",
+ "octendra-vault",
  "reqwest",
  "secrecy",
  "serde",
@@ -3268,7 +3268,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "remote-hosts-token-output"
+name = "octendra-token-output"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -3276,7 +3276,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "remote-hosts-vault"
+name = "octendra-vault"
 version = "0.1.0"
 dependencies = [
  "argon2 0.5.3",

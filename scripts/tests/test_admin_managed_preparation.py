@@ -32,17 +32,17 @@ class ManagedPreparationTests(unittest.TestCase):
         self.assertFalse(json.loads((root/'policy.json').read_text())['enabled'])
         grant=json.loads((root/'service-grant.json').read_text())
         self.assertFalse(grant['enabled']);self.assertEqual(grant['expires_at'],0)
-        self.assertEqual(grant['unit'],'remote-hosts-code-agent.service')
+        self.assertEqual(grant['unit'],'octendra-code-agent.service')
         self.assertFalse(any(p.suffix in {'.py','.sh'} for p in root.iterdir()))
     def test_service_points_to_native_closed_profile_without_cleanup(self):
         self.prepare();text=(self.root/'bundle/service.template').read_text()
-        self.assertIn('linux-helper serve',text);self.assertIn('--grant /var/lib/remote-hosts-admin/service-grant.json',text)
+        self.assertIn('linux-helper serve',text);self.assertIn('--grant /var/lib/octendra-admin/service-grant.json',text)
         self.assertNotIn(' apply ',text);self.assertNotIn('sing-box',text)
         self.assertNotIn('/etc/systemd/system /var',text)
     def test_manifest_covers_every_installable_member_and_source_identity(self):
         report=self.prepare();root=self.root/'bundle'
         self.assertEqual(report['protocol'],2);self.assertEqual(report['source_commit'],'a'*40)
-        self.assertEqual(set(report['files']),{'remote-hosts-admin','policy.json','service-grant.json','service.template','INSTALL.txt'})
+        self.assertEqual(set(report['files']),{'octendra-admin','policy.json','service-grant.json','service.template','INSTALL.txt'})
         for name,digest in report['files'].items():self.assertEqual(m.sha(root/name),digest)
         self.assertEqual(m.sha(root/'manifest.json'),report['manifest_sha256'])
     def test_remote_account_is_explicit_and_never_inferred_from_preparation_host(self):

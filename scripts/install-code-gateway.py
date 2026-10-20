@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install a generic Linux Remote Hosts Code Gateway service and optional Caddy site.
+"""Install a generic Linux Octendra Code Gateway service and optional Caddy site.
 
 This installer intentionally takes deployment identity as arguments. It must not
 encode a maintainer's domain, UID/GID, storage volume, or device inventory.
@@ -62,17 +62,17 @@ def main():
     parser.add_argument("--state-dir", required=True, type=pathlib.Path)
     parser.add_argument("--public-host", required=True)
     parser.add_argument("--gateway-bind", default="127.0.0.1:18787")
-    parser.add_argument("--service-user", default="remote-hosts-code")
-    parser.add_argument("--service-group", default="remote-hosts-code")
+    parser.add_argument("--service-user", default="octendra-code")
+    parser.add_argument("--service-group", default="octendra-code")
     parser.add_argument(
         "--service-path",
         type=pathlib.Path,
-        default=pathlib.Path("/etc/systemd/system/remote-hosts-code-gateway.service"),
+        default=pathlib.Path("/etc/systemd/system/octendra-code-gateway.service"),
     )
     parser.add_argument(
         "--caddy-site",
         type=pathlib.Path,
-        default=pathlib.Path("/etc/caddy/sites/remote-hosts-code.caddy"),
+        default=pathlib.Path("/etc/caddy/sites/octendra-code.caddy"),
     )
     parser.add_argument("--caddy-config", type=pathlib.Path, default=pathlib.Path("/etc/caddy/Caddyfile"))
     parser.add_argument("--caddy-bin", default="caddy")
@@ -109,7 +109,7 @@ def main():
         "CONFIG_PATH": str(config),
         "STATE_DIR": str(state),
     }
-    service_data = render(ROOT / "remote-hosts-code-gateway.service", replacements)
+    service_data = render(ROOT / "octendra-code-gateway.service", replacements)
     install_exact(args.service_path, service_data, 0o644, args.resume)
     subprocess.run(["systemctl", "daemon-reload"], check=True)
     subprocess.run(["systemctl", "enable", args.service_path.name], check=True)

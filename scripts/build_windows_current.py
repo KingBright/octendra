@@ -20,8 +20,8 @@ import release_current as shared
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = 'x86_64-pc-windows-msvc'
-COMPONENT = 'remote-hosts-windows-x86_64'
-NAME = 'remote-hosts-windows-x86_64-current'
+COMPONENT = 'octendra-windows-x86_64'
+NAME = 'octendra-windows-x86_64-current'
 CACHE_ENV = ('CARGO_TARGET_DIR', 'CARGO_BUILD_TARGET_DIR', 'CARGO_BUILD_BUILD_DIR')
 
 
@@ -41,12 +41,12 @@ def arguments(root):
 
 
 def settings(root, env):
-    if env.get('REMOTE_HOSTS_WINDOWS_TARGET', TARGET) != TARGET:
+    if env.get('OCTENDRA_WINDOWS_TARGET', TARGET) != TARGET:
         raise ValueError('This documented Windows x86_64 component requires ' + TARGET)
-    override = Path(env.get('REMOTE_HOSTS_DIST_DIR', str(root / 'dist')))
+    override = Path(env.get('OCTENDRA_DIST_DIR', str(root / 'dist')))
     if not override.is_absolute(): override = root / override
     if '..' in override.parts or override != root / 'dist':
-        raise ValueError('REMOTE_HOSTS_DIST_DIR must remain the established project dist')
+        raise ValueError('OCTENDRA_DIST_DIR must remain the established project dist')
     shared.primary(root)
 
 
@@ -123,12 +123,12 @@ def inventory(directory):
 
 def package(root, target, xwin, evidence, outcome):
     directory, archive, checksum = stages(root)
-    sources = {'remote-hosts.exe': target / TARGET / 'release/remote-hosts.exe',
-               'remote-hosts-launcher.exe': target / TARGET / 'release/remote-hosts-launcher.exe',
-               'remote-hosts-service.ps1': root / 'scripts/remote-hosts-service.ps1',
-               'admin.html': root / 'crates/remote-hosts-api/src/admin.html',
+    sources = {'octendra.exe': target / TARGET / 'release/octendra.exe',
+               'octendra-launcher.exe': target / TARGET / 'release/octendra-launcher.exe',
+               'octendra-service.ps1': root / 'scripts/octendra-service.ps1',
+               'admin.html': root / 'crates/octendra-api/src/admin.html',
                'README-WINDOWS.md': root / 'docs/windows.md'}
-    for name in ('remote-hosts.exe', 'remote-hosts-launcher.exe'): validate_pe(sources[name])
+    for name in ('octendra.exe', 'octendra-launcher.exe'): validate_pe(sources[name])
     hashes = {name: shared.digest(path) for name, path in sources.items()}
     directory.mkdir()  # The public transaction reserved this absent exact path.
     for name, source in sources.items():
@@ -136,13 +136,13 @@ def package(root, target, xwin, evidence, outcome):
         shutil.copyfile(source, directory / name); (directory / name).chmod(0o644)
         if shared.digest(directory / name) != hashes[name] or shared.digest(source) != hashes[name]:
             raise ValueError('Package input changed while copying')
-    skill = root / 'skills/remote-hosts-agent'
+    skill = root / 'skills/octendra-agent'
     if skill.is_symlink() or any(path.is_symlink() for path in skill.rglob('*')):
         raise ValueError('Linked skill package input')
-    shutil.copytree(skill, directory / 'skills/remote-hosts-agent')
+    shutil.copytree(skill, directory / 'skills/octendra-agent')
     unchanged(root, evidence)
     record = {'schema_version': 1, 'component': COMPONENT,
-              'version': tomllib.loads((root / 'crates/remote-hosts-cli/Cargo.toml').read_text())['package']['version'],
+              'version': tomllib.loads((root / 'crates/octendra-cli/Cargo.toml').read_text())['package']['version'],
               'commit': subprocess.check_output(['git', 'rev-parse', '--short=12', 'HEAD'], cwd=root, text=True).strip(),
               'target': TARGET, 'built_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
               'cargo_xwin': xwin, 'source_id': evidence[0]['snapshot_id'],
@@ -190,10 +190,11 @@ def build(root=ROOT, env=None, runner=build_process.run):
     evidence = inputs(root)
     before = shared.preflight(root)
     if before.get('status') != 'completed': raise ValueError('Current recovery is deferred; preserve and inspect the original producer')
+    shared.require_current_names(before)
     dist = root / 'dist'
     if any(path.is_symlink() for path in (dist, *dist.parents)): raise ValueError('Linked output parent')
     dist.mkdir(exist_ok=True)
-    auxiliary = dist / '.remote-hosts-windows-x86_64-build'
+    auxiliary = dist / '.octendra-windows-x86_64-build'
     admitted = False; settled = True
     with cancellation():
         try:
@@ -203,7 +204,7 @@ def build(root=ROOT, env=None, runner=build_process.run):
                     or reservation.get('owned_aux_stages') != [str(auxiliary)]):
                 raise ValueError('Shared helper did not reserve the exact Windows current group')
             command = ['cargo', 'xwin', 'build', '--locked', '--release', '--target', TARGET,
-                       '-p', 'remote-hosts-cli', '-p', 'remote-hosts-launcher', '--bins', '--jobs', '1']
+                       '-p', 'octendra-cli', '-p', 'octendra-launcher', '--bins', '--jobs', '1']
             settled = False
             outcome = runner(command, root, auxiliary / 'build.log', dict(env, CARGO_BUILD_JOBS='1'), idle_timeout=1800)
             settled = outcome.get('cleanup', {}).get('state') in ('complete', 'not_required')

@@ -15,7 +15,7 @@ class PolicyTest {
         listOf("../key", "/absolute", "a/../key", "a//b", "a\\b", "a/./b", "", "a\u0000b").forEach { denied { Policy.relative(it) } }
     }
     @Test fun symlinkEscape() {
-        val root = Files.createTempDirectory("rh-test").toFile(); val outside = Files.createTempDirectory("rh-outside").toFile()
+        val root = Files.createTempDirectory("octendra-test").toFile(); val outside = Files.createTempDirectory("octendra-outside").toFile()
         try { Files.createSymbolicLink(root.toPath().resolve("escape"), outside.toPath()); denied { Policy.within(root, "escape/secret") } } finally { root.deleteRecursively(); outside.deleteRecursively() }
     }
     @Test fun sourceCredentialsAndSuffix() {

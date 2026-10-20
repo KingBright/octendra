@@ -89,10 +89,10 @@ def lease(directory, report, snapshot_id, execution_root=None):
                 owner = {'state': 'owner_not_yet_published'}
             raise SlotBusy(owner) from None
         if marker.exists():
-            if json.loads(marker.read_text()) != {'schema_version': 1, 'purpose': 'remote-hosts-release-slot'}:
+            if json.loads(marker.read_text()) != {'schema_version': 1, 'purpose': 'octendra-release-slot'}:
                 raise ValueError('build slot identity mismatch')
         else:
-            atomic_json(marker, {'schema_version': 1, 'purpose': 'remote-hosts-release-slot'})
+            atomic_json(marker, {'schema_version': 1, 'purpose': 'octendra-release-slot'})
         prior_owner = directory/'owner.json'
         if prior_owner.exists():
             previous = json.loads(prior_owner.read_text())

@@ -25,10 +25,10 @@ class BuildSlotTests(unittest.TestCase):
         self.base = pathlib.Path(self.tmp.name).resolve()
         self.root = self.base/'editor'
         (self.root/'scripts').mkdir(parents=True)
-        (self.root/'crates/remote-hosts-code/src').mkdir(parents=True)
+        (self.root/'crates/octendra-code/src').mkdir(parents=True)
         (self.root/'Cargo.toml').write_text('[workspace]\nmembers=[]\n')
-        (self.root/'crates/remote-hosts-code/Cargo.toml').write_text('[package]\nname="remote-hosts-code"\nversion="0.3.5"\n')
-        (self.root/'crates/remote-hosts-code/src/lib.rs').write_text('pub fn answer() -> u8 { 42 }\n')
+        (self.root/'crates/octendra-code/Cargo.toml').write_text('[package]\nname="octendra-code"\nversion="0.3.5"\n')
+        (self.root/'crates/octendra-code/src/lib.rs').write_text('pub fn answer() -> u8 { 42 }\n')
         shutil.copyfile(SCRIPTS/'check-code-source.py', self.root/'scripts/check-code-source.py')
         self.slot = self.base/'slot'
         self.snapshot = None
@@ -150,13 +150,13 @@ class BuildSlotTests(unittest.TestCase):
         self.assertEqual(target.read_text(), 'unchanged')
     def test_admission_refusal_preserves_historical_version_before_expensive_checks(self):
         self.prepare()
-        (self.checkout/'dist/remote-hosts-code-0.3.5').mkdir(parents=True)
+        (self.checkout/'dist/octendra-code-0.3.5').mkdir(parents=True)
         with mock.patch.object(runner.subprocess, 'Popen', side_effect=AssertionError('must not compile')), \
              mock.patch.object(runner.release_current, 'admit', side_effect=ValueError('current activity protected')):
             result = runner.run_pipeline(self.snapshot, self.base/'collision.json', self.slot)
         self.assertEqual(result['state'], 'failed')
         self.assertEqual(result['failure_type'], 'ValueError')
-        self.assertTrue((self.checkout/'dist/remote-hosts-code-0.3.5').is_dir())
+        self.assertTrue((self.checkout/'dist/octendra-code-0.3.5').is_dir())
     def test_progress_reads_active_cargo_log_and_rejects_escaped_path(self):
         self.prepare()
         directory = self.base/'probe-logs'

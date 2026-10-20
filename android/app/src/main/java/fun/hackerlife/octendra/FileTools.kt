@@ -42,7 +42,7 @@ class FileTools(private val context: Context, private val transport: Transport) 
         val source = transport.json("/device/file-source/$id")
         val url = Policy.source(source.getString("download_url"), transport.config.gatewayUrl)
         file.parentFile!!.mkdirs(); Policy.within(root, path)
-        val tmp = File(file.parentFile, ".rh-upload-$id.tmp"); demand(tmp.createNewFile(), "staging_conflict")
+        val tmp = File(file.parentFile, ".octendra-upload-$id.tmp"); demand(tmp.createNewFile(), "staging_conflict")
         val c = transport.connection(url.toString(), "GET", false)
         try {
             demand(c.responseCode == 200, "file_source_rejected")
@@ -60,7 +60,7 @@ class FileTools(private val context: Context, private val transport: Transport) 
         val path = args.getString("path"); val source = Policy.within(root, path); val max = limit(args)
         demand(source.isFile && source.length() <= max, "file_unavailable_or_too_large")
         demand(context.cacheDir.usableSpace >= source.length() + 64L * 1024 * 1024, "storage_reserve_insufficient")
-        val snapshot = File.createTempFile("rh-download-", ".tmp", context.cacheDir)
+        val snapshot = File.createTempFile("octendra-download-", ".tmp", context.cacheDir)
         try {
             source.inputStream().use { input -> FileOutputStream(snapshot).use { copy(input, it, max) } }
             val sha = digest(snapshot); val size = snapshot.length()

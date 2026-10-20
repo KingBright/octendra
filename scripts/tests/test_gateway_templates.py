@@ -30,17 +30,17 @@ class GatewayTemplateTests(unittest.TestCase):
     def test_systemd_template_requires_explicit_deployment_values(self):
         installer = load("gateway_service_test", "install-code-gateway.py")
         rendered = installer.render(
-            SCRIPTS / "remote-hosts-code-gateway.service",
+            SCRIPTS / "octendra-code-gateway.service",
             {
-                "SERVICE_USER": "remote-hosts-code",
-                "SERVICE_GROUP": "remote-hosts-code",
-                "BINARY_PATH": "/usr/local/bin/remote-hosts-code",
-                "CONFIG_PATH": "/etc/remote-hosts-code/gateway.json",
-                "STATE_DIR": "/var/lib/remote-hosts-code",
+                "SERVICE_USER": "octendra-code",
+                "SERVICE_GROUP": "octendra-code",
+                "BINARY_PATH": "/usr/local/bin/octendra-code",
+                "CONFIG_PATH": "/etc/octendra-code/gateway.json",
+                "STATE_DIR": "/var/lib/octendra-code",
             },
         ).decode()
-        self.assertIn("User=remote-hosts-code", rendered)
-        self.assertIn("ReadWritePaths=/var/lib/remote-hosts-code", rendered)
+        self.assertIn("User=octendra-code", rendered)
+        self.assertIn("ReadWritePaths=/var/lib/octendra-code", rendered)
         self.assertNotIn("{{", rendered)
 
     def test_publish_config_requires_gateway_deployment_paths(self):
@@ -55,11 +55,11 @@ class GatewayTemplateTests(unittest.TestCase):
             "gateway": {
                 "ssh_host": "ops@example.test",
                 "ssh_port": 22,
-                "root": "/srv/remote-hosts-code",
-                "binary_path": "/usr/local/bin/remote-hosts-code",
-                "config_path": "/etc/remote-hosts-code/gateway.json",
-                "backup_root": "/var/lib/remote-hosts-code/releases",
-                "service_name": "remote-hosts-code-gateway.service",
+                "root": "/srv/octendra-code",
+                "binary_path": "/usr/local/bin/octendra-code",
+                "config_path": "/etc/octendra-code/gateway.json",
+                "backup_root": "/var/lib/octendra-code/releases",
+                "service_name": "octendra-code-gateway.service",
                 "gateway_bind": "127.0.0.1:18787",
             },
         }

@@ -65,7 +65,7 @@ class ClientTests(unittest.TestCase):
         b=check_collaboration.acceptance_identity('release-0-8-0-device-attempt-b','12345678-device')
         self.assertEqual(a,check_collaboration.acceptance_identity('release-0-8-0-device-attempt-a','12345678-device'))
         self.assertNotEqual(a,b)
-        self.assertTrue(a[0].startswith('target/remote-hosts-accept/12345678-'))
+        self.assertTrue(a[0].startswith('target/octendra-accept/12345678-'))
         self.assertLessEqual(len(a[1]),64)
         with self.assertRaises(ValueError):check_collaboration.acceptance_identity('../bad','12345678-device')
 
@@ -86,8 +86,8 @@ class ClientTests(unittest.TestCase):
         path=pathlib.Path(__file__).resolve().parents[1]/'publish-code.py';spec=importlib.util.spec_from_file_location('publish_080_accept',path);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
         sha='a'*64
         certificate='c'*40
-        signing={'state':'ready','certificate_sha1':certificate,'code_identifier':'com.remote-hosts.code-agent',
-                 'designated_requirement':f'identifier "com.remote-hosts.code-agent" and certificate leaf = H"{certificate}"',
+        signing={'state':'ready','certificate_sha1':certificate,'code_identifier':'fun.hackerlife.octendra.agent',
+                 'designated_requirement':f'identifier "fun.hackerlife.octendra.agent" and certificate leaf = H"{certificate}"',
                  'installed_sha256':sha}
         device={'online':True,'capabilities':{'version':'0.8.0'},'maintenance':{'state':'open'},
                 'upgrade':{'receipt':{'state':'upgraded','version':'0.8.0','candidate_sha256':sha,
@@ -107,6 +107,6 @@ class ClientTests(unittest.TestCase):
         path=pathlib.Path(__file__).resolve().parents[1]/'publish-code.py';spec=importlib.util.spec_from_file_location('publish_050',path);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
         config={'controller_device_id':'00000000-0000-0000-0000-000000000001',
                 'agents':[{'device_id':'00000000-0000-0000-0000-000000000001','home':'/home/test','root':'/home/test/projects'}],
-                'gateway':{'ssh_host':'-oProxyCommand=bad','ssh_port':22,'root':'/opt/test','binary_path':'/opt/test/remote-hosts-code','config_path':'/opt/test/gateway.json','backup_root':'/opt/test/releases'}}
+                'gateway':{'ssh_host':'-oProxyCommand=bad','ssh_port':22,'root':'/opt/test','binary_path':'/opt/test/octendra-code','config_path':'/opt/test/gateway.json','backup_root':'/opt/test/releases'}}
         with self.assertRaises(ValueError):m.validate(config)
         config['gateway']['ssh_host']='test@host';self.assertIs(m.validate(config),config)

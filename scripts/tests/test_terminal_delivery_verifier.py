@@ -32,9 +32,9 @@ class FakeClient:
             raise verifier.NativeTransportError('unconfirmed', self.root,
                 [{'request_id':'original-request','operation_id':'original-operation','state':'unknown'}])
         case = args['idempotency_key'].split('-')[-1]
-        text = 'RH-DELIVERY-fixture-' + case + '\n'
+        text = 'OCTENDRA-DELIVERY-fixture-' + case + '\n'
         if case == 'delayed':
-            text += 'RH-DELIVERY-fixture-delayed-end\n'
+            text += 'OCTENDRA-DELIVERY-fixture-delayed-end\n'
         code = 7 if case == 'failure' else 0
         if self.mode == 'wrong_exit':
             code = 9

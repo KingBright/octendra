@@ -29,9 +29,9 @@ pub mod gateway {
             .replace('\'', "&#39;")
     }
 }
-#[path = "../../crates/remote-hosts-code/src/permission_view.rs"]
+#[path = "../../crates/octendra-code/src/permission_view.rs"]
 mod permission_view;
-#[path = "../../crates/remote-hosts-code/src/status_view.rs"]
+#[path = "../../crates/octendra-code/src/status_view.rs"]
 mod status_view;
 fn main() {
     let output = std::path::PathBuf::from(std::env::args().nth(1).unwrap());

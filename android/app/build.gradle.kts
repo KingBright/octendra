@@ -2,7 +2,10 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
-val signingFile = providers.environmentVariable("RH_ANDROID_KEYSTORE").orNull
+val signingFile = providers.environmentVariable("OCTENDRA_ANDROID_KEYSTORE").orNull
+val releaseVersion = java.util.Properties().apply {
+    rootProject.file("version.properties").inputStream().use { load(it) }
+}
 android {
     namespace = "fun.hackerlife.octendra"
     compileSdk = 36
@@ -10,16 +13,16 @@ android {
         applicationId = "fun.hackerlife.octendra"
         minSdk = 30
         targetSdk = 36
-        versionCode = 1101
-        versionName = "0.11.1"
+        versionCode = releaseVersion.getProperty("versionCode").toInt()
+        versionName = releaseVersion.getProperty("versionName")
         testInstrumentationRunner = "fun.hackerlife.octendra.AgentInstrumentation"
     }
     signingConfigs {
         if (signingFile != null) create("ownerRelease") {
             storeFile = file(signingFile)
-            storePassword = providers.environmentVariable("RH_ANDROID_STORE_PASSWORD").get()
-            keyAlias = "remote-hosts-android"
-            keyPassword = providers.environmentVariable("RH_ANDROID_STORE_PASSWORD").get()
+            storePassword = providers.environmentVariable("OCTENDRA_ANDROID_STORE_PASSWORD").get()
+            keyAlias = providers.environmentVariable("OCTENDRA_ANDROID_KEY_ALIAS").get()
+            keyPassword = providers.environmentVariable("OCTENDRA_ANDROID_STORE_PASSWORD").get()
             enableV1Signing = false
             enableV2Signing = true
             enableV3Signing = true

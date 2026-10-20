@@ -9,7 +9,7 @@ import sys
 
 import source_snapshot
 
-COMPONENT = 'remote-hosts-three-platform'
+COMPONENT = 'octendra-three-platform'
 PLATFORMS = ('macos', 'linux', 'windows')
 
 
@@ -76,7 +76,7 @@ def public_api():
     path = Path.home()/'.codex/skills/rust-project-lifecycle/scripts/rust_storage.py'
     if not path.is_file() or path.is_symlink():
         raise ValueError('shared fixed-current lifecycle helper is unavailable; no package started')
-    spec = importlib.util.spec_from_file_location('remote_hosts_shared_storage', path)
+    spec = importlib.util.spec_from_file_location('octendra_shared_storage', path)
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     return module
 
@@ -104,8 +104,19 @@ def preflight(root):
     return invoke(root, 'release-preflight')
 
 
+def require_current_names(report):
+    """Refuse a second current identity until the existing authority is migrated."""
+    for component, record in report.get('current_components', {}).items():
+        if (not component.startswith('octendra-')
+                or any(not Path(name).name.startswith('octendra-') for name in record['files'])):
+            raise ValueError(
+                'current identity migration required in the existing lifecycle authority; '
+                'preserve the registered outputs and do not admit a second current component'
+            )
+
+
 def files(root):
-    return [root/'dist/remote-hosts-code-current', root/'dist/remote-hosts-code-current-bundle.tgz']
+    return [root/'dist/octendra-code-current', root/'dist/octendra-code-current-bundle.tgz']
 
 
 def stages(root):
@@ -119,6 +130,7 @@ def arguments(root, producer_pid):
 
 
 def admit(root):
+    require_current_names(invoke(root, 'release-preflight'))
     directory = root/'dist'
     if any(p.is_symlink() for p in (directory, *directory.parents)):
         raise ValueError('current package directory must not traverse links')

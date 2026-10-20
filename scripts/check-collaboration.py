@@ -21,7 +21,7 @@ def acceptance_identity(run_id, device_id):
             or len(device_id)<8):
         raise ValueError('invalid collaboration acceptance identity')
     tag=hashlib.sha256(run_id.encode()).hexdigest()[:16]
-    return 'target/remote-hosts-accept/'+device_id[:8]+'-'+tag, 'collab-'+device_id[:8]+'-'+tag
+    return 'target/octendra-accept/'+device_id[:8]+'-'+tag, 'collab-'+device_id[:8]+'-'+tag
 
 
 def main():

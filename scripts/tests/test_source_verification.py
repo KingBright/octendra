@@ -21,12 +21,12 @@ class SourceEvidenceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.tmp.name)
-        for directory in ('crates/remote-hosts-code/src', 'crates/dependency/src', 'scripts/tests'):
+        for directory in ('crates/octendra-code/src', 'crates/dependency/src', 'scripts/tests'):
             (self.root/directory).mkdir(parents=True)
         (self.root/'Cargo.toml').write_text('[workspace]\n')
         (self.root/'Cargo.lock').write_text('# fixture\n')
-        (self.root/'crates/remote-hosts-code/Cargo.toml').write_text('[package]\nversion="0.3.1"\n')
-        (self.root/'crates/remote-hosts-code/src/lib.rs').write_text('// fixture\n')
+        (self.root/'crates/octendra-code/Cargo.toml').write_text('[package]\nversion="0.3.1"\n')
+        (self.root/'crates/octendra-code/src/lib.rs').write_text('// fixture\n')
         self.dependency = self.root/'crates/dependency/src/lib.rs'
         self.dependency.write_text('// dependency\n')
         self.report = self.root/'docs/proof.json'
@@ -90,8 +90,8 @@ class SourceEvidenceTests(unittest.TestCase):
         # Serialize independent cases, not the actors inside each concurrency test.
         # Preserve both packages, all normal tests, and collection of every failure.
         self.assertEqual(commands['rust_tests'], [
-            'cargo', 'test', '-p', 'remote-hosts-code', '-p', 'remote-hosts-mcp',
-            '-p', 'remote-hosts-release', '-p', 'remote-hosts-token-output',
+            'cargo', 'test', '-p', 'octendra-code', '-p', 'octendra-mcp',
+            '-p', 'octendra-release', '-p', 'octendra-token-output',
             '--locked', '--no-fail-fast', '--', '--test-threads=1', '--color', 'never'])
 
     def test_existing_receipt_is_rejected_before_executing_commands(self):

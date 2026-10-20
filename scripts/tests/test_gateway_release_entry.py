@@ -29,10 +29,10 @@ def encode(value):
 
 class PackageFixture:
     def __init__(self, root):
-        self.package = root / "remote-hosts-code-0.10.26"
+        self.package = root / "octendra-code-0.10.26"
         self.package.mkdir()
-        names = ["remote-hosts-code-macos-arm64", "remote-hosts-code-linux-amd64",
-                 "remote-hosts-code-windows-amd64.exe", "upgrade-code-agent.py",
+        names = ["octendra-code-macos-arm64", "octendra-code-linux-amd64",
+                 "octendra-code-windows-amd64.exe", "upgrade-code-agent.py",
                  "agent_upgrade_support.py", "launch-code-upgrade.py",
                  "code_upgrade_runner.py", "macos_code_identity.py",
                  "upgrade-code-gateway.py", "check-code-gateway.py"]
@@ -71,7 +71,7 @@ class PackageFixture:
         self.approved = {"build_sha256": rr.digest(self.report),
                          "manifest_sha256": rr.digest(self.package / "manifest.json"),
                          "bundle_sha256": rr.digest(self.bundle), "bundle_bytes": self.bundle.stat().st_size,
-                         "candidate_sha256": artifacts["remote-hosts-code-linux-amd64"]["sha256"]}
+                         "candidate_sha256": artifacts["octendra-code-linux-amd64"]["sha256"]}
 
     def archive(self, extra=None):
         with tarfile.open(self.bundle, "w:gz") as archive:
@@ -208,7 +208,7 @@ class FakeGateway:
         if action == "stage":
             self.staged = True
         value = {"version": release.VERSION, "gateway_pid": 123 if self.running else 0,
-                 "gateway_executable": "/opt/remote-hosts-code/remote-hosts-code",
+                 "gateway_executable": "/opt/octendra-code/octendra-code",
                  "installed_sha256": self.installed, "running": self.running,
                  "bundle_staged": self.staged, "marker_present": self.marker,
                  "result_present": self.result is not None}
@@ -467,7 +467,7 @@ class StageTests(unittest.TestCase):
         self.plan = self.fixture.identity()["plan"]
         self.install = self.root / "install"
         self.install.mkdir()
-        self.binary = self.install / "remote-hosts-code"
+        self.binary = self.install / "octendra-code"
         self.binary.write_bytes(b"previous")
         self.identity = {"root": self.install, "binary": self.binary,
                          "pid": 123, "running": True, "installed_sha256": rr.digest(self.binary)}

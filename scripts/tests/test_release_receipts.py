@@ -21,7 +21,7 @@ class Receipts(unittest.TestCase):
 
     def build(self):
         pkg = self.root/'package'; pkg.mkdir()
-        files = {'remote-hosts-code-macos-arm64','remote-hosts-code-linux-amd64','remote-hosts-code-windows-amd64.exe','upgrade-code-agent.py',
+        files = {'octendra-code-macos-arm64','octendra-code-linux-amd64','octendra-code-windows-amd64.exe','upgrade-code-agent.py',
                  'agent_upgrade_support.py','launch-code-upgrade.py','code_upgrade_runner.py','macos_code_identity.py',
                  'upgrade-code-gateway.py','check-code-gateway.py'}
         artifacts = {}
@@ -55,7 +55,7 @@ class Receipts(unittest.TestCase):
         with self.assertRaises(r.ReleaseError):r.verified_build(path,'0.4.1')
 
     def test_artifact_change_is_not_silently_rebuilt(self):
-        path,pkg=self.build();p=pkg/'remote-hosts-code-macos-arm64';p.write_bytes(b'changed')
+        path,pkg=self.build();p=pkg/'octendra-code-macos-arm64';p.write_bytes(b'changed')
         with self.assertRaises(r.ReleaseError):r.verified_build(path,'0.4.1')
         self.assertEqual(p.read_bytes(),b'changed')
 

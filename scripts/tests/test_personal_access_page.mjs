@@ -31,12 +31,12 @@ try {
  const call=(method,params={})=>new Promise((resolve,reject)=>{const key=++id;const timer=setTimeout(()=>{requests.delete(key);reject(Error('cdp_timeout:'+method))},10000);requests.set(key,{resolve:v=>{clearTimeout(timer);resolve(v)},reject:e=>{clearTimeout(timer);reject(e)}});ws.send(JSON.stringify({id:key,method,params}))});
  const evaluate=async expression=>{const r=await call('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(r.exceptionDetails)throw Error(r.exceptionDetails.text);return r.result.value};
  await call('Page.enable');await call('Runtime.enable');const version=await call('Browser.getVersion');results.push({browser:version.product});
- const visible="(()=>({text:document.body.innerText,advanced:document.querySelector('#advanced-permissions')?.open,audit:document.querySelector('#operation-audit')?.open,disconnect:document.querySelector('#access-disconnect')?.open,scroll:document.documentElement.scrollWidth,width:innerWidth,grantForms:document.querySelectorAll('input[name=task_id]').length,revision:document.querySelector('#rh-status')?.dataset.revision}))()";
+ const visible="(()=>({text:document.body.innerText,advanced:document.querySelector('#advanced-permissions')?.open,audit:document.querySelector('#operation-audit')?.open,disconnect:document.querySelector('#access-disconnect')?.open,scroll:document.documentElement.scrollWidth,width:innerWidth,grantForms:document.querySelectorAll('input[name=task_id]').length,revision:document.querySelector('#octendra-status')?.dataset.revision}))()";
  for(const width of [1280,390,320]){
   await call('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});
   for(const scenario of ['full','owner','unknown','offline','exec-disabled','account-readonly','device-readonly']){
    nextRefresh=scenario;await call('Page.navigate',{url:origin+'/'+scenario+'.html'});
-   await deadline(async()=>evaluate("location.pathname==="+JSON.stringify("/"+scenario+".html")+"&&document.readyState==='complete'&&document.querySelector('#rh-status')?true:false"),5000);
+   await deadline(async()=>evaluate("location.pathname==="+JSON.stringify("/"+scenario+".html")+"&&document.readyState==='complete'&&document.querySelector('#octendra-status')?true:false"),5000);
    const view=await evaluate(visible);
    assert.equal(view.advanced,false);assert.equal(view.audit,false);assert.equal(view.disconnect,false);
    assert.equal(view.grantForms,0);assert(view.scroll<=view.width+1,'horizontal_overflow:'+scenario+':'+width);

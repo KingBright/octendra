@@ -31,7 +31,7 @@ def main():
         raise SystemExit(f"sshd unavailable at {sshd}")
     root = pathlib.Path(__file__).resolve().parents[1]
     user = os.environ.get("USER") or subprocess.check_output(["id", "-un"], text=True).strip()
-    with tempfile.TemporaryDirectory(prefix="remote-hosts-real-sshd-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="octendra-real-sshd-") as temporary:
         directory = pathlib.Path(temporary)
         host_key = directory / "host"
         client_key = directory / "client"
@@ -82,17 +82,17 @@ def main():
                 raise RuntimeError("isolated sshd did not become ready")
             env = os.environ.copy()
             env.update(
-                REMOTE_HOSTS_REAL_SSH_PORT=str(port),
-                REMOTE_HOSTS_REAL_SSH_USER=user,
-                REMOTE_HOSTS_REAL_SSH_KEY=str(client_key),
-                REMOTE_HOSTS_REAL_SSH_LARGE_BYTES=str(1024**3 if args.large else 2 * 1024**2),
+                OCTENDRA_REAL_SSH_PORT=str(port),
+                OCTENDRA_REAL_SSH_USER=user,
+                OCTENDRA_REAL_SSH_KEY=str(client_key),
+                OCTENDRA_REAL_SSH_LARGE_BYTES=str(1024**3 if args.large else 2 * 1024**2),
             )
             command = [args.cargo, "test"]
             if args.large:
                 command.append("--release")
             command.extend([
                 "-p",
-                "remote-hosts-connector",
+                "octendra-connector",
                 "tests::real_sshd_russh_reuses_transport_sftp_and_forward",
                 "--",
                 "--ignored",
@@ -106,7 +106,7 @@ def main():
                 raise SystemExit(completed.returncode)
             print(
                 f"real sshd regression passed: russh pooled exec + SFTP + local forward; "
-                f"bytes={env['REMOTE_HOSTS_REAL_SSH_LARGE_BYTES']}"
+                f"bytes={env['OCTENDRA_REAL_SSH_LARGE_BYTES']}"
             )
         finally:
             if sshd_process.poll() is None:

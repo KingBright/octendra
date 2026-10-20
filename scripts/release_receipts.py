@@ -83,8 +83,8 @@ def verified_build(report, expected_version):
             or v.get('functional_tests', {}).get('test_gates_completed_successfully') is not True):
         raise ReleaseError('verification_incomplete', 'complete the original fixed-input verification before publication')
     artifacts = m.get('artifacts', {})
-    required = {'remote-hosts-code-macos-arm64','remote-hosts-code-linux-amd64',
-                'remote-hosts-code-windows-amd64.exe','upgrade-code-agent.py','agent_upgrade_support.py','launch-code-upgrade.py',
+    required = {'octendra-code-macos-arm64','octendra-code-linux-amd64',
+                'octendra-code-windows-amd64.exe','upgrade-code-agent.py','agent_upgrade_support.py','launch-code-upgrade.py',
                 'code_upgrade_runner.py','macos_code_identity.py',
                 'upgrade-code-gateway.py','check-code-gateway.py'}
     if not required.issubset(artifacts):

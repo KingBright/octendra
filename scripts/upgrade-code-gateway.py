@@ -114,7 +114,7 @@ def main():
     parser.add_argument('--binary-path', required=True, type=pathlib.Path)
     parser.add_argument('--config-path', required=True, type=pathlib.Path)
     parser.add_argument('--backup-root', required=True, type=pathlib.Path)
-    parser.add_argument('--service-name', default='remote-hosts-code-gateway.service')
+    parser.add_argument('--service-name', default='octendra-code-gateway.service')
     parser.add_argument('--gateway-bind', default='127.0.0.1:18787')
     args = parser.parse_args()
 
@@ -142,7 +142,7 @@ def main():
         if checksum(args.candidate) != args.sha256:
             raise RuntimeError('candidate checksum mismatch')
         reported = subprocess.check_output([str(args.candidate), '--version'], text=True).strip()
-        if reported != 'remote-hosts-code ' + args.version:
+        if reported != 'octendra-code ' + args.version:
             raise RuntimeError('candidate version mismatch')
         subprocess.check_call(
             [str(args.candidate), 'check', '--config', str(config)],

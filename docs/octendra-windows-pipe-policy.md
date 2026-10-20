@@ -4,7 +4,7 @@
 
 ## 固定边界
 
-- 管道固定为 `\\.\pipe\RemoteHosts.Admin.v1`；helper SCM 服务固定 RemoteHostsAdmin，操作目标是另一个固定系统服务 RemoteHostsAgent。只接受 ManagedServiceRestart；拒绝 upgrade、DNS、任意服务名、shell 及用户服务 scope。Windows 用户服务维护不能借此迁移到系统身份。
+- 管道固定为 `\\.\pipe\Octendra.Admin.v1`；helper SCM 服务固定 OctendraAdmin，操作目标是另一个固定系统服务 OctendraAgent。只接受 ManagedServiceRestart；拒绝 upgrade、DNS、任意服务名、shell 及用户服务 scope。Windows 用户服务维护不能借此迁移到系统身份。
 - SID 必须使用有界、规范的 S-1-5 数字格式。调用方必须是精确 TokenUser 账户 SID（本 profile 限 S-1-5-21-domain-RID，RID >= 1000，不支持内置账户或 Entra SID）；不按用户名、管理员组、客户端声明或进程主 token 授权。
 - 登录 SID 独立绑定，同一账户的不同登录会话仍被拒绝。登录组须带 SE_GROUP_LOGON_ID、enabled 且非 deny-only；AppContainer 和 restricted token 当前不支持，拒绝而不是放宽。
 - 管道须本地、拒绝远程、原首实例归属确认、句柄不继承。服务端身份要求 LocalSystem、精确 enabled/非 deny-only service SID、SCM 与 pipe PID 对应及 helper 摘要；目标系统服务和目标映像摘要另行绑定。
@@ -35,7 +35,7 @@ Windows assess_after_read 现在必须提供同一连接最后读取的 frame �
 
 ## Win32 采集边界
 
-remote-hosts-admin 保留 forbid(unsafe_code)。FFI 隔离于小型 remote-hosts-admin-win32 库的 native 模块，其余解码/控制流使用有界 slice，不解引用 token 中的指针。只接受已有 BorrowedHandle：验证是服务端管道并确认线程原本没有 token；随后 ImpersonateNamedPipeClient、OpenThreadToken(TOKEN_QUERY, OpenAsSelf=true) 和有界 GetTokenInformation。用户/登录 SID 来自内核 TokenUser/TokenGroups，组须带完整 LOGON_ID/ENABLED 且非 DENY_ONLY；TokenType/level/AppContainer/HasRestrictions 查询不明确即拒绝，不回退进程 token 或客户端身份声明。
+octendra-admin 保留 forbid(unsafe_code)。FFI 隔离于小型 octendra-admin-win32 库的 native 模块，其余解码/控制流使用有界 slice，不解引用 token 中的指针。只接受已有 BorrowedHandle：验证是服务端管道并确认线程原本没有 token；随后 ImpersonateNamedPipeClient、OpenThreadToken(TOKEN_QUERY, OpenAsSelf=true) 和有界 GetTokenInformation。用户/登录 SID 来自内核 TokenUser/TokenGroups，组须带完整 LOGON_ID/ENABLED 且非 DENY_ONLY；TokenType/level/AppContainer/HasRestrictions 查询不明确即拒绝，不回退进程 token 或客户端身份声明。
 
 查询分配上限 64 KiB、组数上限 512，校验返回长度、内部指针偏移、SID 完整长度/修订版/子权限数、登录组唯一性；缓冲区与 token handle 保留到解码结束。RAII 覆盖成功、失败与 unwind 的 RevertToSelf；恢复失败不能返回身份，生产实现直接 abort。离线测试中的 fatal 路径用受控 panic 观察，没有运行真正终止进程的路径。
 

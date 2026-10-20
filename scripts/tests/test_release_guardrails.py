@@ -78,7 +78,7 @@ class LauncherGuardrails(unittest.TestCase):
     def test_bootstrap_timeout_has_durable_unknown_result_and_is_not_replayed(self):
         with tempfile.TemporaryDirectory() as tmp:
             record = self.prepared(pathlib.Path(tmp))
-            unloaded={'loaded':False,'running':False,'service':'gui/501/com.remote-hosts.code-upgrade'}
+            unloaded={'loaded':False,'running':False,'service':'gui/501/fun.hackerlife.octendra.upgrade'}
             with mock.patch.object(launcher, 'service_state', side_effect=[unloaded, unloaded]), \
                  mock.patch.object(launcher, 'cleanup_legacy_jobs', return_value=0), \
                  mock.patch.object(launcher.subprocess, 'run', side_effect=subprocess.TimeoutExpired('launchctl', 10)) as run:
@@ -102,7 +102,7 @@ class LauncherGuardrails(unittest.TestCase):
     def test_failed_bootstrap_is_not_reported_as_started(self):
         with tempfile.TemporaryDirectory() as tmp:
             record = self.prepared(pathlib.Path(tmp))
-            unloaded={'loaded':False,'running':False,'service':'gui/501/com.remote-hosts.code-upgrade'}
+            unloaded={'loaded':False,'running':False,'service':'gui/501/fun.hackerlife.octendra.upgrade'}
             with mock.patch.object(launcher, 'service_state', side_effect=[unloaded, unloaded]), \
                  mock.patch.object(launcher, 'cleanup_legacy_jobs', return_value=0), \
                  mock.patch.object(launcher.subprocess, 'run', return_value=subprocess.CompletedProcess([], 5)) as run:

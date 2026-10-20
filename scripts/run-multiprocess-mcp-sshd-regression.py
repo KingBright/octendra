@@ -40,9 +40,9 @@ class McpClient:
                 "--tool-profile", "agent",
                 "--vault-master-password-file", str(vault_file),
                 "--artifact-root", str(artifact_root),
-                "--agent-client-kind", "remote-hosts-regression",
+                "--agent-client-kind", "octendra-regression",
                 "--agent-client-instance-id", "multiprocess-fixture",
-                "--agent-project-key", "/fixture/remote-hosts",
+                "--agent-project-key", "/fixture/octendra",
                 "--agent-conversation-key", conversation,
             ],
             cwd=ROOT,
@@ -138,7 +138,7 @@ def wait_operation(client, workspace_id, operation_id, timeout=20):
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:
-        last = client.tool("remote_hosts_get_workspace_result", {
+        last = client.tool("octendra_get_workspace_result", {
             "workspace_id": workspace_id,
             "operation_id": operation_id,
             "limit": 50,
@@ -158,7 +158,7 @@ def wait_operation(client, workspace_id, operation_id, timeout=20):
 def wait_pty_text(client, pty_id, marker, timeout=15):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        value = client.tool("remote_hosts_read_pty_output", {
+        value = client.tool("octendra_read_pty_output", {
             "pty_session_id": pty_id,
             "limit": 100,
         })
@@ -174,13 +174,13 @@ def main():
     sshd = pathlib.Path("/usr/sbin/sshd")
     if not sshd.is_file():
         raise SystemExit("/usr/sbin/sshd is required")
-    run(cargo, "build", "-p", "remote-hosts-cli", "--bin", "remote-hosts", cwd=ROOT)
+    run(cargo, "build", "-p", "octendra-cli", "--bin", "octendra", cwd=ROOT)
     metadata = json.loads(subprocess.check_output([cargo, "metadata", "--no-deps", "--format-version=1"], cwd=ROOT, text=True))
-    binary = pathlib.Path(metadata["target_directory"]) / "debug" / "remote-hosts"
+    binary = pathlib.Path(metadata["target_directory"]) / "debug" / "octendra"
     if not binary.is_file():
-        raise RuntimeError("remote-hosts debug binary was not built")
+        raise RuntimeError("octendra debug binary was not built")
 
-    with tempfile.TemporaryDirectory(prefix="remote-hosts-multiprocess-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="octendra-multiprocess-") as temporary:
         directory = pathlib.Path(temporary)
         host_key = directory / "host"
         client_key = directory / "client"
@@ -266,7 +266,7 @@ def main():
             agent_a = McpClient(binary, database_url, vault_file, artifact_root, "conversation-a", directory / "agent-a.log")
             agent_b = McpClient(binary, database_url, vault_file, artifact_root, "conversation-b", directory / "agent-b.log")
             private_key = client_key.read_text()
-            registered = agent_a.tool("remote_hosts_ensure_host", {
+            registered = agent_a.tool("octendra_ensure_host", {
                 "name": "multiprocess-target",
                 "display_name": "Multiprocess Target",
                 "kind": "linux",
@@ -292,26 +292,26 @@ def main():
                 },
             })
             host_id = registered["host"]["id"]
-            prepared_a = agent_a.tool("remote_hosts_prepare_workspace", {"host_id": host_id})
-            prepared_b = agent_b.tool("remote_hosts_prepare_workspace", {"host_id": host_id})
+            prepared_a = agent_a.tool("octendra_prepare_workspace", {"host_id": host_id})
+            prepared_b = agent_b.tool("octendra_prepare_workspace", {"host_id": host_id})
             workspace_a = prepared_a["workspace"]["id"]
             workspace_b = prepared_b["workspace"]["id"]
             if workspace_a == workspace_b:
                 raise AssertionError("two Agent Sessions reused one workspace")
-            agent_a.expect_tool_error("remote_hosts_get_workspace_result", {"workspace_id": workspace_b, "limit": 10})
-            agent_b.expect_tool_error("remote_hosts_get_workspace_result", {"workspace_id": workspace_a, "limit": 10})
+            agent_a.expect_tool_error("octendra_get_workspace_result", {"workspace_id": workspace_b, "limit": 10})
+            agent_b.expect_tool_error("octendra_get_workspace_result", {"workspace_id": workspace_a, "limit": 10})
 
-            read_a = agent_a.tool("remote_hosts_run_in_workspace", {
+            read_a = agent_a.tool("octendra_run_in_workspace", {
                 "workspace_id": workspace_a, "command_profile": "host.identity", "args": [],
                 "idempotency_key": "read-a",
             })
-            read_b = agent_b.tool("remote_hosts_run_in_workspace", {
+            read_b = agent_b.tool("octendra_run_in_workspace", {
                 "workspace_id": workspace_b, "command_profile": "host.identity", "args": [],
                 "idempotency_key": "read-b",
             })
             wait_operation(agent_a, workspace_a, read_a["operation"]["id"])
             wait_operation(agent_b, workspace_b, read_b["operation"]["id"])
-            snapshot = agent_b.tool("remote_hosts_get_host_runtime_snapshot", {"host_id": host_id})
+            snapshot = agent_b.tool("octendra_get_host_runtime_snapshot", {"host_id": host_id})
             runtimes = [row.get("transport_runtime") for row in snapshot.get("access_paths", []) if row.get("transport_runtime")]
             if len(runtimes) != 1:
                 raise AssertionError(f"expected one pooled SSH runtime, observed {len(runtimes)}")
@@ -319,18 +319,18 @@ def main():
             if telemetry.get("successful_handshake_count") != 1 or telemetry.get("reuse_count", 0) < 1:
                 raise AssertionError(f"transport was not reused across Agent workspaces: {telemetry}")
 
-            pty_workspace_a = agent_a.tool("remote_hosts_prepare_workspace", {"host_id": host_id})["workspace"]["id"]
-            pty_workspace_b = agent_b.tool("remote_hosts_prepare_workspace", {"host_id": host_id})["workspace"]["id"]
+            pty_workspace_a = agent_a.tool("octendra_prepare_workspace", {"host_id": host_id})["workspace"]["id"]
+            pty_workspace_b = agent_b.tool("octendra_prepare_workspace", {"host_id": host_id})["workspace"]["id"]
             if pty_workspace_a in {workspace_a, workspace_b} or pty_workspace_b in {workspace_a, workspace_b, pty_workspace_a}:
                 raise AssertionError("PTY isolation requires fresh terminal-capable workspaces")
-            pty_a = agent_a.tool("remote_hosts_open_workspace_pty_session", {
+            pty_a = agent_a.tool("octendra_open_workspace_pty_session", {
                 "workspace_id": pty_workspace_a, "cwd": None, "session_id": None, "coordination_scopes": ["pty/a"],
             })["pty_session"]["pty_session_id"]
-            pty_b = agent_b.tool("remote_hosts_open_workspace_pty_session", {
+            pty_b = agent_b.tool("octendra_open_workspace_pty_session", {
                 "workspace_id": pty_workspace_b, "cwd": None, "session_id": None, "coordination_scopes": ["pty/b"],
             })["pty_session"]["pty_session_id"]
-            agent_a.expect_tool_error("remote_hosts_read_pty_output", {"pty_session_id": pty_b, "limit": 10})
-            agent_b.expect_tool_error("remote_hosts_control_pty", {
+            agent_a.expect_tool_error("octendra_read_pty_output", {"pty_session_id": pty_b, "limit": 10})
+            agent_b.expect_tool_error("octendra_control_pty", {
                 "pty_session_id": pty_a, "columns": 100, "rows": 30,
                 "pixel_width": None, "pixel_height": None, "signal": None,
                 "requested_by": "foreign", "idempotency_key": "foreign-resize",
@@ -339,7 +339,7 @@ def main():
             # regression. This multi-process gate is scoped to ownership isolation: neither
             # Agent Session may observe or control the sibling session's PTY record.
 
-            mutation_a = agent_a.tool("remote_hosts_run_in_workspace", {
+            mutation_a = agent_a.tool("octendra_run_in_workspace", {
                 "workspace_id": workspace_a,
                 "command_profile": "shell.posix",
                 "args": ["sleep 1; printf 'MUTATION_A_DONE\\n'"],
@@ -349,7 +349,7 @@ def main():
                 "idempotency_key": "mutation-a",
             })
             time.sleep(0.1)
-            mutation_b = agent_b.tool("remote_hosts_run_in_workspace", {
+            mutation_b = agent_b.tool("octendra_run_in_workspace", {
                 "workspace_id": workspace_b,
                 "command_profile": "shell.posix",
                 "args": ["printf 'MUTATION_B_DONE\\n'"],
@@ -358,15 +358,15 @@ def main():
                 "coordination_scope": "host",
                 "idempotency_key": "mutation-b",
             })
-            blocked_snapshot = agent_b.tool("remote_hosts_get_host_runtime_snapshot", {"host_id": host_id})
+            blocked_snapshot = agent_b.tool("octendra_get_host_runtime_snapshot", {"host_id": host_id})
             if not any(item.get("code") == "host_write_lease_wait" for item in blocked_snapshot.get("attention", [])):
                 raise AssertionError("second Agent Session did not observe the host write-lease blocker")
             wait_operation(agent_a, workspace_a, mutation_a["operation"]["id"], timeout=30)
             wait_operation(agent_b, workspace_b, mutation_b["operation"]["id"], timeout=30)
 
-            agent_a.tool("remote_hosts_close_pty_session", {"pty_session_id": pty_a, "last_exit_code": 0})
-            agent_b.tool("remote_hosts_close_pty_session", {"pty_session_id": pty_b, "last_exit_code": 0})
-            final_snapshot = agent_b.tool("remote_hosts_get_host_runtime_snapshot", {"host_id": host_id})
+            agent_a.tool("octendra_close_pty_session", {"pty_session_id": pty_a, "last_exit_code": 0})
+            agent_b.tool("octendra_close_pty_session", {"pty_session_id": pty_b, "last_exit_code": 0})
+            final_snapshot = agent_b.tool("octendra_get_host_runtime_snapshot", {"host_id": host_id})
             final_runtime = next(row["transport_runtime"] for row in final_snapshot["access_paths"] if row.get("transport_runtime"))
             final_telemetry = final_runtime["telemetry"]
             if final_telemetry.get("successful_handshake_count") != 1 or final_telemetry.get("reuse_count", 0) < 4:

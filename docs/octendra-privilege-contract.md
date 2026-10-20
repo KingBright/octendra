@@ -1,8 +1,8 @@
 # Octendra 跨平台管理员能力：第一步合同
 
-本步在原 remote-hosts-admin crate 内增加 privilege 模块及只读 CLI。
+本步在原 octendra-admin crate 内增加 privilege 模块及只读 CLI。
 没有安装器变更、sudoers、服务配置、密码采集、管理员执行入口或新的任务数据库。
-旧 remove_legacy_remoteplay 协议、任务日志和 transport 保持原语义。
+旧 remove_legacy_weavelo 协议、任务日志和 transport 保持原语义。
 
 ## 实际已实现与边界
 
@@ -28,8 +28,8 @@
 以下命令须使用本次源码构建的候选，不代表已部署 Agent 暴露了新 MCP 工具：
 
 ```sh
-remote-hosts-admin privilege status
-remote-hosts-admin privilege plan \
+octendra-admin privilege status
+octendra-admin privilege plan \
   --request-id <原操作的规范UUID> --device-id <设备UUID> \
   --action exact-source-dns-repair \
   --expected-policy-sha256 <64位小写摘要> \

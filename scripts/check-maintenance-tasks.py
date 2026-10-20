@@ -31,7 +31,7 @@ def run(root, evidence, device_id, dependency_lock, accept_lock_sha256):
     if lock_sha256 != accept_lock_sha256:
         raise ValueError('candidate_lock_digest_mismatch')
     packages=tomllib.loads(lock_data.decode())['package']
-    if not any(p['name']=='remote-hosts-admin' and p['version']=='0.1.0' for p in packages):
+    if not any(p['name']=='octendra-admin' and p['version']=='0.1.0' for p in packages):
         raise ValueError('candidate_lock_missing_helper')
     evidence=evidence.absolute()
     if evidence.exists():
@@ -141,24 +141,24 @@ def run(root, evidence, device_id, dependency_lock, accept_lock_sha256):
             env=dict(os.environ,CARGO_TARGET_DIR=str(root/'target/admin-maintenance-task-slot/cargo-target'))
             cargo_manifest=str(evidence/'source/Cargo.toml')
             check('format',['cargo','fmt','--manifest-path',cargo_manifest,'--','--check'])
-            common=['--offline','--locked','--manifest-path',cargo_manifest,'-p','remote-hosts-admin']
+            common=['--offline','--locked','--manifest-path',cargo_manifest,'-p','octendra-admin']
             check('tests',['cargo','test',*common],limit=1200)
             check('clippy',['cargo','clippy',*common,'--all-targets','--','-D','warnings'],limit=600)
             check('build',['cargo','build',*common],limit=600)
             report['resolved_cargo_lock_sha256']=build_slot.digest(evidence/'source/Cargo.lock')
             if report['resolved_cargo_lock_sha256']!=lock_sha256:
                 raise RuntimeError('candidate_lock_changed')
-            binary=Path(env['CARGO_TARGET_DIR'])/'debug/remote-hosts-admin'
+            binary=Path(env['CARGO_TARGET_DIR'])/'debug/octendra-admin'
             report['binary_sha256']=build_slot.digest(binary)
             state=evidence/'ordinary-task-records'
             state.mkdir(mode=0o700)
             def cli(name,words,expected=0):
                 return check(name,[str(binary),'task',*words],expected,True,30)
-            description=cli('describe',['describe','--action','repair-remoteplay-mesh-ownership'])
+            description=cli('describe',['describe','--action','repair-weavelo-mesh-ownership'])
             assert description['privileged_executor_implemented'] is False and description['arbitrary_commands'] is False
             common=['--state-dir',str(state)]
             request_id=str(uuid.uuid4())
-            words=['prepare',*common,'--request-id',request_id,'--device-id',device_id,'--action','inspect-remoteplay-mesh']
+            words=['prepare',*common,'--request-id',request_id,'--device-id',device_id,'--action','inspect-weavelo-mesh']
             prepared=cli('prepare',words)
             assert prepared==cli('prepare-replay',words)
             execute=['run',*common,'--request-id',request_id,'--plan-sha256',prepared['plan_sha256']]
@@ -168,7 +168,7 @@ def run(root, evidence, device_id, dependency_lock, accept_lock_sha256):
             verification=cli('verify',['verify',*common,'--request-id',request_id])
             assert verification['comparison']=='unchanged' and verification['administrator_repair_verified'] is False
             blocked_id=str(uuid.uuid4())
-            blocked=cli('prepare-privileged',['prepare',*common,'--request-id',blocked_id,'--device-id',device_id,'--action','repair-remoteplay-mesh-ownership'])
+            blocked=cli('prepare-privileged',['prepare',*common,'--request-id',blocked_id,'--device-id',device_id,'--action','repair-weavelo-mesh-ownership'])
             words=['run',*common,'--request-id',blocked_id,'--plan-sha256',blocked['plan_sha256']]
             outcome=cli('block-privileged',words,2)
             assert outcome['state']=='awaiting_platform_authorization' and outcome['system_changes_confirmed'] is False

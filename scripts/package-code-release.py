@@ -75,12 +75,12 @@ def main():
         raise SystemExit('verified source changed or evidence incomplete: ' + ', '.join(mismatches))
     target = release_current.established_target(ROOT)
     files = {
-        'remote-hosts-code-macos-arm64': target/'release/remote-hosts-code',
-        'remote-hosts-code-linux-amd64': target/'x86_64-unknown-linux-musl/release/remote-hosts-code',
-        'remote-hosts-code-windows-amd64.exe': target/'x86_64-pc-windows-msvc/release/remote-hosts-code.exe',
-        'remote-hosts-macos-arm64': target/'release/remote-hosts',
-        'remote-hosts-linux-amd64': target/'x86_64-unknown-linux-musl/release/remote-hosts',
-        'remote-hosts-windows-amd64.exe': target/'x86_64-pc-windows-msvc/release/remote-hosts.exe',
+        'octendra-code-macos-arm64': target/'release/octendra-code',
+        'octendra-code-linux-amd64': target/'x86_64-unknown-linux-musl/release/octendra-code',
+        'octendra-code-windows-amd64.exe': target/'x86_64-pc-windows-msvc/release/octendra-code.exe',
+        'octendra-macos-arm64': target/'release/octendra',
+        'octendra-linux-amd64': target/'x86_64-unknown-linux-musl/release/octendra',
+        'octendra-windows-amd64.exe': target/'x86_64-pc-windows-msvc/release/octendra.exe',
         'upgrade-code-agent.py': ROOT/'scripts/upgrade-code-agent.py',
         'agent_upgrade_support.py': ROOT/'scripts/agent_upgrade_support.py',
         'launch-code-upgrade.py': ROOT/'scripts/launch-code-upgrade.py',
@@ -105,12 +105,12 @@ def main():
         'gateway_self_upgrade_runner.py': ROOT/'scripts/gateway_self_upgrade_runner.py',
     }
     binary_platforms = {
-        'remote-hosts-code-macos-arm64': 'macos',
-        'remote-hosts-code-linux-amd64': 'linux',
-        'remote-hosts-code-windows-amd64.exe': 'windows',
-        'remote-hosts-macos-arm64': 'macos',
-        'remote-hosts-linux-amd64': 'linux',
-        'remote-hosts-windows-amd64.exe': 'windows',
+        'octendra-code-macos-arm64': 'macos',
+        'octendra-code-linux-amd64': 'linux',
+        'octendra-code-windows-amd64.exe': 'windows',
+        'octendra-macos-arm64': 'macos',
+        'octendra-linux-amd64': 'linux',
+        'octendra-windows-amd64.exe': 'windows',
     }
     files = {name: path for name, path in files.items()
              if name not in binary_platforms or binary_platforms[name] in platforms}
@@ -118,18 +118,18 @@ def main():
         if not path.is_file():
             raise SystemExit('missing artifact: ' + str(path))
     input_hashes = {name: digest(path) for name, path in files.items()}
-    native = target/'release/remote-hosts-code'
+    native = target/'release/octendra-code'
     if not native.is_file():
         raise SystemExit('missing native release machine contract executable')
     actual = subprocess.check_output([str(native), '--version'], text=True).strip()
-    if actual != 'remote-hosts-code ' + args.version:
+    if actual != 'octendra-code ' + args.version:
         raise SystemExit('native artifact version mismatch')
     try:
         contract = machine_contract(native, args.version)
     except ValueError as error:
         raise SystemExit(str(error)) from error
     if 'windows' in platforms:
-        for name in ('remote-hosts-code-windows-amd64.exe', 'remote-hosts-windows-amd64.exe'):
+        for name in ('octendra-code-windows-amd64.exe', 'octendra-windows-amd64.exe'):
             if files[name].read_bytes()[:2] != b'MZ':
                 raise SystemExit('Windows artifact is not a PE executable: '+name)
     # Compile helper source without importing it or running any deployment action.
@@ -160,7 +160,7 @@ def main():
         'components': {
             'code': {'version': args.version, 'roles': ['agent', 'gateway']},
             'native_cli': {
-                'source_version': tomllib.loads((ROOT/'crates/remote-hosts-cli/Cargo.toml').read_text())['package']['version'],
+                'source_version': tomllib.loads((ROOT/'crates/octendra-cli/Cargo.toml').read_text())['package']['version'],
                 'roles': ['cli', 'mcp', 'api', 'connector'],
             },
         },
@@ -176,7 +176,7 @@ def main():
     }
     (stage/'manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')
     (stage/'SHA256SUMS').write_text(''.join(digest(stage/name)+'  '+name+'\n' for name in sorted([*files,'manifest.json','source-verification.json'])))
-    (stage/'README.md').write_text('# Remote Hosts '+args.version+'\n\nThe bundle is the release identity. Upgrade the Gateway before Agents, or use fleet-upgrade.py to converge the whole fleet. Keep existing device identities.\nIncluded platform binaries and updater helpers are bound by manifest.json; omitted platforms remain pending.\nRecord actual runtime versions and check binary SHA-256 against manifest.json.\nAcceptance is capability-based: required capabilities must be present; additive tools are allowed.\nSource verification is not a deployment acceptance receipt.\n')
+    (stage/'README.md').write_text('# Octendra '+args.version+'\n\nThe bundle is the release identity. Upgrade the Gateway before Agents, or use fleet-upgrade.py to converge the whole fleet. Keep existing device identities.\nIncluded platform binaries and updater helpers are bound by manifest.json; omitted platforms remain pending.\nRecord actual runtime versions and check binary SHA-256 against manifest.json.\nAcceptance is capability-based: required capabilities must be present; additive tools are allowed.\nSource verification is not a deployment acceptance receipt.\n')
     with tarfile.open(bundle,'x:gz') as archive:
         for path in sorted(dest.iterdir(), key=lambda p:p.name):
             if path.is_file(): archive.add(path,arcname=path.name)

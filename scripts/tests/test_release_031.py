@@ -139,7 +139,7 @@ class LauncherTests(unittest.TestCase):
         self.assertNotIn('sh', value['ProgramArguments'])
         stable = launcher.stable_plist(p/'python', {'runner':p/'runner','request':p/'request','directory':p})
         self.assertIs(stable['RunAtLoad'], False)
-        self.assertEqual(stable['Label'], 'com.remote-hosts.code-upgrade')
+        self.assertEqual(stable['Label'], 'fun.hackerlife.octendra.upgrade')
 
     def test_prepare_snapshots_updater_and_reuses_same_job(self):
         with tempfile.TemporaryDirectory() as d:
@@ -161,7 +161,7 @@ class LauncherTests(unittest.TestCase):
             candidate = pathlib.Path(d)/'candidate'
             candidate.write_bytes(b'fixture')
             record = launcher.prepare(argparse.Namespace(candidate=candidate, sha256=launcher.sha(candidate), version='0.3.1'), pathlib.Path(d))
-            unloaded={'loaded':False,'running':False,'service':'gui/501/com.remote-hosts.code-upgrade'}
+            unloaded={'loaded':False,'running':False,'service':'gui/501/fun.hackerlife.octendra.upgrade'}
             with mock.patch.object(launcher, 'service_state', side_effect=[unloaded, unloaded]), \
                  mock.patch.object(launcher, 'cleanup_legacy_jobs', return_value=0), \
                  mock.patch.object(launcher.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
@@ -177,7 +177,7 @@ class LauncherTests(unittest.TestCase):
             candidate = pathlib.Path(d)/'candidate'
             candidate.write_bytes(b'fixture')
             record = launcher.prepare(argparse.Namespace(candidate=candidate, sha256=launcher.sha(candidate), version='0.3.1'), pathlib.Path(d))
-            unloaded={'loaded':False,'running':False,'service':'gui/501/com.remote-hosts.code-upgrade'}
+            unloaded={'loaded':False,'running':False,'service':'gui/501/fun.hackerlife.octendra.upgrade'}
             with mock.patch.object(launcher, 'service_state', side_effect=[unloaded, unloaded]), \
                  mock.patch.object(launcher, 'cleanup_legacy_jobs', return_value=0), \
                  mock.patch.object(launcher.subprocess, 'run', side_effect=subprocess.TimeoutExpired('launchctl', 10)) as run:
@@ -236,10 +236,10 @@ class LauncherTests(unittest.TestCase):
             self.assertFalse(launcher.service_state('gui/501', 'legacy')['updater_job'])
 
     def test_cleanup_recognizes_both_legacy_names_without_touching_unknown_jobs(self):
-        old = 'com.remote-hosts.code-agent-upgrade.0.10.35.v7.20261012'
-        previous = 'com.remote-hosts.code-upgrade.abcdef'
-        unknown = 'com.remote-hosts.code-agent-upgrade.unrelated'
-        listing = '\n'.join([old, previous, unknown, launcher.STABLE_LABEL, 'com.remote-hosts.code-agent'])
+        old = 'fun.hackerlife.octendra.agent-upgrade.0.10.35.v7.20261012'
+        previous = 'fun.hackerlife.octendra.upgrade.abcdef'
+        unknown = 'fun.hackerlife.octendra.agent-upgrade.unrelated'
+        listing = '\n'.join([old, previous, unknown, launcher.STABLE_LABEL, 'fun.hackerlife.octendra.agent'])
         def state(domain, label):
             return {'loaded': True, 'running': False, 'pid': None, 'state': 'spawn scheduled',
                     'service': domain+'/'+label, 'updater_job': label != unknown}
@@ -250,7 +250,7 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(removed, {'gui/501/'+old, 'gui/501/'+previous})
 
     def test_live_or_exiting_legacy_updater_and_failed_cleanup_block_launch(self):
-        label = 'com.remote-hosts.code-agent-upgrade.0.10.35.v7'
+        label = 'fun.hackerlife.octendra.agent-upgrade.0.10.35.v7'
         for running, pid, boot_exit in [(True, 42, 0), (False, 42, 0), (False, None, 5)]:
             with self.subTest(running=running, pid=pid, exit=boot_exit):
                 state = {'loaded': True, 'running': running, 'pid': pid, 'updater_job': True, 'service': 'gui/501/'+label}

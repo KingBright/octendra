@@ -47,7 +47,7 @@ def validate(data):
 
 def render(data):
     counts = validate(data)
-    lines = ['# Remote Hosts 产品问题清单', '',
+    lines = ['# Octendra 产品问题清单', '',
              '> 唯一事实源：`docs/product/backlog.json`。本页由 `scripts/product-backlog.py --render` 生成。', '',
              '更新日期：' + data['updated_at'] + '。共 ' + str(len(data['items'])) + ' 项。', '',
              '已验证候选不等于线上修复；部分修复不能关闭整项。关闭必须附本项验收证据。', '',

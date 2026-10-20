@@ -1,12 +1,12 @@
 # Token Efficiency Contract
 
-Remote Hosts treats model context as a scarce execution resource. The durable machine record and the model-facing view are deliberately different: exact redacted output remains recoverable, while normal Agent responses carry only the information needed for the next decision.
+Octendra treats model context as a scarce execution resource. The durable machine record and the model-facing view are deliberately different: exact redacted output remains recoverable, while normal Agent responses carry only the information needed for the next decision.
 
 ## Design Principle
 
 `raw durable state -> shared semantic compaction -> protocol-specific compact envelope -> Agent`
 
-Both Remote Hosts implementations use the same `remote-hosts-token-output` crate for command classification and text compaction. `remote-hosts-code` keeps only Code-gateway envelope logic; `remote-hosts-mcp` keeps only durable operation/PTY/artifact grouping and cursor logic.
+Both Octendra implementations use the same `octendra-token-output` crate for command classification and text compaction. `octendra-code` keeps only Code-gateway envelope logic; `octendra-mcp` keeps only durable operation/PTY/artifact grouping and cursor logic.
 
 A filter may remove only known routine noise. Unknown text, failures and source locations survive. Exact redacted output remains available with `output_mode=full`; an Agent expands the existing result instead of rerunning the command.
 
@@ -66,7 +66,7 @@ A caller can switch to `output_mode=full` at the same raw cursor/sequence/offset
 
 The default Agent tool profile is task-oriented rather than administrative. Agent Work Context replaces ordinary workspace-state polling. Admin/full profiles retain legacy/diagnostic tools.
 
-`skills/remote-hosts-agent/SKILL.md` is the hot rule set. Installation, SSH error taxonomy, topology, MinIO, instance sync and detailed MCP procedures live under `skills/remote-hosts-agent/references/` and are read only for the relevant workflow.
+`skills/octendra-agent/SKILL.md` is the hot rule set. Installation, SSH error taxonomy, topology, MinIO, instance sync and detailed MCP procedures live under `skills/octendra-agent/references/` and are read only for the relevant workflow.
 
 When adding a new tool or rule, prefer a short invariant in the hot surface and a detailed cold reference. Do not duplicate a full procedure in both places.
 

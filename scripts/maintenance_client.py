@@ -27,7 +27,7 @@ class MaintenanceLease:
         data=json.dumps(value).encode()
         for attempt in range(3):
             request=urllib.request.Request(self.config['gateway_url']+'/device/maintenance',data=data,
-                headers={'Content-Type':'application/json','Accept':'application/json','User-Agent':'RemoteHosts-Updater/0.5.0','Authorization':'Bearer '+self.config['device_token']})
+                headers={'Content-Type':'application/json','Accept':'application/json','User-Agent':'Octendra-Updater/0.5.0','Authorization':'Bearer '+self.config['device_token']})
             try:
                 with self.opener.open(request,timeout=10) as response:
                     payload=response.read(16385)

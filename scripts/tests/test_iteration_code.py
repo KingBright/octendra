@@ -18,21 +18,21 @@ class IterationPolicyTests(unittest.TestCase):
 
     def test_skill_only_uses_lightest_gate(self):
         self.assertEqual(iteration.classify([
-            'skills/remote-hosts-agent/SKILL.md',
-            'skills/remote-hosts-agent/references/setup-and-runtime.md',
+            'skills/octendra-agent/SKILL.md',
+            'skills/octendra-agent/references/setup-and-runtime.md',
         ]), 'skill')
 
     def test_docs_plus_skill_uses_skill_gate(self):
-        self.assertEqual(iteration.classify(['docs/product/NEXT.md','skills/remote-hosts-agent/SKILL.md']), 'skill')
+        self.assertEqual(iteration.classify(['docs/product/NEXT.md','skills/octendra-agent/SKILL.md']), 'skill')
 
     def test_release_python_does_not_force_rust_rebuild(self):
         self.assertEqual(iteration.classify(['scripts/check-code-gateway.py',
                                              'scripts/tests/test_acceptance_scope_032.py',
                                              'docs/releases/0.7.1/RELEASE.md',
-                                             'skills/remote-hosts-agent/SKILL.md']), 'release_python')
+                                             'skills/octendra-agent/SKILL.md']), 'release_python')
 
     def test_runtime_change_requires_full_release_pipeline(self):
-        for paths in (['crates/remote-hosts-code/src/agent.rs'], ['Cargo.lock'],
+        for paths in (['crates/octendra-code/src/agent.rs'], ['Cargo.lock'],
                       ['migrations/0001_initial.sql'], ['scripts/a.py','crates/x/src/lib.rs']):
             self.assertEqual(iteration.classify(paths), 'runtime', paths)
 
@@ -165,7 +165,7 @@ class CallerFlowTests(unittest.TestCase):
             runner.main()
         self.assertEqual([name for name,_ in calls],['format','task_authorization','queue_dispatch','receipts',
             'diagnostics','contract_export','upgrade_policy_guard','release_manifest','catalog_contract','experience_contract'])
-        self.assertEqual(calls[1][1],['cargo','test','--offline','--locked','-p','remote-hosts-code','--lib',
+        self.assertEqual(calls[1][1],['cargo','test','--offline','--locked','-p','octendra-code','--lib',
                                     'task_authorization','--','--nocapture'])
         self.assertEqual(json.loads(report.read_text())['state'],'passed')
 

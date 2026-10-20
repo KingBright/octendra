@@ -8,7 +8,7 @@ The change does not weaken FULL persistence, skip authorization, replace origina
 
 ## Regression scope
 
-`cargo test -p remote-hosts-code --lib terminal_completion_tests` executes real native shell children with a loopback-only HTTP receiver and synthetic configuration. The event tests use a sixty-second fallback interval but require completion publication within a bounded five-second wait. This distinguishes event delivery from periodic polling without requiring a submillisecond scheduler benchmark. A blocked first request verifies that a completion is retained without a concurrent heartbeat; a rejected completion verifies retry of the same terminal state.
+`cargo test -p octendra-code --lib terminal_completion_tests` executes real native shell children with a loopback-only HTTP receiver and synthetic configuration. The event tests use a sixty-second fallback interval but require completion publication within a bounded five-second wait. This distinguishes event delivery from periodic polling without requiring a submillisecond scheduler benchmark. A blocked first request verifies that a completion is retained without a concurrent heartbeat; a rejected completion verifies retry of the same terminal state.
 
 `scripts/check-terminal-delivery.py` uses the installed Rust adapter, explicit authorized workspace IDs and a unique run ID. It records fixed success, exit-code-seven and delayed-output cases. Exact output, durable evidence, operation identity and cleanup are verified. Slow cases remain in the report. The reports separate functional success, call-count targets and a five-second short-command threshold. The latter is a sample criterion, not proof of a fleet-wide percentile. The helper does not deploy software or restart services.
 

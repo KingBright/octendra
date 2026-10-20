@@ -1,18 +1,18 @@
-# Remote Hosts 受限管理员维护组件
+# Octendra 受限管理员维护组件
 
 ## 当前交付边界
 
-`remote-hosts-admin 0.1.0` 是单独准备、尚未安装的候选组件。普通 Remote Hosts / remote-hosts-code 代理仍以普通用户运行；不修改它们的安全配置，不增设通用 sudoers 规则，不接收管理员密码，不升级 Gateway，不安装其他远程桌面或组网软件。
+`octendra-admin 0.1.0` 是单独准备、尚未安装的候选组件。普通 Octendra / octendra-code 代理仍以普通用户运行；不修改它们的安全配置，不增设通用 sudoers 规则，不接收管理员密码，不升级 Gateway，不安装其他远程桌面或组网软件。
 
 本轮范围是代码、测试、安装准备。**没有运行安装器的 `--apply`，也没有启动 root helper 或执行真实清理。** 代码编译和不带 `--apply` 的安装预览不是系统安装验收。
 
-两种 Remote Hosts 入口通过已有终端工具调用同一个 CLI，使用同一套 Rust 协议、状态机与执行器。现阶段没有增加新的 MCP 工具名，避免误称当前 Gateway 已经提供新的管理员接口。Windows 不在 0.1 的管理员实现范围；本组件不改变 cube 的 UAC 或代理权限。
+两种 Octendra 入口通过已有终端工具调用同一个 CLI，使用同一套 Rust 协议、状态机与执行器。现阶段没有增加新的 MCP 工具名，避免误称当前 Gateway 已经提供新的管理员接口。Windows 不在 0.1 的管理员实现范围；本组件不改变 cube 的 UAC 或代理权限。
 
 ## 授权与通信
 
 ```text
-已授权的 Remote Hosts 普通用户终端
-        ↓ 同一个 remote-hosts-admin CLI
+已授权的 Octendra 普通用户终端
+        ↓ 同一个 octendra-admin CLI
 本机 Unix socket，内核提供 peer UID，客户端也验证服务端为 root
         ↓ root 所有且不可由普通用户改写的策略
 独立、首次需要管理员授权安装的系统服务
@@ -28,28 +28,28 @@ Linux 的普通代理保留 `NoNewPrivileges`。已经由管理员单独安装�
 
 ## 0.1 唯一写动作
 
-动作名：`remove_legacy_remoteplay`。请求不能替换动作中的路径、服务或进程名称。
+动作名：`remove_legacy_weavelo`。请求不能替换动作中的路径、服务或进程名称。
 
 ### Linux
 
-只处理以下两个旧系统服务，先旧 RemotePlay，再 EasyTier：
+只处理以下两个旧系统服务，先旧 Weavelo，再 EasyTier：
 
 ```text
-remote-play.service
-easytier-remoteplay.service
+weavelo.service
+easytier-weavelo.service
 ```
 
 停止并禁用后，将 `/etc/systemd/system/` 下这两个精确服务文件保存在 root 私有回执目录，再移除原文件并执行 daemon-reload。服务文件必须受 root 控制；不同 FragmentPath、未审阅的 drop-in、符号链接、硬链接等情况拒绝处理，不做猜测。
 
-`remote-play-current.service` 是受保护的新版本**用户级**服务。开始前和结束后检查它仍为 active。不会禁用它，也不会修改 Remote Hosts 的服务。
+`weavelo-current.service` 是受保护的新版本**用户级**服务。开始前和结束后检查它仍为 active。不会禁用它，也不会修改 Octendra 的服务。
 
 ### macOS
 
 以安装时绑定的 home 为前缀，只允许以下三个旧可执行文件：
 
 ```text
-remote_play_test/RemotePlay Unified.app/Contents/MacOS/remote_play
-remote_play_test/RemotePlay Unified.app/Contents/Resources/bin/easytier-core
+weavelo_test/Weavelo Unified.app/Contents/MacOS/weavelo
+weavelo_test/Weavelo Unified.app/Contents/Resources/bin/easytier-core
 workspace/vpn/bin/macos/easytier-core
 ```
 
@@ -57,7 +57,7 @@ workspace/vpn/bin/macos/easytier-core
 
 三个文件的精确字节备份到 root 私有目录，核对哈希后才移除源文件。文件操作逐层以目录描述符固定父目录，拒绝跟随符号链接，不递归删除目录。
 
-保留 `Applications/RemotePlay.app/Contents/MacOS/remote_play`、`com.remoteplay.host` 新版启动项和 `/Applications/UURemote.app/`。新版 RemotePlay 必须运行；如果原先存在 UU 进程，结束后还必须能观察到 UU。这里的进程状态检查**不等于**已完成串流和输入功能验收。
+保留 `Applications/Weavelo.app/Contents/MacOS/weavelo`、`com.weavelo.host` 新版启动项和 `/Applications/UURemote.app/`。新版 Weavelo 必须运行；如果原先存在 UU 进程，结束后还必须能观察到 UU。这里的进程状态检查**不等于**已完成串流和输入功能验收。
 
 这项动作只验收上面明确列出的旧对象，不代表全盘残留或未知启动入口已全部清除。
 
@@ -66,19 +66,19 @@ workspace/vpn/bin/macos/easytier-core
 macOS 安装位置：
 
 ```text
-/Library/PrivilegedHelperTools/com.remotehosts.admin
-/Library/Application Support/RemoteHostsAdmin/helper.sock
-/Library/Application Support/RemoteHostsAdmin/policy.json
-/Library/Application Support/RemoteHostsAdmin/receipts/
+/Library/PrivilegedHelperTools/fun.hackerlife.octendra.admin
+/Library/Application Support/OctendraAdmin/helper.sock
+/Library/Application Support/OctendraAdmin/policy.json
+/Library/Application Support/OctendraAdmin/receipts/
 ```
 
 Linux 安装位置：
 
 ```text
-/var/lib/remote-hosts-admin/bin/remote-hosts-admin
-/run/remote-hosts-admin/helper.sock
-/var/lib/remote-hosts-admin/policy.json
-/var/lib/remote-hosts-admin/receipts/
+/var/lib/octendra-admin/bin/octendra-admin
+/run/octendra-admin/helper.sock
+/var/lib/octendra-admin/policy.json
+/var/lib/octendra-admin/receipts/
 ```
 
 macOS 使用持久化 socket 父目录，防止重启清空临时运行目录后无法启动；Linux 由 systemd 的 RuntimeDirectory 重建运行目录。
@@ -124,15 +124,15 @@ cargo build --release --manifest-path target/admin-helper-preparation/snapshot/C
 
 安装器要求 Python 的 `-I` 隔离模式，拒绝从用户可写包目录导入同名标准库模块。安装器不调用 sudo、不收集密码、不联网下载、不自动清理旧服务。它必须从另外获得系统认可的管理员会话运行。首次安装以外的覆盖更新默认拒绝；部分安装失败后需要检查固定目标路径，不得盲目反复安装。
 
-卸载器默认也只预览。经管理员明确执行后只移除这个 helper 的服务和二进制，保留策略、回执及备份，不修改 UU、新版 RemotePlay 或 Remote Hosts，不恢复 EasyTier。
+卸载器默认也只预览。经管理员明确执行后只移除这个 helper 的服务和二进制，保留策略、回执及备份，不修改 UU、新版 Weavelo 或 Octendra，不恢复 EasyTier。
 
 ## 下一次继续时的验收顺序
 
 1. 核对源快照与包摘要、目标设备身份和实际用户信息；确认这是此设备应安装的候选包。
 2. 验证正式管理员通道可用，再安装 helper。仅网络恢复时不直接认定有管理员权限。
-3. 以普通 Remote Hosts 通道执行 status，确认 UID、设备及 enabled 状态；检查未授权 UID 不能调用。
+3. 以普通 Octendra 通道执行 status，确认 UID、设备及 enabled 状态；检查未授权 UID 不能调用。
 4. plan 后核对精确目标与新版服务保护条件，才 apply；模拟断线后读取同一回执。
-5. 验收 EasyTier 旧对象、新版 RemotePlay、UU，以及重启后 helper 的可用性。
+5. 验收 EasyTier 旧对象、新版 Weavelo、UU，以及重启后 helper 的可用性。
 
 不能把单元测试、交叉编译或安装预览当作已经通过以上实机管理员验收。
 
@@ -144,20 +144,20 @@ cargo build --release --manifest-path target/admin-helper-preparation/snapshot/C
 
 ## 普通权限维护任务候选入口（未部署）
 
-`remote-hosts-admin task` 是同一 Rust 组件的普通用户入口，不连接管理员 socket，不调用 sudo、launchctl 或 shell，不读策略、配置或凭据，也不新增 MCP 工具或调度器。现有 root helper 协议和 `remove_legacy_remoteplay` 动作保持原范围；本次没有安装、启用或扩展任何 root grant。线上 Agent 的 `terminal:exec` 和升级回执仍不能证明管理员权限。
+`octendra-admin task` 是同一 Rust 组件的普通用户入口，不连接管理员 socket，不调用 sudo、launchctl 或 shell，不读策略、配置或凭据，也不新增 MCP 工具或调度器。现有 root helper 协议和 `remove_legacy_weavelo` 动作保持原范围；本次没有安装、启用或扩展任何 root grant。线上 Agent 的 `terminal:exec` 和升级回执仍不能证明管理员权限。
 
 仅支持两个封闭任务：
 
-- `inspect-remoteplay-mesh`：观察固定 launch plist 和两份 NativeMesh 配置的文件身份，成功表示元数据检查完成。
-- `repair-remoteplay-mesh-ownership`：记录特权需求，run 始终返回 `awaiting_platform_authorization` 和退出码 2，不执行修复。真正的固定范围为停用/卸载 `system/com.remoteplay.mesh`，将两份 root-owned 配置的 owner 修复为经认证账户 UID，保留 group/mode。该特权执行器尚未实现。
+- `inspect-weavelo-mesh`：观察固定 launch plist 和两份 NativeMesh 配置的文件身份，成功表示元数据检查完成。
+- `repair-weavelo-mesh-ownership`：记录特权需求，run 始终返回 `awaiting_platform_authorization` 和退出码 2，不执行修复。真正的固定范围为停用/卸载 `system/com.weavelo.mesh`，将两份 root-owned 配置的 owner 修复为经认证账户 UID，保留 group/mode。该特权执行器尚未实现。
 
-目标由系统账户 home 推导，不能请求任意路径：`/Library/LaunchDaemons/com.remoteplay.mesh.plist`，以及 `<home>/Library/Application Support/RemotePlay/NativeMesh/{mesh.conf,mesh.secret}`。目录逐层以 O_NOFOLLOW 固定，文件用 fstatat/AT_SYMLINK_NOFOLLOW 取 device、inode、UID/GID、mode、link count、size、mtime/ctime；不打开文件或计算内容摘要，拒绝符号链接、硬链接和其他账户文件。root-owned 0600 不被修改。计划摘要绑定原始元数据，执行只读检查时若身份变化则失败；verify 再观察并报告 unchanged/targets_changed，不执行或证明管理员修复。尚未观察服务的加载状态、进程/可执行身份或签名，未来特权执行前必须补齐这些检查。
+目标由系统账户 home 推导，不能请求任意路径：`/Library/LaunchDaemons/com.weavelo.mesh.plist`，以及 `<home>/Library/Application Support/Weavelo/NativeMesh/{mesh.conf,mesh.secret}`。目录逐层以 O_NOFOLLOW 固定，文件用 fstatat/AT_SYMLINK_NOFOLLOW 取 device、inode、UID/GID、mode、link count、size、mtime/ctime；不打开文件或计算内容摘要，拒绝符号链接、硬链接和其他账户文件。root-owned 0600 不被修改。计划摘要绑定原始元数据，执行只读检查时若身份变化则失败；verify 再观察并报告 unchanged/targets_changed，不执行或证明管理员修复。尚未观察服务的加载状态、进程/可执行身份或签名，未来特权执行前必须补齐这些检查。
 
 CLI 的 UID/GID/home 来自当前进程及系统账户，不接受参数覆盖。device-id 是调用者声明并绑定到回执的 UUID，**不是**从 Gateway 独立认证得到的设备证据；当前实现不得据此签发 root grant。普通任务目录只属于当前 UID，0700，无符号链接祖先；同一 UID 的进程具有同等信任，回执不是不可篡改审计。记录复用既有私有原子 JSON/fsync Store 和文件锁，不能与 root 回执目录混用。
 
 ```text
-<candidate> task describe --action repair-remoteplay-mesh-ownership
-<candidate> task prepare --state-dir <已存在的绝对路径0700目录> --request-id <固定UUID> --device-id <当前设备UUID> --action inspect-remoteplay-mesh
+<candidate> task describe --action repair-weavelo-mesh-ownership
+<candidate> task prepare --state-dir <已存在的绝对路径0700目录> --request-id <固定UUID> --device-id <当前设备UUID> --action inspect-weavelo-mesh
 <candidate> task run --state-dir <同目录> --request-id <同UUID> --plan-sha256 <prepare摘要>
 <candidate> task status --state-dir <同目录> --request-id <同UUID>
 <candidate> task verify --state-dir <同目录> --request-id <同UUID>

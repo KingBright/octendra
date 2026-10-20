@@ -10,7 +10,7 @@ class StatusClientTests(unittest.TestCase):
     def test_read_only_refresh_and_failure_contract(self):
         root = pathlib.Path(__file__).resolve().parents[2]
         result = subprocess.run(
-            ['node', '--test', str(root / 'crates/remote-hosts-code/tests/status_live_test.cjs')],
+            ['node', '--test', str(root / 'crates/octendra-code/tests/status_live_test.cjs')],
             capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 

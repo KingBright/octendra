@@ -106,7 +106,7 @@ class Dispatcher(private val context: Context, private val config: GatewayConfig
             "pull" -> {
                 val file = Policy.within(root, args.getString("path")); demand(!file.exists(), "destination_exists")
                 file.parentFile!!.mkdirs(); demand(root.usableSpace > Policy.MAX_FILE + 64L * 1024 * 1024, "storage_reserve_insufficient")
-                val tmp = File(file.parentFile, ".rh-pull-$id.tmp"); demand(tmp.createNewFile(), "staging_conflict")
+                val tmp = File(file.parentFile, ".octendra-pull-$id.tmp"); demand(tmp.createNewFile(), "staging_conflict")
                 try {
                     val result = bridge().execute(obj("op" to "pull", "path" to args.getString("source")), outputFile = tmp)
                     demand(result.optInt("exit_code", -1) == 0 && result.has("sha256"), "shell_file_read_failed")

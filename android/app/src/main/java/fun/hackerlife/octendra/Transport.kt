@@ -20,7 +20,7 @@ class Transport(val config: GatewayConfig) {
         c.readTimeout = 30000
         c.requestMethod = method
         c.setRequestProperty("Accept", "application/json")
-        c.setRequestProperty("User-Agent", "RemoteHosts-Android/${BuildConfig.VERSION_NAME}")
+        c.setRequestProperty("User-Agent", "Octendra-Android/${BuildConfig.VERSION_NAME}")
         if (authenticated) c.setRequestProperty("Authorization", "Bearer ${config.deviceToken}")
         connections.add(c)
         if (closed) { c.disconnect(); throw AgentError("transport_stopped") }

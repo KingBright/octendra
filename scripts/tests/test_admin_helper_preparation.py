@@ -48,7 +48,7 @@ class PreparationTests(unittest.TestCase):
         self.assertEqual(len(result['files']),5)
         for name,digest in result['files'].items(): self.assertEqual(m.sha(self.root/'bundle'/name),digest)
     def test_tampered_binary_refused(self):
-        self.prepare();(self.root/'bundle/remote-hosts-admin').write_bytes(b'replaced')
+        self.prepare();(self.root/'bundle/octendra-admin').write_bytes(b'replaced')
         run=subprocess.run([sys.executable,'-I',str(self.root/'bundle/install.py')],text=True,capture_output=True)
         self.assertNotEqual(run.returncode,0)
         self.assertIn('verification failed',run.stderr)
@@ -68,7 +68,7 @@ class PreparationTests(unittest.TestCase):
         with self.assertRaises(ValueError):m.binary_machine(self.binary,'linux')
     def test_macos_socket_persists_across_reboots(self):
         service=plistlib.loads(m.make_service('macos'))
-        self.assertIn('/Library/Application Support/RemoteHostsAdmin/helper.sock',service['ProgramArguments'])
+        self.assertIn('/Library/Application Support/OctendraAdmin/helper.sock',service['ProgramArguments'])
         self.assertNotIn('/bin/sh',service['ProgramArguments'])
         self.assertEqual(service['UserName'],'root')
     def test_linux_preserves_agent_sandbox(self):
@@ -76,7 +76,7 @@ class PreparationTests(unittest.TestCase):
         self.assertIn('NoNewPrivileges=yes',service)
         self.assertIn('RestrictAddressFamilies=AF_UNIX',service)
         self.assertNotIn('sudo',service)
-        self.assertNotIn('remote-hosts-code.service',service)
+        self.assertNotIn('octendra-code.service',service)
     def test_no_auto_cleanup_in_service(self):
         for target in ('macos','linux'):
             service=m.make_service(target).decode()

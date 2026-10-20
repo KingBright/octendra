@@ -109,15 +109,15 @@ def main():
     if args.idle_timeout < 0:
         parser.error('idle-timeout must not be negative')
     os.umask(0o077)
-    base = pathlib.Path.home() / '.local/share/remote-hosts-code'
+    base = pathlib.Path.home() / '.local/share/octendra-code'
     with upgrade_lock(base):
         perform_upgrade(args, base)
 
 
 def perform_upgrade(args, base):
-    binary = base / 'bin/remote-hosts-code'
+    binary = base / 'bin/octendra-code'
     config_path = base / 'agent.json'
-    service = 'gui/%d/com.remote-hosts.code-agent' % os.getuid()
+    service = 'gui/%d/fun.hackerlife.octendra.agent' % os.getuid()
     record = {'version': args.version, 'candidate_sha256': args.sha256, 'state': 'preflight'}
     backup = None
     changed = False
@@ -152,7 +152,7 @@ def perform_upgrade(args, base):
         signed = macos_code_identity.sign_copy(args.candidate, signed_candidate, base)
         record['signing'].update(installed_sha256=signed['installed_sha256'])
         version = subprocess.check_output([str(signed_candidate), '--version'], text=True, timeout=10).strip()
-        if version != 'remote-hosts-code ' + args.version:
+        if version != 'octendra-code ' + args.version:
             raise RuntimeError('signed candidate version mismatch')
         config = json.loads(config_path.read_text())
         database = pathlib.Path(config['state_dir']) / 'state.sqlite'
@@ -160,7 +160,7 @@ def perform_upgrade(args, base):
         remote_before = gateway_observation(config)
         record['gateway_preflight'] = remote_before.get('_transport', {})
         record['phase'] = 'candidate_validation'
-        old_version = subprocess.check_output([str(binary), '--version'], text=True, timeout=10).strip().removeprefix('remote-hosts-code ')
+        old_version = subprocess.check_output([str(binary), '--version'], text=True, timeout=10).strip().removeprefix('octendra-code ')
         subprocess.run([str(signed_candidate), 'check', '--agent', '--config', str(config_path)], check=True, stdout=subprocess.DEVNULL, timeout=15)
         record['phase'] = 'waiting_idle'
         maintenance=MaintenanceLease(config)
@@ -181,7 +181,7 @@ def perform_upgrade(args, base):
             time.sleep(1)
         backup_dir = base / 'releases' / ('before-' + args.version + '-' + time.strftime('%Y%m%dT%H%M%S') + '-' + uuid.uuid4().hex[:8])
         backup_dir.mkdir(parents=True, exist_ok=False)
-        backup = backup_dir / 'remote-hosts-code'
+        backup = backup_dir / 'octendra-code'
         shutil.copy2(binary, backup)
         record.update(backup=str(backup), previous_sha256=sha(backup))
         record['phase'] = 'installing'

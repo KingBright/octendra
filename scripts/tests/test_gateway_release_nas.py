@@ -25,7 +25,7 @@ class DiscoveryTests(unittest.TestCase):
         (self.proc / "123").mkdir()
         self.install = self.root / "install"
         self.install.mkdir()
-        self.binary = self.install / "remote-hosts-code"
+        self.binary = self.install / "octendra-code"
         self.binary.write_bytes(b"synthetic previous")
         self.identity = {"root": self.install, "binary": self.binary, "pid": 123,
                          "running": True, "installed_sha256": stage.BINARY_IDENTITIES["0.10.25"]}
@@ -72,7 +72,7 @@ class DiscoveryTests(unittest.TestCase):
         alias = self.root / "alias"
         alias.symlink_to(self.install, target_is_directory=True)
         with mock.patch.object(stage, "NAS_ROOT", alias), \
-             mock.patch.object(stage.os, "readlink", return_value=str(alias / "remote-hosts-code")), \
+             mock.patch.object(stage.os, "readlink", return_value=str(alias / "octendra-code")), \
              self.assertRaises(stage.StageError) as caught:
             stage.checked_identity(123)
         self.assertEqual(caught.exception.code, "symlink_in_installation")
@@ -149,7 +149,7 @@ class PreOAuthTests(unittest.TestCase):
             with mock.patch.object(release.sys, "argv", ["gateway_release.py", "--report-dir",
                  str(report), "--execute", "--oauth-browser", "--origin", release.ORIGIN,
                  "--ssh-account", "owner@gateway.example",
-                 "--installation-root", "/srv/remote-hosts-code"]), \
+                 "--installation-root", "/srv/octendra-code"]), \
                  mock.patch.object(release.sys.stdin, "isatty", return_value=True), \
                  mock.patch.object(release.sys.stderr, "isatty", return_value=True), \
                  mock.patch.object(release, "verify_release", return_value=identity), \
@@ -161,7 +161,7 @@ class PreOAuthTests(unittest.TestCase):
             client.assert_not_called()
             oauth.assert_not_called()
             ssh.request.assert_called_once_with("probe", dict(identity["plan"],
-                origin=release.ORIGIN, installation_root="/srv/remote-hosts-code"))
+                origin=release.ORIGIN, installation_root="/srv/octendra-code"))
             self.assertTrue((report / "gateway-preflight.json").is_file())
             failure = json.loads(output.getvalue())
             self.assertEqual(failure["error_code"], "gateway_publication_controller_unavailable")

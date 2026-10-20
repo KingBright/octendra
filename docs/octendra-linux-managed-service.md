@@ -1,6 +1,6 @@
 # 管理员执行组件：受管 Linux 服务后端（代码增量）
 
-本步在 remote-hosts-admin 内复用原 Unix socket、Policy、Engine、Store、
+本步在 octendra-admin 内复用原 Unix socket、Policy、Engine、Store、
 Request 和 Record；没有第二套任务 UUID、数据库、credential 或网络入口。
 本步仅源码与隔离测试，不安装或启用 helper，不变更 sudoers、DNS、NNP、
 主机权限或线上版本。
@@ -8,9 +8,9 @@ Request 和 Record；没有第二套任务 UUID、数据库、credential 或网�
 ## 已实现的范围
 
 - Engine 的后端选择封闭动作，并把后端 root grant 合入原 plan.policy_sha256。
-  旧 remove_legacy_remoteplay 后端的默认动作和策略摘要保持原格式。
+  旧 remove_legacy_weavelo 后端的默认动作和策略摘要保持原格式。
 - Linux ManagedServiceBackend 仅支持 managed_service_restart，
-  唯一资源为 remote-hosts-code-agent.service。客户端不能指定 unit、shell、
+  唯一资源为 octendra-code-agent.service。客户端不能指定 unit、shell、
   argv、环境或脚本；DNS 修复、Agent 升级及其它服务不在本后端范围。
 - transport::serve_managed_service 是 Linux 库入口，复用原 root 安装检查、
   root 所有 policy/state/socket 目录、helper 独占锁、串行请求处理和内核 peer UID。
@@ -21,7 +21,7 @@ Request 和 Record；没有第二套任务 UUID、数据库、credential 或网�
 - ServiceGrant 是单独安装、root 所有且 0600 的动作策略，绑定原 device/grant UUID、
   明确生效/到期时间、动作、唯一 unit 以及 unit、ELF 和 Agent config 的摘要。
   Plan/Apply 均重新验证；过期、禁用、撤销或策略漂移均拒绝新执行。
-- 服务单元必须是固定 /etc/systemd/system/remote-hosts-code-agent.service，
+- 服务单元必须是固定 /etc/systemd/system/octendra-code-agent.service，
   无 drop-in、非 transient、不需要 daemon-reload，且原服务 active。
   不支持自动启用或修正服务单元来适配 profile。
 - 单元 profile 要求非 root User/Group 匹配策略 UID/GID，NNP=yes/true，
@@ -75,8 +75,8 @@ Linux cross-check 只证明 Linux 目标编译，不能证明 root IPC 或真实
    当前模型没有每次执行的 OS 交互认证；启用 grant 就允许该 UID 在有效期内无人值守调用。
    不接受此边界时不能启用，不能把客户端确认当作 helper 端的逐次系统认证。
    grant UUID 和到期时间应由批准的安装流程生成，本步未生成有效 grant。
-3. 动作仅为重启 remote-hosts-code-agent.service；不包含 sing-box、
-   RemotePlay、DNS、软件包、重启主机、任意 root shell 或文件修改。
+3. 动作仅为重启 octendra-code-agent.service；不包含 sing-box、
+   Weavelo、DNS、软件包、重启主机、任意 root shell 或文件修改。
    若 HO5 实际 unit 名不同，本后端拒绝，必须先审阅新的代码/资源范围。
 4. 资源须管理员在本机核对并固定：实际 unit fragment、无 drop-in、
    Agent ELF 和 config 的 canonical root-controlled 路径及 SHA-256；

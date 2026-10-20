@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Octendra Desktop Worker
+Exec=@APPROVED_ABSOLUTE_WORKER_PATH@ --capabilities
+NoDisplay=true
+Terminal=false
+# Install basename only after approval. Registry identity is not binary authorization.

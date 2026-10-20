@@ -27,12 +27,12 @@ class SnapshotTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = pathlib.Path(self.tmp.name)/'legacy-evidence'
         self.dest = pathlib.Path(self.tmp.name)/'never-created'
-        (self.root/'crates/remote-hosts-code/src').mkdir(parents=True)
+        (self.root/'crates/octendra-code/src').mkdir(parents=True)
         (self.root/'scripts').mkdir()
         (self.root/'Cargo.toml').write_text('[workspace]\n')
         (self.root/'Cargo.lock').write_text('# fixture\n')
-        (self.root/'crates/remote-hosts-code/Cargo.toml').write_text('[package]\nversion="0.3.2"\n')
-        self.source = self.root/'crates/remote-hosts-code/src/lib.rs'
+        (self.root/'crates/octendra-code/Cargo.toml').write_text('[package]\nversion="0.3.2"\n')
+        self.source = self.root/'crates/octendra-code/src/lib.rs'
         self.source.write_text('// synthetic legacy input\n')
         self.script = self.root/'scripts/check-code-source.py'
         self.script.write_text('raise AssertionError("never execute legacy source")\n')

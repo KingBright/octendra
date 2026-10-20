@@ -1,4 +1,4 @@
-# Remote Hosts Code storage model
+# Octendra Code storage model
 
 This document defines what is durable, what is temporary, and what is allowed on hot control paths. The goal is not to preserve every intermediate fact forever. The goal is to preserve exactly the state required for safety and recovery while keeping polling, readiness, and upgrades independent of historical volume.
 

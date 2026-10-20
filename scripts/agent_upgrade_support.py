@@ -91,7 +91,7 @@ def gateway_observation(config, *, attempts=3, request_timeout=5):
     for attempt in range(1, attempts+1):
         request = urllib.request.Request(origin + '/device/readiness', headers={
             'Authorization': 'Bearer ' + config['device_token'],
-            'User-Agent': 'RemoteHosts-Updater/0.3.1', 'Accept': 'application/json',
+            'User-Agent': 'Octendra-Updater/0.3.1', 'Accept': 'application/json',
             'Cache-Control': 'no-cache',
         })
         try:
@@ -119,7 +119,7 @@ def gateway_observation(config, *, attempts=3, request_timeout=5):
 def local_observation(base):
     config = json.loads((base / 'agent.json').read_text())
     database = pathlib.Path(config['state_dir']) / 'state.sqlite'
-    service = 'gui/%d/com.remote-hosts.code-agent' % os.getuid()
+    service = 'gui/%d/fun.hackerlife.octendra.agent' % os.getuid()
     process = subprocess.run(['launchctl', 'print', service], text=True, capture_output=True, timeout=5)
     fields = dict(re.findall(r'^\t(state|pid|runs) = ([^\n]+)$', process.stdout, re.MULTILINE))
     pid = int(fields['pid']) if fields.get('pid', '').isdecimal() else None

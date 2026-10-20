@@ -43,7 +43,7 @@ def classify(unit, agent, parent):
     return "process_restriction_unavailable"
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--service", default="remote-hosts-code-agent.service")
+    p.add_argument("--service", default="octendra-code-agent.service")
     args = p.parse_args()
     if not args.service or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.@-" for c in args.service):
         p.error("invalid service name")

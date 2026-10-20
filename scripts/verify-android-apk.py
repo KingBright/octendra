@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check the actual release artifact, independently of the Gradle variant name."""
 import argparse, hashlib, json, pathlib, re, subprocess, zipfile
+import android_identity
 
 ALLOWED_PERMISSIONS = {
     'INTERNET', 'ACCESS_NETWORK_STATE', 'FOREGROUND_SERVICE',
@@ -24,10 +25,10 @@ def main():
         return subprocess.run(command, check=True, capture_output=True, text=True, timeout=90).stdout
     signature = run(str(a.build_tools/'apksigner'), 'verify', '--verbose', '--print-certs', str(a.apk))
     check('apk_signature_verified', 'Verifies' in signature)
-    check('existing_owner_signer', 'f84d9b71f1a00f4b5e3084420e5cee3327053389983b2428d9bec71755e5539d' in signature)
     badging = run(str(a.build_tools/'aapt'), 'dump', 'badging', str(a.apk))
-    check('release_package_identity', "package: name='fun.hackerlife.octendra'" in badging)
-    check('release_version_identity', "versionCode='1101' versionName='0.11.1'" in badging)
+    identity = android_identity.release_identity(pathlib.Path(__file__).resolve().parents[1])
+    android_identity.verify_apk(badging, signature, identity)
+    checks.extend(['existing_owner_signer', 'release_package_identity', 'release_version_identity'])
     check('approved_product_label', "application-label:'Octendra'" in badging)
     check('not_debuggable', 'application-debuggable' not in badging)
     check('android_11_minimum', "sdkVersion:'30'" in badging)
@@ -55,7 +56,8 @@ def main():
     report = {'apk': a.apk.name, 'bytes': a.apk.stat().st_size,
               'sha256': hashlib.sha256(a.apk.read_bytes()).hexdigest(),
               'passed': True, 'checks': checks, 'permissions': sorted(permissions),
-              'signing_certificate_verification': signature,
+              'signing_certificate_sha256': android_identity.OWNER_CERT_SHA256,
+              'signature_verified': True, **identity,
               'scope': 'Artifact packaging checks, not a claim of complete security audit or physical-phone acceptance'}
     a.report.parent.mkdir(parents=True, exist_ok=True)
     a.report.write_text(json.dumps(report, indent=2, ensure_ascii=False) + '\n')

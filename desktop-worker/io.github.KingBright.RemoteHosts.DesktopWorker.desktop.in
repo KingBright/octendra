@@ -1,7 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Remote Hosts Desktop Worker
-Exec=@APPROVED_ABSOLUTE_WORKER_PATH@ --capabilities
-NoDisplay=true
-Terminal=false
-# Install basename only after approval. Registry identity is not binary authorization.

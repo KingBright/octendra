@@ -95,15 +95,15 @@ def copy_new(source: Path, destination: Path, mode: int) -> None:
 
 def paths(target: str) -> dict[str, Path]:
     if target == 'macos':
-        state = Path('/Library/Application Support/RemoteHostsAdmin')
-        return dict(state=state, binary=Path('/Library/PrivilegedHelperTools/com.remotehosts.admin'),
+        state = Path('/Library/Application Support/OctendraAdmin')
+        return dict(state=state, binary=Path('/Library/PrivilegedHelperTools/fun.hackerlife.octendra.admin'),
                     runtime=state,
-                    service=Path('/Library/LaunchDaemons/com.remotehosts.admin.plist'))
+                    service=Path('/Library/LaunchDaemons/fun.hackerlife.octendra.admin.plist'))
     if target == 'linux':
-        state = Path('/var/lib/remote-hosts-admin')
-        return dict(state=state, binary=state/'bin/remote-hosts-admin',
-                    runtime=Path('/run/remote-hosts-admin'),
-                    service=Path('/etc/systemd/system/remote-hosts-admin.service'))
+        state = Path('/var/lib/octendra-admin')
+        return dict(state=state, binary=state/'bin/octendra-admin',
+                    runtime=Path('/run/octendra-admin'),
+                    service=Path('/etc/systemd/system/octendra-admin.service'))
     raise ValueError('Unsupported platform')
 
 
@@ -122,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     # This independent digest prevents accepting a replaced manifest + executable pair.
     if args.apply and args.accept_manifest_sha256 != manifest_sha:
         raise ValueError('Explicit, independently verified manifest SHA-256 is required')
-    expected_names = {'remote-hosts-admin', 'policy.json', 'service.template', 'install.py', 'uninstall.py'}
+    expected_names = {'octendra-admin', 'policy.json', 'service.template', 'install.py', 'uninstall.py'}
     if set(manifest['files']) != expected_names:
         raise ValueError('Unexpected bundle contents')
     for name, expected in manifest['files'].items():
@@ -164,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
         if path.exists() or path.is_symlink():
             raise FileExistsError(f'Existing installation requires explicit review: {path}')
     # Stage in a private root-owned directory, then verify again to close the source-copy race.
-    with tempfile.TemporaryDirectory(prefix='remote-hosts-admin-') as temp:
+    with tempfile.TemporaryDirectory(prefix='octendra-admin-') as temp:
         stage = Path(temp)
         for name, expected in manifest['files'].items():
             src = bundle/name
@@ -178,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
         for directory in [p['binary'].parent, p['service'].parent, p['state'], p['runtime']]:
             mkdir_root(directory)
         mkdir_root(p['state']/'receipts', 0o700)
-        copy_new(stage/'remote-hosts-admin', p['binary'], 0o755)
+        copy_new(stage/'octendra-admin', p['binary'], 0o755)
         copy_new(stage/'policy.json', p['state']/'policy.json', 0o600)
         copy_new(stage/'service.template', p['service'], 0o644)
         copy_new(stage/'uninstall.py', p['state']/'uninstall.py', 0o700)
@@ -189,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             subprocess.run(['/usr/bin/systemctl', 'daemon-reload'], check=True, env=safe_env,
                            stdin=subprocess.DEVNULL, timeout=30)
-            subprocess.run(['/usr/bin/systemctl', 'enable', '--now', 'remote-hosts-admin.service'],
+            subprocess.run(['/usr/bin/systemctl', 'enable', '--now', 'octendra-admin.service'],
                            check=True, env=safe_env, stdin=subprocess.DEVNULL, timeout=45)
     summary['status'] = 'installed_service_started_requires_client_and_cleanup_acceptance'
     print(json.dumps(summary, indent=2))

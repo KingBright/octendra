@@ -58,7 +58,7 @@ def main():
     if source != ROOT:
         parser.error("build in the actual primary checkout")
     release_current.primary(source)
-    cargo_version = tomllib.loads((source / "crates/remote-hosts-code/Cargo.toml").read_text())["package"]["version"]
+    cargo_version = tomllib.loads((source / "crates/octendra-code/Cargo.toml").read_text())["package"]["version"]
     if cargo_version != args.version:
         parser.error(f"source version mismatch: Cargo.toml has {cargo_version}, requested {args.version}")
 

@@ -3,10 +3,10 @@
 本步仅补原生只读核验入口和离线测试，不安装、不签名、不启动 helper，不修改 launchd、ACL、认证、系统安全、DNS 或网络。没有真实 root 执行验收结论。
 
 ```text
-remote-hosts-admin macos-helper verify-identity --team-id <独立审阅的真实 Team ID> --expected-sha256 <可信交付回执的完整 helper 文件 SHA-256>
+octendra-admin macos-helper verify-identity --team-id <独立审阅的真实 Team ID> --expected-sha256 <可信交付回执的完整 helper 文件 SHA-256>
 ```
 
-路径固定为 /Library/PrivilegedHelperTools/com.remotehosts.admin，signing identifier 固定为 com.remotehosts.admin。不存在任意 helper 路径、shell、服务名、安装或激活选项。Team ID 与摘要只是此只读查询的预期值，不是权限来源；不能从被检查文件本身抄出一个身份就当安装授权。
+路径固定为 /Library/PrivilegedHelperTools/fun.hackerlife.octendra.admin，signing identifier 固定为 fun.hackerlife.octendra.admin。不存在任意 helper 路径、shell、服务名、安装或激活选项。Team ID 与摘要只是此只读查询的预期值，不是权限来源；不能从被检查文件本身抄出一个身份就当安装授权。
 
 核验先复用 root 所有、不可被普通用户写入、祖先无 symlink 的路径检查和原 FileState；拒绝非单链接普通文件、用户所有、组/其它可写、非可执行或 setuid/setgid 文件。随后只运行固定系统 /usr/bin/codesign，清空继承环境，固定 cwd/空 stdin，15 秒有界等待，stderr 最多 16 KiB；永不执行被检查的 helper。
 

@@ -103,9 +103,9 @@ def main():
     p.add_argument("--sha256", required=True)
     p.add_argument("--version", required=True)
     p.add_argument("--result", required=True, type=pathlib.Path)
-    p.add_argument("--binary-path", type=pathlib.Path, default=pathlib.Path.home()/".local/bin/remote-hosts-code")
-    p.add_argument("--config-path", type=pathlib.Path, default=pathlib.Path.home()/".local/share/remote-hosts-code/agent.json")
-    p.add_argument("--service-name", default="remote-hosts-code-agent.service")
+    p.add_argument("--binary-path", type=pathlib.Path, default=pathlib.Path.home()/".local/bin/octendra-code")
+    p.add_argument("--config-path", type=pathlib.Path, default=pathlib.Path.home()/".local/share/octendra-code/agent.json")
+    p.add_argument("--service-name", default="octendra-code-agent.service")
     p.add_argument("--idle-timeout", type=int, default=180)
     args = p.parse_args()
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", args.version) or not re.fullmatch(r"[0-9a-f]{64}", args.sha256):
@@ -115,7 +115,7 @@ def main():
     try:
         if sha(args.candidate) != args.sha256:
             raise RuntimeError("candidate checksum mismatch")
-        if subprocess.check_output([str(args.candidate), "--version"], text=True, timeout=10).strip() != "remote-hosts-code " + args.version:
+        if subprocess.check_output([str(args.candidate), "--version"], text=True, timeout=10).strip() != "octendra-code " + args.version:
             raise RuntimeError("candidate version mismatch")
         config = json.loads(args.config_path.read_text())
         subprocess.run([str(args.candidate), "check", "--agent", "--config", str(args.config_path)], check=True, stdout=subprocess.DEVNULL, timeout=15)
@@ -132,9 +132,9 @@ def main():
             if time.monotonic() >= deadline:
                 raise RuntimeError("agent still has active work; upgrade not applied")
             time.sleep(2)
-        old_version = subprocess.check_output([str(args.binary_path), "--version"], text=True, timeout=10).strip().removeprefix("remote-hosts-code ")
-        backup_dir = pathlib.Path.home()/".local/share/remote-hosts-code/releases"/("before-"+args.version+"-"+time.strftime("%Y%m%dT%H%M%S")+"-"+uuid.uuid4().hex[:8])
-        backup_dir.mkdir(parents=True, exist_ok=False); backup = backup_dir/"remote-hosts-code"; shutil.copy2(args.binary_path, backup)
+        old_version = subprocess.check_output([str(args.binary_path), "--version"], text=True, timeout=10).strip().removeprefix("octendra-code ")
+        backup_dir = pathlib.Path.home()/".local/share/octendra-code/releases"/("before-"+args.version+"-"+time.strftime("%Y%m%dT%H%M%S")+"-"+uuid.uuid4().hex[:8])
+        backup_dir.mkdir(parents=True, exist_ok=False); backup = backup_dir/"octendra-code"; shutil.copy2(args.binary_path, backup)
         record.update(previous_sha256=sha(backup), backup=str(backup), phase="installing"); maintenance.report(record)
         atomic_copy(args.candidate, args.binary_path); record["service_changed"] = True
         if sha(args.binary_path) != args.sha256:

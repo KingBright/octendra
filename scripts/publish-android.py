@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import time
 import xml.etree.ElementTree as ET
+import android_identity
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -48,8 +49,10 @@ def main():
     if fleet.returncode:
         raise SystemExit('Mixed-fleet regression failed: ' + fleet.stderr)
     version = build['version']
-    if version != '0.11.1' or build.get('package') != 'fun.hackerlife.octendra':
+    if any(build.get(key) != value for key, value in android_identity.release_identity(ROOT).items()):
         raise SystemExit('Unexpected release identity.')
+    if build.get('signing_certificate_sha256') != android_identity.OWNER_CERT_SHA256 or build.get('signature_verified') is not True:
+        raise SystemExit('Missing existing-owner signature verification.')
     target = ROOT/'dist/android'/version
     target.parent.mkdir(parents=True, exist_ok=True)
     # Exclusive creation: no published/partially published directory is overwritten.

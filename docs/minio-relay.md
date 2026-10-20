@@ -7,10 +7,10 @@ is eligible only for an explicitly configured canonical Host and interactive bas
 The relay moves file bytes over HTTP(S); the already selected managed PTY carries only bounded
 control scripts, identity checks, and completion receipts. It does not add an SSH bypass.
 
-Existing `remote_hosts_upload_file` and `remote_hosts_download_file` operations retain their
+Existing `octendra_upload_file` and `octendra_download_file` operations retain their
 operation IDs, ownership, write leases, timeout, size bound, mode, SHA-256, and overwrite policy.
 No public bucket policy is needed. The remote target receives short-lived, object-specific signed
-URLs; long-lived MinIO credentials remain in the Remote Hosts vault.
+URLs; long-lived MinIO credentials remain in the Octendra vault.
 
 ## Configuration
 
@@ -27,7 +27,7 @@ The Console endpoint is not an S3 API endpoint.
     "access_path_id": "<registered-interactive-path-uuid>",
     "expected_hostname": "<verified-target-hostname>",
     "endpoint": "https://<approved-s3-api>",
-    "bucket": "remote-hosts-transfer",
+    "bucket": "octendra-transfer",
     "credential_id": "<existing-encrypted-service-credential-uuid>",
     "threshold_bytes": 16777216,
     "allow_http": false
@@ -51,7 +51,7 @@ signed URLs, business object keys, or transient operation IDs belong in this doc
 
 ## Provision and verify
 
-Run `remote-hosts minio-relay-check --database-url <existing-db-url> --config <policy-json>
+Run `octendra minio-relay-check --database-url <existing-db-url> --config <policy-json>
 --vault-master-password-file <existing-vault-file> --provision` once for the approved profile.
 The command reuses the encrypted credential internally, creates only the dedicated relay bucket,
 and installs one-day orphan-object retention with the required Content-MD5.
@@ -88,8 +88,8 @@ end-to-end transfer through that actual PTY remain unverified. Do not present lo
 validation as acceptance of the production route.
 
 The explicit live regression is ignored in normal offline test runs. To rerun it, set
-`REMOTE_HOSTS_RELAY_TEST_CONFIG`, `REMOTE_HOSTS_RELAY_TEST_DATABASE`, and
-`REMOTE_HOSTS_RELAY_TEST_MASTER_FILE` to non-secret configuration paths / database URL, then run
-`cargo test -p remote-hosts-connector live_private_multipart_and_curl_roundtrip -- --ignored`.
+`OCTENDRA_RELAY_TEST_CONFIG`, `OCTENDRA_RELAY_TEST_DATABASE`, and
+`OCTENDRA_RELAY_TEST_MASTER_FILE` to non-secret configuration paths / database URL, then run
+`cargo test -p octendra-connector live_private_multipart_and_curl_roundtrip -- --ignored`.
 It reads the existing Vault inside the test, uses an isolated local temporary directory and
 operation-specific relay key, and never prints credentials or signed URLs.

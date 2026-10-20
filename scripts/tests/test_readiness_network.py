@@ -41,7 +41,7 @@ class NetworkReadinessTests(unittest.TestCase):
             request=call.args[0]
             self.assertEqual(request.full_url,'https://gateway.example:8443/device/readiness')
             self.assertEqual(request.get_header('Authorization'),'Bearer '+self.config['device_token'])
-            self.assertEqual(request.get_header('User-agent'),'RemoteHosts-Updater/0.3.1')
+            self.assertEqual(request.get_header('User-agent'),'Octendra-Updater/0.3.1')
             self.assertEqual(call.kwargs['timeout'],5)
     def test_exhaustion_is_bounded_and_diagnostic_is_secret_free(self):
         self.opener.open.side_effect=urllib.error.URLError(TimeoutError('never-log-this-credential'))
@@ -131,14 +131,14 @@ class UpdaterDiagnosticTests(unittest.TestCase):
         import argparse
         with tempfile.TemporaryDirectory() as directory:
             base=pathlib.Path(directory);(base/'bin').mkdir()
-            (base/'bin/remote-hosts-code').write_bytes(b'old')
+            (base/'bin/octendra-code').write_bytes(b'old')
             candidate=base/'candidate';candidate.write_bytes(b'new')
             (base/'agent.json').write_text(json.dumps({'state_dir':str(base/'state')}))
             result=base/'result.json'
             args=argparse.Namespace(candidate=candidate,sha256=updater.sha(candidate),version='0.3.4',result=result,idle_timeout=0)
             error=support.GatewayObservationError({'stage':'gateway_readiness','category':'network_timeout','retryable':True,'attempts':3,'next_action':'retry_same_readonly_probe_with_backoff'})
-            signing={'state':'ready','certificate_name':'Remote Hosts Local Code Signing','certificate_sha1':'a'*40,
-                     'code_identifier':'com.remote-hosts.code-agent','designated_requirement':'identifier "com.remote-hosts.code-agent" and certificate leaf = H"'+'a'*40+'"'}
+            signing={'state':'ready','certificate_name':'Octendra Local Code Signing','certificate_sha1':'a'*40,
+                     'code_identifier':'fun.hackerlife.octendra.agent','designated_requirement':'identifier "fun.hackerlife.octendra.agent" and certificate leaf = H"'+'a'*40+'"'}
             def sign_copy(source,destination,_base):
                 pathlib.Path(destination).write_bytes(pathlib.Path(source).read_bytes());pathlib.Path(destination).chmod(0o755)
                 return {**signing,'installed_sha256':updater.sha(pathlib.Path(destination))}
@@ -146,12 +146,12 @@ class UpdaterDiagnosticTests(unittest.TestCase):
                  mock.patch.object(updater.macos_code_identity,'installed_metadata',return_value=None),\
                  mock.patch.object(updater.macos_code_identity,'sign_copy',side_effect=sign_copy),\
                  mock.patch.object(updater,'gateway_observation',side_effect=error),\
-                 mock.patch.object(updater.subprocess,'check_output',return_value='remote-hosts-code 0.3.4'),\
+                 mock.patch.object(updater.subprocess,'check_output',return_value='octendra-code 0.3.4'),\
                  mock.patch.object(updater.subprocess,'run') as run,contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaises(SystemExit):updater.perform_upgrade(args,base)
             proof=json.loads(result.read_text())
             self.assertEqual(proof['phase'],'gateway_preflight');self.assertFalse(proof['service_changed'])
             self.assertEqual(proof['diagnostic']['category'],'network_timeout');run.assert_not_called()
-            self.assertEqual((base/'bin/remote-hosts-code').read_bytes(),b'old')
+            self.assertEqual((base/'bin/octendra-code').read_bytes(),b'old')
 
 if __name__=='__main__':unittest.main()

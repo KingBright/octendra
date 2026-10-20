@@ -2,7 +2,7 @@
 
 ## Scope and release status
 
-This change extends the existing `remote-hosts-code` Gateway. It does not introduce a second
+This change extends the existing `octendra-code` Gateway. It does not introduce a second
 Gateway, an operator API exposure, a new database, a browser automation bridge, or an Agent wire
 protocol. The same tools and authorization scopes serve ChatGPT and other MCP clients.
 
@@ -70,7 +70,7 @@ private ops profile, not in this public repository.
 Validate the updated configuration before restarting:
 
 ```sh
-remote-hosts-code check --config /private/setup/gateway.json
+octendra-code check --config /private/setup/gateway.json
 ```
 
 ## Connect
@@ -81,7 +81,7 @@ then complete the owner login and consent. Registration alone never grants acces
 For the advanced-settings route, pre-register using the exact callback already configured:
 
 ```sh
-remote-hosts-code register-oauth-client \
+octendra-code register-oauth-client \
   --gateway-config /private/setup/gateway.json \
   --name 'Gemini Spark' \
   --redirect-uri "$EXACT_GEMINI_CALLBACK" \
@@ -100,7 +100,7 @@ honest. Host-side confirmation behavior is owned by Gemini, not bypassed by the 
 
 ## Acceptance
 
-Run `cargo test -p remote-hosts-code --test oauth_clients` and the existing integration/regression
+Run `cargo test -p octendra-code --test oauth_clients` and the existing integration/regression
 suite. The new tests exercise the actual in-process HTTP router, not mocked auth-success paths.
 Then verify on an isolated staging state before the production cutover:
 
@@ -131,7 +131,7 @@ Only the Gateway was upgraded. Its installed and running identity was verified; 
 
 The real Chrome flow reused the signed-in Google session, completed Google consent and one
 Gateway password submission, and automatically returned to Gemini `/apps`. Gemini synchronized
-24 tools and saved the enabled custom app as `Remote Hosts`. A new Spark task actually invoked
+24 tools and saved the enabled custom app as `Octendra`. A new Spark task actually invoked
 `devices_list` and returned all four authorized devices online, covering two macOS devices,
 Linux and Windows. The test prompt did not supply the expected device names.
 

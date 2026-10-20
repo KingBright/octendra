@@ -1,21 +1,21 @@
 [workspace]
 members = [
-    "crates/remote-hosts-admin",
-    "crates/remote-hosts-admin-win32",
-    "crates/remote-hosts-release",
-    "crates/remote-hosts-api",
-    "crates/remote-hosts-cli",
-    "crates/remote-hosts-connector",
-    "crates/remote-hosts-core",
-    "crates/remote-hosts-db",
-    "crates/remote-hosts-domain",
-    "crates/remote-hosts-launcher",
-    "crates/remote-hosts-mcp",
-    "crates/remote-hosts-sync",
-    "crates/remote-hosts-token-output",
-    "crates/remote-hosts-vault",
-    "crates/remote-hosts-code",
-    "crates/remote-hosts-desktop-protocol",
+    "crates/octendra-admin",
+    "crates/octendra-admin-win32",
+    "crates/octendra-release",
+    "crates/octendra-api",
+    "crates/octendra-cli",
+    "crates/octendra-connector",
+    "crates/octendra-core",
+    "crates/octendra-db",
+    "crates/octendra-domain",
+    "crates/octendra-launcher",
+    "crates/octendra-mcp",
+    "crates/octendra-sync",
+    "crates/octendra-token-output",
+    "crates/octendra-vault",
+    "crates/octendra-code",
+    "crates/octendra-desktop-protocol",
 ]
 resolver = "3"
 
@@ -23,8 +23,8 @@ resolver = "3"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT OR Apache-2.0"
-repository = "https://example.invalid/remote-hosts"
-authors = ["Remote Hosts Contributors"]
+repository = "https://github.com/KingBright/octendra"
+authors = ["Octendra Contributors"]
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

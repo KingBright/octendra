@@ -42,7 +42,7 @@ class MacOsCodeIdentityTests(unittest.TestCase):
 
     def test_valid_identity_rejects_untrusted_or_unsearchable_identity(self):
         fingerprint = "a" * 40
-        keychain = pathlib.Path("/tmp/remote-hosts-signing.keychain-db")
+        keychain = pathlib.Path("/tmp/octendra-signing.keychain-db")
         trusted = subprocess.CompletedProcess([], 0,
             f'1) {fingerprint.upper()} "{IDENTITY.CERT_NAME}"\n', "")
         untrusted = subprocess.CompletedProcess([], 0,
@@ -56,8 +56,43 @@ class MacOsCodeIdentityTests(unittest.TestCase):
         with mock.patch.object(IDENTITY, "_security", side_effect=[trusted, searchable]):
             self.assertTrue(IDENTITY._valid_identity(keychain, fingerprint))
 
+    def test_existing_certificate_subject_does_not_change_fingerprint_identity(self):
+        fingerprint = "a" * 40
+        keychain = pathlib.Path("/tmp/octendra-signing.keychain-db")
+        existing = subprocess.CompletedProcess([], 0,
+            f'1) {fingerprint.upper()} "Approved historical subject"\n', "")
+        listed = subprocess.CompletedProcess([], 0, f'"{keychain}"\n', "")
+        with mock.patch.object(IDENTITY, "_security", side_effect=[existing, listed]):
+            self.assertTrue(IDENTITY._valid_identity(keychain, fingerprint))
+        certificates = subprocess.CompletedProcess([], 0,
+            "SHA-1 hash: " + "b" * 40 + "\nSHA-1 hash: " + fingerprint + "\n", "")
+        with mock.patch.object(IDENTITY, "_security", return_value=certificates):
+            self.assertEqual(IDENTITY._certificate_sha1(keychain, fingerprint), fingerprint)
+            with self.assertRaises(RuntimeError):
+                IDENTITY._certificate_sha1(keychain, "c" * 40)
+            with self.assertRaises(RuntimeError):
+                IDENTITY._certificate_sha1(keychain)
+
+    def test_missing_installation_identity_never_creates_or_authorizes_replacement(self):
+        import sys
+        source = SCRIPT.with_name("install-code-agent.py")
+        spec = importlib.util.spec_from_file_location("install_identity_fixture", source)
+        installer = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(sys.modules, {"macos_code_identity": IDENTITY}):
+            spec.loader.exec_module(installer)
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(sys, "argv", [str(source), "--binary", tmp + "/candidate", "--config", tmp + "/agent.json"]), \
+                 mock.patch.object(installer.subprocess, "run", return_value=subprocess.CompletedProcess([], 1)), \
+                 mock.patch.object(IDENTITY, "status", return_value={"state": "missing"}), \
+                 mock.patch.object(IDENTITY, "create") as create, \
+                 mock.patch.object(IDENTITY, "authorize") as authorize:
+                with self.assertRaisesRegex(SystemExit, "no replacement identity"):
+                    installer.main()
+                create.assert_not_called()
+                authorize.assert_not_called()
+
     def test_ensure_keychain_search_list_prepends_private_keychain_once(self):
-        keychain = pathlib.Path("/tmp/remote-hosts-signing.keychain-db")
+        keychain = pathlib.Path("/tmp/octendra-signing.keychain-db")
         listed = subprocess.CompletedProcess([], 0, '"/Users/test/Library/Keychains/login.keychain-db"\n', "")
         completed = subprocess.CompletedProcess([], 0, "", "")
         with mock.patch.object(IDENTITY, "_security", side_effect=[listed, completed]) as security:

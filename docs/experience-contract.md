@@ -1,4 +1,4 @@
-# Remote Hosts Code: observable, recoverable tool use
+# Octendra Code: observable, recoverable tool use
 
 ## Scope
 
@@ -14,11 +14,11 @@ catalog using the authenticated principal's scopes. It must not advertise execut
 to a read-only OAuth grant. Downloading a file creates a Gateway artifact and is not marked
 read-only merely because it reads the source device.
 
-The compiled executable generates `crates/remote-hosts-code/adapter-contract.json`:
+The compiled executable generates `crates/octendra-code/adapter-contract.json`:
 
 ```sh
-remote-hosts-code adapter-contract --output crates/remote-hosts-code/adapter-contract.json
-remote-hosts-code adapter-contract --output crates/remote-hosts-code/adapter-contract.json --check
+octendra-code adapter-contract --output crates/octendra-code/adapter-contract.json
+octendra-code adapter-contract --output crates/octendra-code/adapter-contract.json --check
 ```
 
 Generation is an explicit development action; CI checks the checked-in artifact and never
@@ -27,8 +27,8 @@ regenerates it to conceal drift. Server and adapter tools hashes refer to the sa
 is checked against its own expected revision, not against a tool-schema hash.
 
 The Rust stdio adapter uses that compiled catalog, verifies the upstream authorized tools,
-and automatically sends `x-rh-adapter-catalog-sha256`, `x-rh-adapter-skill-revision` and a stable
-per-call `x-rh-request-id`. A request's final-host report is separate. No report means
+and automatically sends `x-octendra-adapter-catalog-sha256`, `x-octendra-adapter-skill-revision` and a stable
+per-call `x-octendra-request-id`. A request's final-host report is separate. No report means
 `unknown_not_reported`; the server never infers final host exposure from device permissions,
 its own catalog, or a model-supplied `known_tools_sha256` comparison hint. Contradictory reported
 hashes and tool names are not treated as a confirmed match. Reports do not grant authority.
@@ -130,7 +130,7 @@ and the actual Gateway/Agent implementations. It compares the compatibility work
 preferred workflow on the same candidate for short success, incremental output and a failing
 command. Both paths must deliver identical output hashes and exit codes.
 
-An optional `RH_EXPERIENCE_AB_REPORT` writes a new report without overwriting an earlier one.
+An optional `OCTENDRA_EXPERIENCE_AB_REPORT` writes a new report without overwriting an earlier one.
 The report records actual calls, read jobs, observations, serialized model-visible UTF-8 bytes
 and elapsed time. Byte counts are not model token counts. This fixture does not measure an
 external ChatGPT/Gemini host, the live fleet, or a previous deployed binary. Do not extrapolate

@@ -1,6 +1,6 @@
 {
   "enabled": false,
-  "app_id": "io.github.KingBright.RemoteHosts.DesktopWorker",
+  "app_id": "fun.hackerlife.octendra.desktop-worker",
   "desktop_uid": 1000,
   "desktop_session": "REQUIRES_CURRENT_SESSION",
   "identity": {

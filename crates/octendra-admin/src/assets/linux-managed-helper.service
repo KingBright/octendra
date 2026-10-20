@@ -1,0 +1,27 @@
+[Unit]
+Description=Octendra fixed managed-service helper
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/var/lib/octendra-admin/bin/octendra-admin --socket /run/octendra-admin/helper.sock linux-helper serve --policy /var/lib/octendra-admin/policy.json --state-dir /var/lib/octendra-admin/receipts --grant /var/lib/octendra-admin/service-grant.json
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=octendra-admin
+RuntimeDirectoryMode=0755
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/octendra-admin /run/octendra-admin
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+TimeoutStopSec=130
+
+[Install]
+WantedBy=multi-user.target

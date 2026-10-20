@@ -1,0 +1,26 @@
+[package]
+name = "octendra-db"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+octendra-domain = { path = "../octendra-domain" }
+postcard.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

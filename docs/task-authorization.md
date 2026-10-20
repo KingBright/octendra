@@ -53,7 +53,7 @@ visible failure; they never trigger automatic command replay or sudoers edits.
 Credential removal prevents future lookup; existing OS authentication caches and
 already running processes follow OS policy. See the [sudo timestamp manual](https://www.sudo.ws/docs/man/sudoers_timestamp.man/).
 
-The credential identity is service fun.hackerlife.remote-hosts.sudo and account
+The credential identity is service fun.hackerlife.octendra.sudo and account
 <canonical Code Agent device UUID>:<effective OS uid>. macOS uses that user's
 Keychain generic-password entry; Linux uses that login session's Secret Service
 through /usr/bin/secret-tool. The user registers/rotates/deletes it using local OS
@@ -68,7 +68,7 @@ put its value in a command, environment variable, chat or MCP request:
 ```sh
 /usr/bin/security add-generic-password \
   -a '<canonical-device-uuid>:<effective-uid>' \
-  -s 'fun.hackerlife.remote-hosts.sudo' -T '' -w
+  -s 'fun.hackerlife.octendra.sudo' -T '' -w
 ```
 
 -T '' removes implicit creator trust; never use the allow-all -A flag. The OS

@@ -101,11 +101,11 @@ def audit_commit_scope(paths):
 
 
 def verify_skill():
-    skill = ROOT/'skills/remote-hosts-agent/SKILL.md'
+    skill = ROOT/'skills/octendra-agent/SKILL.md'
     if not skill.is_file():
-        raise ValueError('Remote Hosts core Skill is missing')
+        raise ValueError('Octendra core Skill is missing')
     if skill.stat().st_size > 16*1024:
-        raise ValueError('Remote Hosts core Skill exceeds 16 KiB hot-context budget')
+        raise ValueError('Octendra core Skill exceeds 16 KiB hot-context budget')
     text = skill.read_text()
     references = re.findall(r'\]\((references/[^)]+)\)', text)
     missing = sorted(name for name in set(references) if not (skill.parent/name).is_file())

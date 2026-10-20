@@ -5,11 +5,11 @@
 运行条件：独立 Linux 管理员会话；受保护且独立核验的原生 ELF；原授权已通过 revoke 持久撤销；管理员确认原服务工作已收尾并单独停止 helper 后，原 helper.lock 可独占取得。程序不会停止 helper、杀进程、重启服务、改 grant 或解除撤销。锁被占用、记录/资源/设备漂移或服务未 active 均拒绝。当前服务 active 不能证明此前 restart 已发生或未发生。
 
 ```text
-remote-hosts-admin linux-helper settlement-preview --device-id <原设备 UUID> --request-id <原 request UUID>
-remote-hosts-admin linux-helper settle-unknown --device-id <同一设备 UUID> --request-id <同一 request UUID> --accept-record-sha256 <preview 的 record_sha256> --accept-observation-sha256 <preview 的 observation_sha256> --acknowledge-outcome-unproven
+octendra-admin linux-helper settlement-preview --device-id <原设备 UUID> --request-id <原 request UUID>
+octendra-admin linux-helper settle-unknown --device-id <同一设备 UUID> --request-id <同一 request UUID> --accept-record-sha256 <preview 的 record_sha256> --accept-observation-sha256 <preview 的 observation_sha256> --acknowledge-outcome-unproven
 ```
 
-只访问固定 /var/lib/remote-hosts-admin 下的 root policy、grant、receipts 和原 helper.lock，不提供自定义目录、shell、目标服务或 socket 恢复通道。重新核对原 policy/grant 摘要、原计划、完整 Record 摘要、原资源文件及当前 boot/服务观察摘要后，原 Running 转为 **closed_unknown**。
+只访问固定 /var/lib/octendra-admin 下的 root policy、grant、receipts 和原 helper.lock，不提供自定义目录、shell、目标服务或 socket 恢复通道。重新核对原 policy/grant 摘要、原计划、完整 Record 摘要、原资源文件及当前 boot/服务观察摘要后，原 Running 转为 **closed_unknown**。
 
 该状态表示管理员关闭了此不确定事件的处置流程，执行结果仍 unknown；不是 verified_applied、verified_not_applied、Succeeded 或可安全重试。原 request UUID、完整 Plan/plan_sha256、原 error 和 steps 保留，附加原 Record/观察摘要并 fsync 原 Store。重复关闭只读同一终态，原 Apply 永远不重新执行。撤销标记保持，不能借关闭恢复权限或删除标记重新启用。
 

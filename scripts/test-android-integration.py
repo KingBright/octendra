@@ -170,7 +170,7 @@ def main():
             print('FAIL file_upload_roundtrip: '+str(exc),flush=True)
             # Keep testing the independent shell/install lane, but never mark
             # this run passed or publish it while any mandatory check failed.
-        helper_log='/data/local/tmp/rh-helper-'+runid+'.log'
+        helper_log='/data/local/tmp/octendra-helper-'+runid+'.log'
         run(['python3',str(ROOT/'scripts/android-activate-shell.py'),'--adb',a.adb,'--serial',a.serial,'--package',PACKAGE,'--diagnostic-log',helper_log])
         for _ in range(20):
             status,_=cmd('status')
@@ -180,7 +180,7 @@ def main():
         (base/'helper-startup.txt').write_text(helper_diagnostic)
         checked('builtin_shell_bridge_activated',status.get('shell_connected') is True and status.get('shell_uid')==2000)
         identity,_=cmd('shell',{'command':'id'});checked('real_adb_shell_uid',identity.get('exit_code')==0 and 'uid=2000' in identity.get('output',''))
-        source='/data/local/tmp/rh-counter-'+runid;repeatkey=runid+'-repeat'
+        source='/data/local/tmp/octendra-counter-'+runid;repeatkey=runid+'-repeat'
         first,firstmeta=cmd('shell',{'command':'echo once >> '+source},key=repeatkey)
         second,secondmeta=cmd('shell',{'command':'echo once >> '+source},key=repeatkey)
         counted,_=cmd('shell',{'command':'wc -l < '+source})

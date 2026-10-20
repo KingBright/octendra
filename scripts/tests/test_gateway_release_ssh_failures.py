@@ -129,7 +129,7 @@ class EntryFailureTests(unittest.TestCase):
              mock.patch.object(release.sys, "argv", ["gateway_release.py", "--report-dir",
                  str(self.report), "--execute", "--oauth-browser",
                  "--origin", release.ORIGIN, "--ssh-account", "owner@gateway.example",
-                 "--ssh-port", "222", "--installation-root", "/srv/remote-hosts-code"]), \
+                 "--ssh-port", "222", "--installation-root", "/srv/octendra-code"]), \
              mock.patch.object(release.sys.stdin, "isatty", return_value=True), \
              mock.patch.object(release.sys.stderr, "isatty", return_value=True), \
              mock.patch.object(release, "verify_release", return_value=self.identity), \
@@ -187,7 +187,7 @@ class TargetConfigurationTests(unittest.TestCase):
 
     def test_malformed_target_cannot_reach_authentication(self):
         valid = ["https://gateway.example", "owner@gateway.example", 2201,
-                 "/srv/remote-hosts-code"]
+                 "/srv/octendra-code"]
         for index, value in ((0, "http://gateway.example"),
                              (0, "https://user:password@gateway.example"),
                              (0, "https://gateway.example/path"),
@@ -227,7 +227,7 @@ class TargetConfigurationTests(unittest.TestCase):
             root = Path(directory)
             identity = PackageFixture(root).identity()
             target = release.deployment_target("https://gateway.example",
-                        "owner@gateway.example", 2201, "/srv/remote-hosts-code")
+                        "owner@gateway.example", 2201, "/srv/octendra-code")
             journal = root / "journal.json"
             release.GatewayRelease(identity, None, mock.Mock(), journal, target=target)
             for key, value in (("origin", "https://other.example"),
@@ -259,9 +259,9 @@ class TargetConfigurationTests(unittest.TestCase):
              mock.patch.object(stage, "PUBLIC_ORIGIN"), \
              mock.patch.object(stage, "PUBLIC_HOST"):
             stage.configure_target({"origin": "https://gateway.example",
-                                    "installation_root": "/srv/remote-hosts-code"})
-            self.assertTrue(stage.approved_root(Path("/srv/remote-hosts-code")))
-            self.assertFalse(stage.approved_root(Path("/srv/remote-hosts-code/other")))
+                                    "installation_root": "/srv/octendra-code"})
+            self.assertTrue(stage.approved_root(Path("/srv/octendra-code")))
+            self.assertFalse(stage.approved_root(Path("/srv/octendra-code/other")))
             self.assertFalse(stage.approved_root(stage.APPROVED_ROOT))
             self.assertFalse(stage.approved_root(Path("/srv/other-gateway")))
 

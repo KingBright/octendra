@@ -1,4 +1,4 @@
-# Remote Hosts 产品问题清单
+# Octendra 产品问题清单
 
 > 唯一事实源：`docs/product/backlog.json`。本页由 `scripts/product-backlog.py --render` 生成。
 
@@ -115,7 +115,7 @@
 
 验收：两台机器同时传输时，代码读取、终端启动仍能完成；重试不重复写入。
 
-证据或实现位置：`crates/remote-hosts-code/tests/concurrency.rs`、`docs/iteration-0.3.0-verification.json`
+证据或实现位置：`crates/octendra-code/tests/concurrency.rs`、`docs/iteration-0.3.0-verification.json`
 
 依赖：无
 
@@ -129,7 +129,7 @@
 
 验收：挂起设备A接收流，B能完成接收；上限及并发磁盘预留均生效。
 
-证据或实现位置：`crates/remote-hosts-code/src/scheduler.rs`、`crates/remote-hosts-code/tests/concurrency.rs`
+证据或实现位置：`crates/octendra-code/src/scheduler.rs`、`crates/octendra-code/tests/concurrency.rs`
 
 依赖：无
 
@@ -143,7 +143,7 @@
 
 验收：真实PTY不消费输入时，查询与取消在受控测试窗口内返回，不波及其他终端。
 
-证据或实现位置：`crates/remote-hosts-code/tests/iteration_reliability.rs`
+证据或实现位置：`crates/octendra-code/tests/iteration_reliability.rs`
 
 依赖：无
 
@@ -157,7 +157,7 @@
 
 验收：持续有进展的传输可超过180秒；停滞会在idle预算内报错；端到端慢链路仍需验收。
 
-证据或实现位置：`crates/remote-hosts-code/src/resumable.rs`、`crates/remote-hosts-code/src/transfer_watch.rs`
+证据或实现位置：`crates/octendra-code/src/resumable.rs`、`crates/octendra-code/src/transfer_watch.rs`
 
 依赖：无
 
@@ -171,7 +171,7 @@
 
 验收：operation_get能观察实际接收字节、阶段、重试和新鲜度，不能伪造完成。
 
-证据或实现位置：`crates/remote-hosts-code/src/progress.rs`、`crates/remote-hosts-code/tests/iteration_reliability.rs`
+证据或实现位置：`crates/octendra-code/src/progress.rs`、`crates/octendra-code/tests/iteration_reliability.rs`
 
 依赖：无
 
@@ -185,7 +185,7 @@
 
 验收：传输期间可编辑其他文件；同一目标并发改动在发布时被版本冲突拒绝。
 
-证据或实现位置：`crates/remote-hosts-code/src/agent.rs`、`crates/remote-hosts-code/src/transfers.rs`
+证据或实现位置：`crates/octendra-code/src/agent.rs`、`crates/octendra-code/src/transfers.rs`
 
 依赖：无
 
@@ -199,7 +199,7 @@
 
 验收：双向在4 MiB检查点中断并重启双方，恢复同一任务；最多重传未确认片段；最终SHA一致，副作用不重复。
 
-证据或实现位置：`crates/remote-hosts-code/src/resumable.rs`、`crates/remote-hosts-code/src/transfers.rs`、`docs/iteration-0.3.0-2026-09-10.md`、`docs/releases/0.4.0/verification-q1.json`、`docs/releases/0.4.0/deployment.json`、`docs/releases/0.4.0/workflow-acceptance-q1.json`
+证据或实现位置：`crates/octendra-code/src/resumable.rs`、`crates/octendra-code/src/transfers.rs`、`docs/iteration-0.3.0-2026-09-10.md`、`docs/releases/0.4.0/verification-q1.json`、`docs/releases/0.4.0/deployment.json`、`docs/releases/0.4.0/workflow-acceptance-q1.json`
 
 依赖：RH-009
 
@@ -227,7 +227,7 @@
 
 验收：临时故障恢复同一任务；确定失败不可盲重放；发布后丢回执只补回执。
 
-证据或实现位置：`crates/remote-hosts-code/src/agent.rs`、`docs/releases/0.4.0/verification-q1.json`、`docs/releases/0.4.0/deployment.json`、`docs/releases/0.4.0/workflow-acceptance-q1.json`、`docs/releases/0.4.1/verification.json`、`docs/releases/0.4.1/deployment.json`、`docs/releases/0.4.1/incidents.json`、`docs/product/DESKTOP-REVIEW-2026-09-22.md`、`scripts/release_client.py`、`scripts/fleet-upgrade.py`、`scripts/tests/test_fleet_transfer_recovery.py`、`scripts/check-transfer-recovery.py`、`scripts/tests/test_fleet_transfer_acceptance.py`、`crates/remote-hosts-code/src/durable_transfer_tests.rs`、`docs/transfer-recovery-acceptance.md`
+证据或实现位置：`crates/octendra-code/src/agent.rs`、`docs/releases/0.4.0/verification-q1.json`、`docs/releases/0.4.0/deployment.json`、`docs/releases/0.4.0/workflow-acceptance-q1.json`、`docs/releases/0.4.1/verification.json`、`docs/releases/0.4.1/deployment.json`、`docs/releases/0.4.1/incidents.json`、`docs/product/DESKTOP-REVIEW-2026-09-22.md`、`scripts/release_client.py`、`scripts/fleet-upgrade.py`、`scripts/tests/test_fleet_transfer_recovery.py`、`scripts/check-transfer-recovery.py`、`scripts/tests/test_fleet_transfer_acceptance.py`、`crates/octendra-code/src/durable_transfer_tests.rs`、`docs/transfer-recovery-acceptance.md`
 
 依赖：无
 
@@ -241,7 +241,7 @@
 
 验收：链接过期后用新授权恢复原任务；换源内容被拒绝；报告needs_authorization而不是含糊失败。
 
-证据或实现位置：`crates/remote-hosts-code/src/gateway.rs`、`crates/remote-hosts-code/src/transfers.rs`、`docs/releases/0.4.0/verification-q1.json`、`docs/releases/0.4.0/deployment.json`、`docs/releases/0.4.0/workflow-acceptance-q1.json`、`docs/releases/0.4.1/verification.json`、`docs/releases/0.4.1/deployment.json`、`docs/releases/0.4.1/incidents.json`
+证据或实现位置：`crates/octendra-code/src/gateway.rs`、`crates/octendra-code/src/transfers.rs`、`docs/releases/0.4.0/verification-q1.json`、`docs/releases/0.4.0/deployment.json`、`docs/releases/0.4.0/workflow-acceptance-q1.json`、`docs/releases/0.4.1/verification.json`、`docs/releases/0.4.1/deployment.json`、`docs/releases/0.4.1/incidents.json`
 
 依赖：RH-009
 
@@ -255,7 +255,7 @@
 
 验收：取消不影响其他任务；已发布结果不倒退；临时空间回收可验证；取消与重试竞态可重现。
 
-证据或实现位置：`crates/remote-hosts-code/src/tools.rs`、`docs/releases/0.4.0/verification-q1.json`、`docs/releases/0.4.0/deployment.json`、`docs/releases/0.4.0/workflow-acceptance-q1.json`
+证据或实现位置：`crates/octendra-code/src/tools.rs`、`docs/releases/0.4.0/verification-q1.json`、`docs/releases/0.4.0/deployment.json`、`docs/releases/0.4.0/workflow-acceptance-q1.json`
 
 依赖：RH-009
 
@@ -269,7 +269,7 @@
 
 验收：项目A密集同根写任务不使项目B饥饿；记录queue/resource_wait时间。
 
-证据或实现位置：`crates/remote-hosts-code/src/agent.rs`、`crates/remote-hosts-code/src/scheduler.rs`、`docs/releases/0.3.3/RELEASE.md`、`docs/releases/0.3.3/verification-g1.json`、`docs/releases/0.3.3/source-archive.json`、`docs/releases/0.3.3/deployment.json`
+证据或实现位置：`crates/octendra-code/src/agent.rs`、`crates/octendra-code/src/scheduler.rs`、`docs/releases/0.3.3/RELEASE.md`、`docs/releases/0.3.3/verification-g1.json`、`docs/releases/0.3.3/source-archive.json`、`docs/releases/0.3.3/deployment.json`
 
 依赖：无
 
@@ -283,7 +283,7 @@
 
 验收：填满输入、遗留输出句柄、取消和升级场景不无限积累线程/句柄；跨平台分别验收。
 
-证据或实现位置：`crates/remote-hosts-code/src/terminal.rs`、`docs/iteration-0.3.0-2026-09-10.md`
+证据或实现位置：`crates/octendra-code/src/terminal.rs`、`docs/iteration-0.3.0-2026-09-10.md`
 
 依赖：无
 
@@ -297,7 +297,7 @@
 
 验收：慢流、零速、重试、校验、发布时字段一致；停滞速率归零；done和进度不可混淆。
 
-证据或实现位置：`crates/remote-hosts-code/src/progress.rs`、`crates/remote-hosts-code/src/gateway.rs`、`crates/remote-hosts-code/src/transfers.rs`、`docs/releases/0.4.0/verification-q1.json`、`docs/releases/0.4.0/deployment.json`、`docs/releases/0.4.0/workflow-acceptance-q1.json`、`docs/releases/0.4.1/verification.json`、`docs/releases/0.4.1/deployment.json`、`docs/releases/0.4.1/incidents.json`
+证据或实现位置：`crates/octendra-code/src/progress.rs`、`crates/octendra-code/src/gateway.rs`、`crates/octendra-code/src/transfers.rs`、`docs/releases/0.4.0/verification-q1.json`、`docs/releases/0.4.0/deployment.json`、`docs/releases/0.4.0/workflow-acceptance-q1.json`、`docs/releases/0.4.1/verification.json`、`docs/releases/0.4.1/deployment.json`、`docs/releases/0.4.1/incidents.json`
 
 依赖：无
 
@@ -311,7 +311,7 @@
 
 验收：一次读取恢复任务/改动/证据/阻塞；跨对话不泄漏其他项目；断连不丢完成事件。
 
-证据或实现位置：`crates/remote-hosts-mcp/src/lib.rs`、`crates/remote-hosts-code/src/tools.rs`、`docs/releases/0.4.0/verification-q1.json`、`docs/releases/0.4.0/deployment.json`、`docs/releases/0.4.0/workflow-acceptance-q1.json`、`docs/releases/0.4.1/verification.json`、`docs/releases/0.4.1/deployment.json`、`docs/releases/0.4.1/incidents.json`、`docs/releases/0.4.1/context-readonly-macbook.json`
+证据或实现位置：`crates/octendra-mcp/src/lib.rs`、`crates/octendra-code/src/tools.rs`、`docs/releases/0.4.0/verification-q1.json`、`docs/releases/0.4.0/deployment.json`、`docs/releases/0.4.0/workflow-acceptance-q1.json`、`docs/releases/0.4.1/verification.json`、`docs/releases/0.4.1/deployment.json`、`docs/releases/0.4.1/incidents.json`、`docs/releases/0.4.1/context-readonly-macbook.json`
 
 依赖：无
 
@@ -325,7 +325,7 @@
 
 验收：短命令尽量一次返回退出码与首屏；长任务不重派发；同终端增量输出不漏不重复。
 
-证据或实现位置：`crates/remote-hosts-code/src/gateway.rs`、`crates/remote-hosts-code/src/tools.rs`、`docs/releases/0.3.1/verification.json`、`docs/releases/0.3.1/deployment.json`、`docs/releases/0.3.2/RELEASE.md`、`docs/releases/0.3.2/deployment.json`、`docs/releases/0.3.2/verification-final.json`、`scripts/release_client.py`、`scripts/tests/test_terminal_observation_recovery.py`、`docs/native-release-client.md`、`docs/iterations/2026-10-09-terminal-continuation/verification.json`
+证据或实现位置：`crates/octendra-code/src/gateway.rs`、`crates/octendra-code/src/tools.rs`、`docs/releases/0.3.1/verification.json`、`docs/releases/0.3.1/deployment.json`、`docs/releases/0.3.2/RELEASE.md`、`docs/releases/0.3.2/deployment.json`、`docs/releases/0.3.2/verification-final.json`、`scripts/release_client.py`、`scripts/tests/test_terminal_observation_recovery.py`、`docs/native-release-client.md`、`docs/iterations/2026-10-09-terminal-continuation/verification.json`
 
 依赖：无
 
@@ -339,7 +339,7 @@
 
 验收：所有常见失败都有下一动作；日志关联同一操作且不泄漏命令敏感值；不能把平台拦截记成测试失败。
 
-证据或实现位置：`crates/remote-hosts-code/src/agent.rs`、`crates/remote-hosts-code/src/gateway.rs`、`docs/product/DESKTOP-REVIEW-2026-09-22.md`
+证据或实现位置：`crates/octendra-code/src/agent.rs`、`crates/octendra-code/src/gateway.rs`、`docs/product/DESKTOP-REVIEW-2026-09-22.md`
 
 依赖：无
 
@@ -353,7 +353,7 @@
 
 验收：网页和Codex均能完整读取字段；量化返回字节与实际token，未测前不宣称减半。
 
-证据或实现位置：`crates/remote-hosts-code/src/gateway.rs`
+证据或实现位置：`crates/octendra-code/src/gateway.rs`
 
 依赖：无
 
@@ -367,7 +367,7 @@
 
 验收：同批多范围版本一致；并发编辑有明确冲突；文件读次数与唯一文件数一致。
 
-证据或实现位置：`crates/remote-hosts-code/src/files.rs`、`docs/releases/0.3.1/verification.json`、`docs/releases/0.3.1/deployment.json`、`docs/releases/0.3.1/features-macbook.json`
+证据或实现位置：`crates/octendra-code/src/files.rs`、`docs/releases/0.3.1/verification.json`、`docs/releases/0.3.1/deployment.json`、`docs/releases/0.3.1/features-macbook.json`
 
 依赖：无
 
@@ -383,7 +383,7 @@
 
 验收：大于64 KiB单行能分段读完；合法范围不因另一坏路径消失；UTF-8边界正确。
 
-证据或实现位置：`crates/remote-hosts-code/src/files.rs`、`docs/releases/0.3.1/verification.json`、`docs/releases/0.3.1/deployment.json`、`docs/releases/0.3.1/features-macbook.json`
+证据或实现位置：`crates/octendra-code/src/files.rs`、`docs/releases/0.3.1/verification.json`、`docs/releases/0.3.1/deployment.json`、`docs/releases/0.3.1/features-macbook.json`
 
 依赖：无
 
@@ -399,7 +399,7 @@
 
 验收：大仓库连续页无重复漏项或明确snapshot_changed；缓存不返回旧版本。
 
-证据或实现位置：`crates/remote-hosts-code/src/files.rs`
+证据或实现位置：`crates/octendra-code/src/files.rs`
 
 依赖：无
 
@@ -413,7 +413,7 @@
 
 验收：超过1000条历史仍完整恢复活跃终端/任务；清理不让旧副作用被再执行。
 
-证据或实现位置：`crates/remote-hosts-code/src/store.rs`、`docs/releases/0.3.3/RELEASE.md`、`docs/releases/0.3.3/verification-g1.json`、`docs/releases/0.3.3/source-archive.json`、`docs/releases/0.3.3/deployment.json`
+证据或实现位置：`crates/octendra-code/src/store.rs`、`docs/releases/0.3.3/RELEASE.md`、`docs/releases/0.3.3/verification-g1.json`、`docs/releases/0.3.3/source-archive.json`、`docs/releases/0.3.3/deployment.json`
 
 依赖：无
 
@@ -427,7 +427,7 @@
 
 验收：空闲后可回收过期对象；活跃慢传输不误删；断电遗留可识别；隐私说明不承诺物理擦除。
 
-证据或实现位置：`crates/remote-hosts-code/src/transfers.rs`、`crates/remote-hosts-code/src/store.rs`、`crates/remote-hosts-code/src/storage_gc.rs`、`docs/releases/0.7.1/RELEASE.md`
+证据或实现位置：`crates/octendra-code/src/transfers.rs`、`crates/octendra-code/src/store.rs`、`crates/octendra-code/src/storage_gc.rs`、`docs/releases/0.7.1/RELEASE.md`
 
 依赖：RH-007
 
@@ -441,7 +441,7 @@
 
 验收：故障注入断连/网关重启/会话切换/回执丢失，无重复副作用且最终结果可取。
 
-证据或实现位置：`crates/remote-hosts-code/src/agent.rs`、`crates/remote-hosts-code/src/gateway.rs`、`docs/releases/0.3.4/RELEASE.md`、`docs/releases/0.3.4/verification-h1.json`、`docs/releases/0.3.4/deployment.json`
+证据或实现位置：`crates/octendra-code/src/agent.rs`、`crates/octendra-code/src/gateway.rs`、`docs/releases/0.3.4/RELEASE.md`、`docs/releases/0.3.4/verification-h1.json`、`docs/releases/0.3.4/deployment.json`
 
 依赖：无
 
@@ -557,7 +557,7 @@
 
 验收：相同内容复用可测量；权限仍按当前操作核验；缓存失效和容量限制正确。
 
-证据或实现位置：`crates/remote-hosts-code/src/transfers.rs`
+证据或实现位置：`crates/octendra-code/src/transfers.rs`
 
 依赖：RH-007
 
@@ -571,7 +571,7 @@
 
 验收：低速大文件+断线+并发+低磁盘可靠通过；不可仅提高schema常数。
 
-证据或实现位置：`crates/remote-hosts-code/src/tools.rs`、`crates/remote-hosts-code/src/transfers.rs`、`crates/remote-hosts-code/tests/support/scale_070.rs`、`docs/releases/0.7.1/native-acceptance.json`、`docs/releases/0.7.1/deployment-final.json`
+证据或实现位置：`crates/octendra-code/src/tools.rs`、`crates/octendra-code/src/transfers.rs`、`crates/octendra-code/tests/support/scale_070.rs`、`docs/releases/0.7.1/native-acceptance.json`、`docs/releases/0.7.1/deployment-final.json`
 
 依赖：RH-007、RH-023
 
@@ -599,7 +599,7 @@
 
 验收：新Gateway旧Agent与新Agent旧Gateway行为明确；无静默忽略lane导致错调度。
 
-证据或实现位置：`crates/remote-hosts-code/src/agent.rs`、`crates/remote-hosts-code/src/gateway.rs`、`docs/releases/0.3.1/verification.json`、`docs/releases/0.3.1/deployment.json`、`docs/releases/0.3.2/RELEASE.md`、`docs/releases/0.3.2/deployment.json`、`docs/releases/0.3.2/verification-final.json`、`docs/releases/0.7.1/native-acceptance.json`、`docs/releases/0.7.1/RELEASE.md`、`docs/product/DESKTOP-REVIEW-2026-09-22.md`、`docs/gemini-spark-mcp.md`
+证据或实现位置：`crates/octendra-code/src/agent.rs`、`crates/octendra-code/src/gateway.rs`、`docs/releases/0.3.1/verification.json`、`docs/releases/0.3.1/deployment.json`、`docs/releases/0.3.2/RELEASE.md`、`docs/releases/0.3.2/deployment.json`、`docs/releases/0.3.2/verification-final.json`、`docs/releases/0.7.1/native-acceptance.json`、`docs/releases/0.7.1/RELEASE.md`、`docs/product/DESKTOP-REVIEW-2026-09-22.md`、`docs/gemini-spark-mcp.md`
 
 依赖：无
 
@@ -613,7 +613,7 @@
 
 验收：错误scope被拒绝；自定义脚本需用户许可；凭据不进可见结果；不许为性能弱化鉴权。
 
-证据或实现位置：`crates/remote-hosts-code/src/tools.rs`、`crates/remote-hosts-code/src/terminal_output.rs`
+证据或实现位置：`crates/octendra-code/src/tools.rs`、`crates/octendra-code/src/terminal_output.rs`
 
 依赖：无
 
@@ -627,7 +627,7 @@
 
 验收：第N文件失败时先前结果准确；重试不覆盖并发用户编辑；恢复证据可机器判断。
 
-证据或实现位置：`crates/remote-hosts-code/src/files.rs`、`docs/releases/0.7.1/RELEASE.md`
+证据或实现位置：`crates/octendra-code/src/files.rs`、`docs/releases/0.7.1/RELEASE.md`
 
 依赖：无
 
@@ -657,7 +657,7 @@
 
 验收：仅有terminal_id不能记测试通过；退出码、output_complete/error、cleanup状态一致。；强制结束构建父进程后，不允许在未确认旧编译子进程清理前重新同步同一构建槽；以隔离故障注入验证。
 
-证据或实现位置：`crates/remote-hosts-code/src/terminal.rs`、`crates/remote-hosts-code/src/agent.rs`、`docs/releases/0.3.5/deployment.json`、`docs/releases/0.3.5/verification.json`、`docs/releases/0.3.5/acceptance-macbook.json`、`scripts/release-code.py`、`scripts/build_slot.py`、`docs/releases/0.3.5/incidents.json`、`docs/releases/0.4.0/verification-q1.json`、`docs/releases/0.4.0/deployment.json`、`docs/releases/0.4.0/workflow-acceptance-q1.json`
+证据或实现位置：`crates/octendra-code/src/terminal.rs`、`crates/octendra-code/src/agent.rs`、`docs/releases/0.3.5/deployment.json`、`docs/releases/0.3.5/verification.json`、`docs/releases/0.3.5/acceptance-macbook.json`、`scripts/release-code.py`、`scripts/build_slot.py`、`docs/releases/0.3.5/incidents.json`、`docs/releases/0.4.0/verification-q1.json`、`docs/releases/0.4.0/deployment.json`、`docs/releases/0.4.0/workflow-acceptance-q1.json`
 
 依赖：RH-013
 
@@ -671,7 +671,7 @@
 
 验收：满负载下control延迟稳定；SQLITE_BUSY有界恢复；进度降级不取消真实工作。
 
-证据或实现位置：`crates/remote-hosts-code/src/gateway.rs`、`crates/remote-hosts-code/src/store.rs`、`docs/releases/0.4.1/verification.json`、`docs/releases/0.4.1/deployment.json`、`docs/releases/0.4.1/incidents.json`
+证据或实现位置：`crates/octendra-code/src/gateway.rs`、`crates/octendra-code/src/store.rs`、`docs/releases/0.4.1/verification.json`、`docs/releases/0.4.1/deployment.json`、`docs/releases/0.4.1/incidents.json`
 
 依赖：RH-017
 
@@ -741,7 +741,7 @@
 
 验收：20个小结果在可容纳预算内不被过度省略；实际JSON总长度不超过显式上限。；一项产物过期不丢弃其它有权访问的结果；错误不包含签名URL且不重派发原任务。；默认旧单ID形状保持兼容，显式观察参数遵守新预算，混合权限在输出前完整校验。
 
-证据或实现位置：`crates/remote-hosts-code/src/observations.rs`、`crates/remote-hosts-code/tests/observations_032.rs`、`docs/releases/0.3.2/post-verification-source-change.json`、`docs/iterations/2026-09-10-f2/README.md`、`docs/iterations/2026-09-10-f2/verification.json`、`docs/releases/0.3.3/RELEASE.md`、`docs/releases/0.3.3/verification-g1.json`、`docs/releases/0.3.3/source-archive.json`、`docs/releases/0.3.3/deployment.json`
+证据或实现位置：`crates/octendra-code/src/observations.rs`、`crates/octendra-code/tests/observations_032.rs`、`docs/releases/0.3.2/post-verification-source-change.json`、`docs/iterations/2026-09-10-f2/README.md`、`docs/iterations/2026-09-10-f2/verification.json`、`docs/releases/0.3.3/RELEASE.md`、`docs/releases/0.3.3/verification-g1.json`、`docs/releases/0.3.3/source-archive.json`、`docs/releases/0.3.3/deployment.json`
 
 依赖：RH-016
 
@@ -765,7 +765,7 @@
 
 **P1 / 候选已验证 / 0.5.0**
 
-现象与范围：本次git status显示crates/remote-hosts-code及新增发布脚本/测试仍未跟踪。版本化源码归档存在，但main历史不能独立交付和复现这些已部署源码，也难以统一审查与后续CI。
+现象与范围：本次git status显示crates/octendra-code及新增发布脚本/测试仍未跟踪。版本化源码归档存在，但main历史不能独立交付和复现这些已部署源码，也难以统一审查与后续CI。
 
 当前处理：0.5.0核心源码、测试和发布脚本已按白名单纳入main提交e6b68417；固定源码快照通过338项测试并保存git-baseline。当前文档/验收bug修复将作为后续提交，不改写历史基线。仍需在常规CI/干净检出中长期保持这一纪律后再关闭。
 
@@ -779,13 +779,13 @@
 
 **P1 / 候选已验证 / 0.5.0**
 
-现象与范围：在git status显示核心目录未跟踪的情况下，对crates/remote-hosts-code调用code_diff返回diff为空且truncated=false。当前实现调用普通git diff，返回未明确说明未跟踪内容未被覆盖，容易被上层误判为没有待审查改动。
+现象与范围：在git status显示核心目录未跟踪的情况下，对crates/octendra-code调用code_diff返回diff为空且truncated=false。当前实现调用普通git diff，返回未明确说明未跟踪内容未被覆盖，容易被上层误判为没有待审查改动。
 
 当前处理：0.5.0已实现完整变更审查：code_diff可显式覆盖非忽略untracked文本/二进制、预算省略和版本冲突；候选回归通过并已部署。当前宿主可能仍缓存旧工具schema，完整原生ChatGPT验收尚未补齐。
 
 验收：存在未跟踪新文件时明确返回新增内容或未展开清单，不把空diff表述为工作区干净。；覆盖新增/删除/重命名/二进制和输出预算，保持只读，不修改索引、工作树或忽略规则。
 
-证据或实现位置：`docs/product/roadmap-0.5.0-evidence.json`、`crates/remote-hosts-code/src/agent.rs`、`docs/product/ROADMAP-0.5.0.md`、`crates/remote-hosts-code/src/change_review.rs`、`docs/releases/0.5.0/verification.json`、`docs/releases/0.5.0/RELEASE.md`
+证据或实现位置：`docs/product/roadmap-0.5.0-evidence.json`、`crates/octendra-code/src/agent.rs`、`docs/product/ROADMAP-0.5.0.md`、`crates/octendra-code/src/change_review.rs`、`docs/releases/0.5.0/verification.json`、`docs/releases/0.5.0/RELEASE.md`
 
 依赖：无
 
@@ -799,7 +799,7 @@
 
 验收：100文件只修改3个时仅传变化文件内容，保留manifest和逐文件完成/冲突状态，中断后恢复同一manifest。；过滤规则、权限和原版本检查有效；拒绝路径穿越、符号链接逃逸、特殊文件与超限展开；取消不破坏已确认交付或用户并发修改。；配额与过期清理保护活动传输/下载，清理产物不使旧操作再次执行。
 
-证据或实现位置：`crates/remote-hosts-code/src/tools.rs`、`target/iteration-041-r1/publish.py`、`docs/product/ROADMAP-0.5.0.md`、`crates/remote-hosts-code/src/files_sync.rs`、`scripts/sync_bundle.py`、`docs/releases/0.5.0/verification.json`、`docs/releases/0.5.0/RELEASE.md`
+证据或实现位置：`crates/octendra-code/src/tools.rs`、`target/iteration-041-r1/publish.py`、`docs/product/ROADMAP-0.5.0.md`、`crates/octendra-code/src/files_sync.rs`、`scripts/sync_bundle.py`、`docs/releases/0.5.0/verification.json`、`docs/releases/0.5.0/RELEASE.md`
 
 依赖：RH-007、RH-023、RH-037
 
@@ -873,7 +873,7 @@
 
 依赖：无
 
-关闭证据：`docs/product/DESKTOP-REVIEW-2026-09-22.md`、`crates/remote-hosts-code/tests/oauth_clients.rs`
+关闭证据：`docs/product/DESKTOP-REVIEW-2026-09-22.md`、`crates/octendra-code/tests/oauth_clients.rs`
 
 ### RH-055 · 旧 SSH PowerShell 多行命令可能空输出退出而未执行
 

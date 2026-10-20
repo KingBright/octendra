@@ -1,6 +1,6 @@
 [package]
-name = "remote-hosts-desktop-worker"
-version = "0.1.1"
+name = "octendra-desktop-worker"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT OR Apache-2.0"
@@ -10,7 +10,7 @@ publish = false
 resolver = "3"
 
 [dependencies]
-remote-hosts-desktop-protocol = { path = "../crates/remote-hosts-desktop-protocol" }
+octendra-desktop-protocol = { path = "../crates/octendra-desktop-protocol" }
 host = "=2.0.0-alpha.6"
 protocol = "=2.0.0-alpha.6"
 serde = { version = "1.0.228", features = ["derive"] }

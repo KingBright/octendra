@@ -10,35 +10,35 @@ The service manager uses these defaults:
 
 | Purpose | Path |
 | --- | --- |
-| Binary | `~/.local/bin/remote-hosts` |
-| Configuration | `~/.config/remote-hosts/service.env` |
-| Vault master key | `~/.config/remote-hosts/vault-master-password` |
-| SQLite database | `~/.local/share/remote-hosts/remote-hosts.sqlite` |
-| Output artifacts | `~/.local/share/remote-hosts/artifacts` |
-| Hot-swappable admin UI | `~/.local/share/remote-hosts/ui/admin.html` |
-| Logs | `~/.local/state/remote-hosts/logs` |
+| Binary | `~/.local/bin/octendra` |
+| Configuration | `~/.config/octendra/service.env` |
+| Vault master key | `~/.config/octendra/vault-master-password` |
+| SQLite database | `~/.local/share/octendra/octendra.sqlite` |
+| Output artifacts | `~/.local/share/octendra/artifacts` |
+| Hot-swappable admin UI | `~/.local/share/octendra/ui/admin.html` |
+| Logs | `~/.local/state/octendra/logs` |
 
 ## launchd Services
 
 Install and start everything with:
 
 ```bash
-scripts/remote-hosts-service install
+scripts/octendra-service install
 ```
 
 The script builds a release binary, runs migrations, creates a default local connector, writes user
 LaunchAgents, installs the admin UI, synchronizes the Agent Skill, and starts:
 
-- `com.remote-hosts.api`: HTTP API on `127.0.0.1:8787`.
-- `com.remote-hosts.connector`: connector daemon for operations, transfers, and PTY input.
+- `fun.hackerlife.octendra.api`: HTTP API on `127.0.0.1:8787`.
+- `fun.hackerlife.octendra.connector`: connector daemon for operations, transfers, and PTY input.
 
 Both services start automatically at user login. MCP stdio is not a daemon; Codex or Antigravity
 starts a child process with the shared database and vault-key path.
 
 ## Instance Sync Listener
 
-The normal API remains loopback-only. To let another approved Remote Hosts installation synchronize
-with this one, set `REMOTE_HOSTS_PEER_SYNC_BIND` in `~/.config/remote-hosts/service.env` to a
+The normal API remains loopback-only. To let another approved Octendra installation synchronize
+with this one, set `OCTENDRA_PEER_SYNC_BIND` in `~/.config/octendra/service.env` to a
 separate address such as `0.0.0.0:8788`, then apply it during the next planned service update. The
 additional listener exposes only `/healthz`, `/v1/health`, instance identity, and authenticated
 instance-sync export/receive routes. It cannot access the admin UI, credential inspection or
@@ -52,20 +52,20 @@ instance; that remains the default on macOS and Windows.
 
 ## Linux systemd User Services
 
-Linux uses the repository-owned `scripts/remote-hosts-systemd-service` manager. It installs the same
-`remote-hosts` CLI/API/connector stack as the macOS service manager into the current user's XDG
-configuration, data, and state directories, then renders `remote-hosts-api.service` and
-`remote-hosts-connector.service` under the user's systemd unit directory. The generated API remains
+Linux uses the repository-owned `scripts/octendra-systemd-service` manager. It installs the same
+`octendra` CLI/API/connector stack as the macOS service manager into the current user's XDG
+configuration, data, and state directories, then renders `octendra-api.service` and
+`octendra-connector.service` under the user's systemd unit directory. The generated API remains
 loopback-only by default, service files use `NoNewPrivileges=true`, `PrivateTmp=true`, and `UMask=0077`,
 and the vault key is created with mode `0600`. No root or system-wide unit is required.
 
 ```bash
-scripts/remote-hosts-systemd-service install
-scripts/remote-hosts-systemd-service stage
-scripts/remote-hosts-systemd-service status
-scripts/remote-hosts-systemd-service logs
-scripts/remote-hosts-systemd-service restart
-scripts/remote-hosts-systemd-service stop
+scripts/octendra-systemd-service install
+scripts/octendra-systemd-service stage
+scripts/octendra-systemd-service status
+scripts/octendra-systemd-service logs
+scripts/octendra-systemd-service restart
+scripts/octendra-systemd-service stop
 ```
 
 `stage` builds and installs the current CLI, runs migrations and connector bootstrap, refreshes the
@@ -84,14 +84,14 @@ lifecycle commands are documented in [Windows Installation and Operations](windo
 ## Lifecycle Commands
 
 ```bash
-scripts/remote-hosts-service status
-scripts/remote-hosts-service logs
-scripts/remote-hosts-service stage
-scripts/remote-hosts-service update
-scripts/remote-hosts-service restart
-scripts/remote-hosts-service skills
-scripts/remote-hosts-service ui
-scripts/remote-hosts-service stop
+scripts/octendra-service status
+scripts/octendra-service logs
+scripts/octendra-service stage
+scripts/octendra-service update
+scripts/octendra-service restart
+scripts/octendra-service skills
+scripts/octendra-service ui
+scripts/octendra-service stop
 ```
 
 - `stage` rebuilds and installs the binary, runs migrations, and refreshes launchd, Skill, and UI
@@ -101,14 +101,14 @@ scripts/remote-hosts-service stop
 - `restart` applies the same drain gate to the installed version.
 - `--force` intentionally interrupts active conversations and should be used only when the operator
   has accepted that loss of PTY continuity.
-- `skills` synchronizes `skills/remote-hosts-agent` into Codex and Antigravity.
+- `skills` synchronizes `skills/octendra-agent` into Codex and Antigravity.
 - `ui` atomically replaces only the external administration page; the API and connector do not
   restart.
 
 Before a planned restart, run `restart-readiness` and identify the Agent Sessions that own every
 reported operation, PTY, queued input, and write lease. Notify only those active Codex or
 Antigravity conversations, ask them to finish their current atomic step, close their PTY/Workspace,
-and stop creating new Remote Hosts work. The notice must also tell them to reload MCP after the
+and stop creating new Octendra work. The notice must also tell them to reload MCP after the
 upgrade and follow the compact Agent response contract. Wait for the normal drain gate to pass;
 never use `--force` merely because notification or draining takes time.
 
@@ -120,7 +120,7 @@ operations, or leases owned by another Workspace. Do not edit SQLite or use `--f
 closed-Workspace residue. `done`, `failed`, and `throttled` are not treated as explicit closure:
 they retain existing concurrent-operation and bounded lease-handoff behavior.
 
-The API reads `REMOTE_HOSTS_ADMIN_HTML_PATH` on every `/admin` request and falls back to its embedded
+The API reads `OCTENDRA_ADMIN_HTML_PATH` on every `/admin` request and falls back to its embedded
 page. After a UI-only update, reload the browser.
 
 The admin page separates infrastructure topology from `Agent 活动`. The activity view reads the
@@ -132,16 +132,16 @@ operator-facing audit surface; raw MCP JSON is not intended for routine human in
 
 The generated macOS `service.env` or Windows `service.json` configures the database, artifact root,
 connector identity, current network, SSH backend, host-key policy, timeouts, worker concurrency, and
-an optional restricted peer-sync bind. `REMOTE_HOSTS_PEER_SYNC_BIND` on macOS and `PeerSyncBind` on
+an optional restricted peer-sync bind. `OCTENDRA_PEER_SYNC_BIND` on macOS and `PeerSyncBind` on
 Windows are empty by default.
 Local installation defaults to native `russh`, PTY backend mode `auto`, and a bounded operation
 worker pool. Connector bootstrap and restart readiness are implemented by the Rust CLI, so neither
 platform needs an external `sqlite3` executable for service management.
 
-Lifecycle defaults are `REMOTE_HOSTS_PTY_IDLE_TTL_SECONDS=3600` and
-`REMOTE_HOSTS_PTY_BUSY_TTL_SECONDS=86400`. The first applies when no foreground process is
+Lifecycle defaults are `OCTENDRA_PTY_IDLE_TTL_SECONDS=3600` and
+`OCTENDRA_PTY_BUSY_TTL_SECONDS=86400`. The first applies when no foreground process is
 declared; the second applies to a quiet long-running PTY that agents heartbeat truthfully through
-`remote_hosts_heartbeat_pty_session`. Output and accepted input refresh activity automatically.
+`octendra_heartbeat_pty_session`. Output and accepted input refresh activity automatically.
 Heartbeat updates are advisory lifecycle metadata and are retried internally on SQLite writer
 contention. A supervising client must keep observing the same PTY if a heartbeat still fails; it
 must not cancel the remote command, close the terminal, or start a duplicate solely because the
@@ -166,7 +166,7 @@ with mode `0600` on macOS or a current-user ACL on Windows.
 6. Reuse the Workspace and semantic idempotency key while waiting or retrying.
 7. Use the transfer tools for files and artifact tools for large command output.
 
-Do not open a raw `ssh` process beside Remote Hosts. That bypasses pooling, Agent Session isolation,
+Do not open a raw `ssh` process beside Octendra. That bypasses pooling, Agent Session isolation,
 state reporting, rate protection, and audit.
 
 ## Bastions and Internal Assets
@@ -179,7 +179,7 @@ Never infer a direct-login username or register an internal address as externall
 another environment happens to allow it. A `username/server/account` gateway convention is valid
 only when the owner documents it and a bounded read-only probe confirms it.
 
-`remote_hosts_run_in_workspace` rejects routes that require a TTY. For those routes:
+`octendra_run_in_workspace` rejects routes that require a TTY. For those routes:
 
 1. Open the Workspace PTY.
 2. Read the banner or menu.
@@ -191,7 +191,7 @@ implementation is configured. The connector never silently bypasses a declared c
 
 ## Files and Release Artifacts
 
-Use Remote Hosts for bounded commands, configuration, diagnostics, and moderate file transfer. Use a
+Use Octendra for bounded commands, configuration, diagnostics, and moderate file transfer. Use a
 resumable object store or OCI registry for large release assets that many targets will consume, then
 run only the placement or deployment command through the pooled Workspace.
 
@@ -251,7 +251,7 @@ Classify incidents by origin:
 - A transport backend failure, timeout, authentication error, host-key error, or handshake error
   may affect route health only when it came from an actual SSH operation. A database error wrapped
   in an outer helper is not transport evidence.
-- In nested Remote Hosts use, the outer operation and inner PTY have independent durable state. An
+- In nested Octendra use, the outer operation and inner PTY have independent durable state. An
   outer wrapper ending does not prove the already-delivered inner command ended. Inspect the inner
   Work Context and output before any recovery action.
 
@@ -317,7 +317,7 @@ MCP children do not lose output. Reload every Codex and Antigravity MCP child, w
 PTYs, queued input, and write leases to drain, then run:
 
 ```bash
-scripts/remote-hosts-service optimize-storage
+scripts/octendra-service optimize-storage
 ```
 
 The service helper supplies the CLI's explicit `--activate-compressed-writes` confirmation. The
@@ -341,9 +341,9 @@ database and running services were not modified during this benchmark.
 ## Operational Checks
 
 ```bash
-scripts/remote-hosts-service status
+scripts/octendra-service status
 curl -fsS http://127.0.0.1:8787/v1/command-profiles
-scripts/remote-hosts-service logs
+scripts/octendra-service logs
 ```
 
 For a fresh MCP smoke test, start a new MCP stdio child and verify that the Agent profile exposes 22

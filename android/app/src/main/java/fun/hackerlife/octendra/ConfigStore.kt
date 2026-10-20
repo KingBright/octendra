@@ -17,7 +17,7 @@ class ConfigStore(private val context: Context) {
     private val file = AtomicFile(File(context.noBackupFilesDir, "gateway-config.enc"))
     private fun key(): SecretKey {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        val alias = "remote-hosts-gateway-v1"
+        val alias = "octendra-gateway-v1"
         val existing = ks.getKey(alias, null)
         if (existing is SecretKey) return existing
         return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {

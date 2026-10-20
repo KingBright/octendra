@@ -121,7 +121,7 @@ def verify_release(report, approved=APPROVED):
     manifest = json.loads((package / "manifest.json").read_text())
     require(type(manifest.get("task_authorization_protocol")) is int
             and manifest["task_authorization_protocol"] == 1, "task_policy_protocol_required")
-    require(manifest["artifacts"]["remote-hosts-code-linux-amd64"]["sha256"]
+    require(manifest["artifacts"]["octendra-code-linux-amd64"]["sha256"]
             == approved["candidate_sha256"], "approved_gateway_candidate_mismatch")
     bundle = package.parent / (package.name + "-bundle.tgz")
     plan = {"version": VERSION, **{k: approved[k] for k in
@@ -175,7 +175,7 @@ class OwnerSSH:
 
     def connect(self):
         # Passwordless read-only preflight may run without a Terminal; owner OAuth still requires one.
-        self.directory = tempfile.TemporaryDirectory(prefix="rh-gw-", dir="/tmp")
+        self.directory = tempfile.TemporaryDirectory(prefix="octendra-gw-", dir="/tmp")
         os.chmod(self.directory.name, 0o700)
         self.socket = str(Path(self.directory.name) / "c")
         args = ["ssh", "-p", str(self.port), "-S", self.socket,
@@ -308,7 +308,7 @@ class GatewayRelease:
     def probe(self):
         value = self.ssh.request("probe", self.plan)
         executable = value.get("gateway_executable", "")
-        require(isinstance(executable, str) and Path(executable).name == "remote-hosts-code",
+        require(isinstance(executable, str) and Path(executable).name == "octendra-code",
                 "gateway_identity_unavailable")
         root = str(Path(executable).parent)
         if "gateway_root" in self.plan:

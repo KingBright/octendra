@@ -1,0 +1,22 @@
+[Unit]
+Description=Octendra Code Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{SERVICE_USER}}
+Group={{SERVICE_GROUP}}
+ExecStart={{BINARY_PATH}} gateway --config {{CONFIG_PATH}}
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths={{STATE_DIR}}
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

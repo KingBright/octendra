@@ -79,7 +79,7 @@ def main():
                 raise RuntimeError('requested_device_version_or_readiness_mismatch:' + device)
             windows = node['capabilities']['platform'] == 'windows'
             for case, exit_code in [('short', 0), ('failure', 7), ('delayed', 0)]:
-                marker = 'RH-DELIVERY-' + args.run_id + '-' + case
+                marker = 'OCTENDRA-DELIVERY-' + args.run_id + '-' + case
                 emit = lambda text: "Write-Output '" + text + "'" if windows else "printf '" + text + "\\n'"
                 command = emit(marker)
                 expected = marker + '\n'

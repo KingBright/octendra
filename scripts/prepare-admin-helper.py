@@ -13,7 +13,7 @@ import sys
 
 # Managed-service preparation reuses this producer; it never includes installer scripts.
 MANAGED_PROFILE = 'linux-managed-service-v1'
-MANAGED_COMPONENT = 'remote-hosts-admin-linux-prepared'
+MANAGED_COMPONENT = 'octendra-admin-linux-prepared'
 
 def prepare_managed(binary, output, device_id, account, uid, gid, home, source_commit, source_inputs_sha256):
     if binary.is_symlink() or not binary.is_file() or binary_machine(binary, 'linux') != 'x86_64':
@@ -26,57 +26,57 @@ def prepare_managed(binary, output, device_id, account, uid, gid, home, source_c
     if len(source_commit)!=40 or len(source_inputs_sha256)!=64:
         raise ValueError('Missing pinned source identity')
     output.mkdir(parents=True, exist_ok=False, mode=0o700)
-    shutil.copyfile(binary, output/'remote-hosts-admin')
-    (output/'remote-hosts-admin').chmod(0o755)
+    shutil.copyfile(binary, output/'octendra-admin')
+    (output/'octendra-admin').chmod(0o755)
     policy=dict(protocol=1,device_id=device_id,grant_id=str(uuid.uuid4()),allowed_uid=uid,
                 allowed_gid=gid,home=home,platform='linux',enabled=False)
     grant=dict(protocol=1,device_id=device_id,grant_id=policy['grant_id'],enabled=False,
                not_before=0,expires_at=0,action='managed_service_restart',
-               unit='remote-hosts-code-agent.service',unit_sha256='0'*64,
-               executable='/unconfirmed/remote-hosts-code',executable_sha256='0'*64,
+               unit='octendra-code-agent.service',unit_sha256='0'*64,
+               executable='/unconfirmed/octendra-code',executable_sha256='0'*64,
                agent_config='/unconfirmed/agent.json',agent_config_sha256='0'*64)
     for name,value in [('policy.json',policy),('service-grant.json',grant)]:
         (output/name).write_text(json.dumps(value,indent=2)+'\n')
         (output/name).chmod(0o600)
     root=Path(__file__).resolve().parents[1]
-    (output/'service.template').write_bytes((root/'crates/remote-hosts-admin/src/assets/linux-managed-helper.service').read_bytes())
+    (output/'service.template').write_bytes((root/'crates/octendra-admin/src/assets/linux-managed-helper.service').read_bytes())
     instructions = '''Prepared disabled data package. NOT installed, NOT activated, unsigned development artifact.
 No install.py, shell installer, sudoers, DNS, service restart or automatic root action is included.
 
 1. Independently verify manifest SHA-256 from the trusted preparation receipt; do not trust a replaced checksum next to a replaced binary.
 2. An OS administrator must stage the exact verified ELF in root-owned, non-writable ancestors before executing it as root.
-   Native bootstrap destination: /var/lib/remote-hosts-admin/bin/remote-hosts-admin (root:root 0755).
+   Native bootstrap destination: /var/lib/octendra-admin/bin/octendra-admin (root:root 0755).
    Verify the staged ELF digest AGAIN with the trusted OS checksum utility before execution.
    Do not execute root code or a writable script directly from this package.
 3. From that verified native executable, inspect-site reads the fixed service and enrolled identity only.
-   /var/lib/remote-hosts-admin/bin/remote-hosts-admin linux-helper inspect-site --bundle <bundle> --manifest-sha256 <trusted-sha> --output <new-private-site.json>
+   /var/lib/octendra-admin/bin/octendra-admin linux-helper inspect-site --bundle <bundle> --manifest-sha256 <trusted-sha> --output <new-private-site.json>
 4. Prepare one installation review with the ORIGINAL operation UUID and explicit validity/unattended scope:
    ... linux-helper prepare-install --bundle <bundle> --manifest-sha256 <trusted-sha> --request-id <original-operation-uuid> --site <site.json> --not-before <unix-seconds> --expires-at <unix-seconds> --allow-unattended --output <new-review.json>
 5. Review exact device/account, fixed resources, hashes, validity, out-of-band recovery and revocation. Accept the review's plan_sha256 explicitly:
    ... linux-helper render-approved --bundle <bundle> --plan <review.json> --accept-plan-sha256 <approved-plan-sha> --output <new-private-render-directory>
    This exports data only; it does not copy to system directories or start a service.
 6. Separate OS administrator installation is required for:
-   policy.json -> /var/lib/remote-hosts-admin/policy.json (root:root 0600)
-   service-grant.json -> /var/lib/remote-hosts-admin/service-grant.json (root:root 0600)
-   service.template -> /etc/systemd/system/remote-hosts-admin.service (root:root 0644)
-   receipts -> /var/lib/remote-hosts-admin/receipts (root:root 0700, preserve existing evidence)
-   helper binary as above; runtime socket /run/remote-hosts-admin/helper.sock.
+   policy.json -> /var/lib/octendra-admin/policy.json (root:root 0600)
+   service-grant.json -> /var/lib/octendra-admin/service-grant.json (root:root 0600)
+   service.template -> /etc/systemd/system/octendra-admin.service (root:root 0644)
+   receipts -> /var/lib/octendra-admin/receipts (root:root 0700, preserve existing evidence)
+   helper binary as above; runtime socket /run/octendra-admin/helper.sock.
    Installing the PACKAGE templates keeps both policy and grant disabled. Approved rendered files are a separate, explicit authorization decision.
    The administrator must independently verify each source and destination digest; refuse symlinks, writable ancestors or existing unknown installations.
-   Service manager reload/start/enable of remote-hosts-admin.service is a separate OS-authorized action, never done by this preparation tool.
+   Service manager reload/start/enable of octendra-admin.service is a separate OS-authorized action, never done by this preparation tool.
 7. Ordinary authorized UID uses the ORIGINAL operation UUID:
-   remote-hosts-admin linux-helper status --device-id <device-uuid>
-   remote-hosts-admin linux-helper plan --device-id <device-uuid> --request-id <original-operation-uuid> --output <new-plan.json>
-   remote-hosts-admin linux-helper apply --device-id <device-uuid> --plan <plan.json> --accept-plan-sha256 <approved-action-plan-sha>
-   remote-hosts-admin linux-helper receipt --device-id <device-uuid> --request-id <same-operation-uuid>
-   remote-hosts-admin linux-helper revoke --device-id <device-uuid>
+   octendra-admin linux-helper status --device-id <device-uuid>
+   octendra-admin linux-helper plan --device-id <device-uuid> --request-id <original-operation-uuid> --output <new-plan.json>
+   octendra-admin linux-helper apply --device-id <device-uuid> --plan <plan.json> --accept-plan-sha256 <approved-action-plan-sha>
+   octendra-admin linux-helper receipt --device-id <device-uuid> --request-id <same-operation-uuid>
+   octendra-admin linux-helper revoke --device-id <device-uuid>
    Unknown outcomes require the original receipt; never change UUID or replay.
 Revoke persists the original helper revocation marker; do not delete it to re-enable. Preserve receipts on uninstall.
-Only remote-hosts-code-agent.service restart is supported. No DNS, sing-box, reboot, package install or arbitrary shell.
+Only octendra-code-agent.service restart is supported. No DNS, sing-box, reboot, package install or arbitrary shell.
 Other platforms need their own signed/ACL-verified adapter; this Linux package is not cross-platform activation evidence.
 '''
     (output/'INSTALL.txt').write_text(instructions)
-    names=['remote-hosts-admin','policy.json','service-grant.json','service.template','INSTALL.txt']
+    names=['octendra-admin','policy.json','service-grant.json','service.template','INSTALL.txt']
     manifest=dict(protocol=2,profile=MANAGED_PROFILE,helper_version='0.1.0',platform='linux',machine='x86_64',
                   device_id=device_id,account=account,source_commit=source_commit,
                   source_inputs_sha256=source_inputs_sha256,validation_kind='unsigned-dev',
@@ -90,11 +90,11 @@ def publish_managed(args):
     import fcntl, os, subprocess, tarfile
     import release_current as current
     root=current.primary(Path(__file__).resolve().parents[1])
-    default=root/'dist/remote-hosts-admin-linux-current'
-    archive=root/'dist/remote-hosts-admin-linux-current.tgz'
+    default=root/'dist/octendra-admin-linux-current'
+    archive=root/'dist/octendra-admin-linux-current.tgz'
     if args.platform not in (None,'linux') or args.binary is not None or (args.output is not None and args.output.resolve()!=default):
         raise ValueError('Managed profile builds in primary main and publishes only its fixed Linux current group')
-    current.preflight(root)
+    current.require_current_names(current.preflight(root))
     lock=root/'.rust-storage/admin-helper-producer.lock'
     with lock.open('a+b') as held:
         fcntl.flock(held,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -112,8 +112,8 @@ def publish_managed(args):
             raise ValueError('Unexpected current staging paths')
         try:
             run=lambda command:subprocess.run([sys.executable,str(root/'scripts/dev-verify.py'),'--exec',*command],cwd=root,check=True)
-            run(['cargo','build','-p','remote-hosts-admin','--locked','--offline'])
-            run(['cargo','zigbuild','-p','remote-hosts-admin','--release','--locked','--offline','--target','x86_64-unknown-linux-musl'])
+            run(['cargo','build','-p','octendra-admin','--locked','--offline'])
+            run(['cargo','zigbuild','-p','octendra-admin','--release','--locked','--offline','--target','x86_64-unknown-linux-musl'])
             current.check_inputs(root,env)
             # Cargo metadata is read through the same pinned toolchain environment.
             import importlib.util
@@ -121,10 +121,10 @@ def publish_managed(args):
             dev=importlib.util.module_from_spec(spec);spec.loader.exec_module(dev)
             toolchain=dev.find_toolchain()
             target=current.established_target(root,toolchain['env'])
-            result=prepare_managed(target/'x86_64-unknown-linux-musl/release/remote-hosts-admin',stages[0],
+            result=prepare_managed(target/'x86_64-unknown-linux-musl/release/octendra-admin',stages[0],
                 args.device_id,args.account,args.uid,args.gid,args.home,
                 subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),env['snapshot_id'])
-            checked=json.loads(subprocess.check_output([str(target/'debug/remote-hosts-admin'),'linux-helper','verify-package',
+            checked=json.loads(subprocess.check_output([str(target/'debug/octendra-admin'),'linux-helper','verify-package',
                 '--bundle',str(stages[0]),'--manifest-sha256',result['manifest_sha256']],cwd=root,text=True))
             if checked['default_enabled'] is not False or checked['installed'] is not False or checked['grants_authority'] is not False:
                 raise ValueError('Native package verification did not confirm disabled preparation')
@@ -153,7 +153,7 @@ def publish_managed(args):
                 '--expected-sha256',sha(stages[1]))
             if published.get('current_committed') is not True:raise ValueError('Current preparation publication not confirmed')
             return dict(output=str(default),archive=str(archive),manifest_sha256=result['manifest_sha256'],
-                binary_sha256=result['files']['remote-hosts-admin'],installed=False,default_enabled=False,
+                binary_sha256=result['files']['octendra-admin'],installed=False,default_enabled=False,
                 publication=published)
         except BaseException:
             current.abort(root)
@@ -184,10 +184,10 @@ def binary_machine(path: Path, target: str) -> str:
 
 def make_service(target: str) -> bytes:
     if target == 'macos':
-        state = '/Library/Application Support/RemoteHostsAdmin'
-        config = dict(Label='com.remotehosts.admin', RunAtLoad=True, KeepAlive=True,
+        state = '/Library/Application Support/OctendraAdmin'
+        config = dict(Label='fun.hackerlife.octendra.admin', RunAtLoad=True, KeepAlive=True,
                       UserName='root', GroupName='wheel', Umask=0o077,
-                      ProgramArguments=['/Library/PrivilegedHelperTools/com.remotehosts.admin',
+                      ProgramArguments=['/Library/PrivilegedHelperTools/fun.hackerlife.octendra.admin',
                                         'serve', '--policy', state+'/policy.json',
                                         '--state-dir', state+'/receipts'],
                       StandardOutPath=state+'/helper.stdout.log',
@@ -198,23 +198,23 @@ def make_service(target: str) -> bytes:
         config['ProgramArguments'] += ['--socket', state+'/helper.sock']
         return plistlib.dumps(config, sort_keys=True)
     return b'''[Unit]
-Description=Restricted Remote Hosts administration helper
+Description=Restricted Octendra administration helper
 After=local-fs.target
 
 [Service]
 Type=simple
 User=root
 Group=root
-ExecStart=/var/lib/remote-hosts-admin/bin/remote-hosts-admin serve --policy /var/lib/remote-hosts-admin/policy.json --state-dir /var/lib/remote-hosts-admin/receipts
+ExecStart=/var/lib/octendra-admin/bin/octendra-admin serve --policy /var/lib/octendra-admin/policy.json --state-dir /var/lib/octendra-admin/receipts
 Restart=on-failure
 RestartSec=5
-RuntimeDirectory=remote-hosts-admin
+RuntimeDirectory=octendra-admin
 RuntimeDirectoryMode=0755
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
-ReadWritePaths=/etc/systemd/system /var/lib/remote-hosts-admin /run/remote-hosts-admin
+ReadWritePaths=/etc/systemd/system /var/lib/octendra-admin /run/octendra-admin
 ProtectHome=read-only
 RestrictAddressFamilies=AF_UNIX
 ProtectKernelTunables=yes
@@ -234,13 +234,13 @@ if not sys.flags.isolated:raise SystemExit("Use python3 -I for this administrato
 import argparse, os, pathlib, platform, subprocess
 p=argparse.ArgumentParser();p.add_argument('--apply',action='store_true');a=p.parse_args()
 mac=platform.system()=='Darwin'
-service=pathlib.Path('/Library/LaunchDaemons/com.remotehosts.admin.plist' if mac else '/etc/systemd/system/remote-hosts-admin.service')
-binary=pathlib.Path('/Library/PrivilegedHelperTools/com.remotehosts.admin' if mac else '/var/lib/remote-hosts-admin/bin/remote-hosts-admin')
+service=pathlib.Path('/Library/LaunchDaemons/fun.hackerlife.octendra.admin.plist' if mac else '/etc/systemd/system/octendra-admin.service')
+binary=pathlib.Path('/Library/PrivilegedHelperTools/fun.hackerlife.octendra.admin' if mac else '/var/lib/octendra-admin/bin/octendra-admin')
 print('Remove helper only; keep receipts/backups; never restore old EasyTier automatically.')
 if not a.apply: print(service,binary,sep='\\n');raise SystemExit(0)
 if os.geteuid()!=0:raise SystemExit('Separate administrator authorization is required.')
 env={'PATH':'/usr/bin:/bin:/usr/sbin:/sbin','LC_ALL':'C'}
-command=['/bin/launchctl','bootout','system/com.remotehosts.admin'] if mac else ['/usr/bin/systemctl','disable','--now','remote-hosts-admin.service']
+command=['/bin/launchctl','bootout','system/fun.hackerlife.octendra.admin'] if mac else ['/usr/bin/systemctl','disable','--now','octendra-admin.service']
 subprocess.run(command,check=True,env=env,stdin=subprocess.DEVNULL,timeout=150)
 for path in (service,binary):
     if path.is_symlink():raise SystemExit('Refuse symlink: '+str(path))
@@ -259,15 +259,15 @@ def prepare(binary: Path, output: Path, target: str, device_id: str, account: st
         raise ValueError('Invalid account grant')
     machine = binary_machine(binary, target)
     output.mkdir(parents=True, exist_ok=False)
-    shutil.copyfile(binary, output/'remote-hosts-admin')
-    (output/'remote-hosts-admin').chmod(0o755)
+    shutil.copyfile(binary, output/'octendra-admin')
+    (output/'octendra-admin').chmod(0o755)
     policy = dict(protocol=1, device_id=device_id, grant_id=str(uuid.uuid4()),
                   allowed_uid=uid, allowed_gid=gid, home=home, platform=target, enabled=True)
     (output/'policy.json').write_text(json.dumps(policy, indent=2)+'\n')
     (output/'service.template').write_bytes(make_service(target))
     shutil.copyfile(Path(__file__).with_name('admin-helper-install.py'), output/'install.py')
     (output/'uninstall.py').write_text(UNINSTALL)
-    names = ['remote-hosts-admin', 'policy.json', 'service.template', 'install.py', 'uninstall.py']
+    names = ['octendra-admin', 'policy.json', 'service.template', 'install.py', 'uninstall.py']
     manifest = dict(protocol=1, helper_version='0.1.0', status='prepared_not_installed',
                     platform=target, machine=machine, device_id=device_id, account=account,
                     files={n: sha(output/n) for n in names})
@@ -280,7 +280,7 @@ def prepare(binary: Path, output: Path, target: str, device_id: str, account: st
         'Preview without privileges: python3 -I install.py\n'
         'In a separately authorized administrator session:\n'
         'python3 -I install.py --apply --grant-legacy-cleanup --agent-config /path/to/existing/agent.json --accept-manifest-sha256 '+identity+'\n'
-        'Do not transmit administrator passwords through Remote Hosts.\n'
+        'Do not transmit administrator passwords through Octendra.\n'
         'After install, use the normal authorized user and the shared helper CLI.\n'
         'A live network alone does not create an administrator authorization.\n')
     return dict(output=str(output), manifest_sha256=identity, installed=False, **manifest)
