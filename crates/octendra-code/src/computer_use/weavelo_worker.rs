@@ -1,6 +1,6 @@
 //! Fixed private worker bridge to a selected, already-authorized Weavelo source.
 //! Reuses desktop-launch authority, Agent journals and bounded worker frame bytes.
-//! This first route is observe-only: HID actions are never forwarded as keycodes.
+//! Bounded gestures use the original GUI receipt; HID is explicitly translated.
 use anyhow::{Context, Result, ensure};
 use octendra_desktop_protocol::*;
 use serde::{Deserialize, Serialize};
@@ -28,10 +28,18 @@ pub struct Target {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Route {
+    /// Explicit owner-approved remote key space; never inferred from the executor OS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_platform: Option<InputPlatform>,
     pub profile: PathBuf,
     pub generation: String,
     pub gui_executable_sha256: String,
     pub target: Target,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputPlatform {
+    Macos,
 }
 impl Route {
     pub fn desktop_id(&self) -> String {
@@ -146,20 +154,20 @@ async fn exchange(route: &Route, request: Value, maximum: usize) -> Result<(Valu
     .await
     .context("GUI operation timed out")?
 }
-pub(super) async fn probe(route: &Route) -> Result<()> {
+pub(super) async fn probe(route: &Route, input: bool) -> Result<()> {
     let (status, _) = exchange(route, json!("Status"), 0).await?;
     ensure!(
         status["generation"] == route.generation
             && status["executable_sha256"] == route.gui_executable_sha256
             && status["computer_use"]["protocol"] == 1
             && status["computer_use"]["observe"] == true
-            && status["computer_use"]["input"] == false,
+            && (!input || status["computer_use"]["input"] == true),
         "GUI generation/identity/observe contract changed"
     );
     Ok(())
 }
 pub(super) async fn validate_lease(route: &Route, binding: &Binding) -> Result<()> {
-    probe(route).await?;
+    probe(route, false).await?;
     exchange(route,envelope(route,uuid::Uuid::new_v4(),json!({"operation":"validate","actor":actor(&binding.identity),"lease_id":binding.epoch})),0).await?;
     Ok(())
 }
@@ -187,7 +195,7 @@ fn load(path: &Path) -> Result<super::transport::WorkerApproval> {
     route.validate(owner)?;
     ensure!(
         a.enabled
-            && !a.allow_input
+            && (!a.allow_input || route.input_platform == Some(InputPlatform::Macos))
             && a.app_id == "fun.hackerlife.octendra.desktop-worker"
             && a.capability_version.is_some_and(|v| v > 0)
             && a.desktop_uid == owner
@@ -252,12 +260,14 @@ struct Session {
     expires: Instant,
     expires_at_ms: u64,
     last_sequence: u64,
+    last_frame: Option<FrameRef>,
+    consumed: bool,
 }
 #[cfg(target_os = "macos")]
 pub async fn run(path: &Path) -> Result<()> {
     let a = load(path)?;
     let route = a.weavelo.as_ref().context("Weavelo route")?;
-    probe(route).await?;
+    probe(route, a.allow_input).await?;
     let mut input = tokio::io::stdin();
     let mut output = tokio::io::stdout();
     let mut session: Option<Session> = None;
@@ -272,6 +282,7 @@ pub async fn run(path: &Path) -> Result<()> {
         input.read_exact(&mut bytes).await?;
         let request: WorkerRequest = serde_json::from_slice(&bytes)?;
         let close = matches!(&request.request, Request::Close { .. });
+        let is_act = matches!(&request.request, Request::Act { .. });
         let response = handle(
             &a,
             route,
@@ -282,7 +293,17 @@ pub async fn run(path: &Path) -> Result<()> {
         .await;
         let (result, pixels, raw) = match response {
             Ok((r, p, b)) => (Ok(r), p, b),
-            Err(_) => (Err(ErrorCode::Unavailable), None, Vec::new()),
+            // Once an input RPC may have been sent, failures are never reported
+            // as proof of no effect. Agent lifecycle/journal forbids automatic replay.
+            Err(_) => (
+                Err(if is_act {
+                    ErrorCode::OutcomeUnknown
+                } else {
+                    ErrorCode::Unavailable
+                }),
+                None,
+                Vec::new(),
+            ),
         };
         let reply = WorkerReply {
             request_id: request.request_id,
@@ -336,7 +357,7 @@ async fn handle(
                     route,
                     operation,
                     json!({"operation":"open","actor":actor,"target":route.target,
-                "lease_id":binding.epoch,"lease_ms":lease_ms,"max_bytes":a.max_frame_bytes}),
+                "lease_id":binding.epoch,"lease_ms":lease_ms,"max_bytes":a.max_frame_bytes,"control":a.allow_input}),
                 ),
                 0,
             )
@@ -351,6 +372,8 @@ async fn handle(
                 expires: started + Duration::from_millis(u64::from(*lease_ms)),
                 expires_at_ms,
                 last_sequence: 0,
+                last_frame: None,
+                consumed: false,
             });
             Ok((
                 Response::Opened {
@@ -370,6 +393,11 @@ async fn handle(
                 "observer binding/expiry"
             );
             let close = matches!(request, Request::Close { .. });
+            ensure!(
+                close || !current.consumed,
+                "gesture receipt consumed; close and reopen"
+            );
+            current.last_frame.take();
             let (body,bytes)=exchange(route,envelope(route,operation,json!({"operation":if close {"close"} else {"observe"},"actor":actor,"lease_id":binding.epoch})),a.max_frame_bytes).await?;
             if close {
                 *session = None;
@@ -419,9 +447,104 @@ async fn handle(
                     rotation: Rotation::R0,
                 },
             };
+            current.last_frame = Some(frame.clone());
             Ok((Response::Observed { frame }, Some(pixels), bytes))
         }
-        _ => anyhow::bail!("observe-only Weavelo route"),
+        Request::Act {
+            frame,
+            sequence,
+            actions,
+        } => {
+            ensure!(
+                a.allow_input && route.input_platform == Some(InputPlatform::Macos),
+                "remote input not approved"
+            );
+            let current = session.as_mut().context("observer closed")?;
+            ensure!(
+                !current.consumed
+                    && current.binding == frame.binding
+                    && current.last_frame.as_ref() == Some(frame)
+                    && *sequence == 1
+                    && Instant::now() < current.expires
+                    && now() < current.expires_at_ms,
+                "gesture frame/binding/sequence/expiry"
+            );
+            let action = atomic_input(frame, actions)?;
+            current.consumed = true;
+            current.last_frame.take();
+            let (body, _) = exchange(route, envelope(route, operation, json!({
+                "operation":"act", "actor":actor, "lease_id":frame.binding.epoch,
+                "source_revision":frame.source_revision, "frame_sequence":frame.frame_sequence, "action":action,
+            })), 0).await?;
+            ensure!(
+                body["effect_confirmed"] == false,
+                "input acknowledgement mismatch"
+            );
+            Ok((
+                Response::Accepted {
+                    sequence: *sequence,
+                    accepted_actions: actions.len(),
+                    effect_confirmed: false,
+                },
+                None,
+                vec![],
+            ))
+        }
+        _ => anyhow::bail!("unsupported Weavelo request"),
+    }
+}
+/// One complete gesture per observed receipt/lease. No held keys, dragging,
+/// modifiers or arbitrary batch can cross the owner-local bounded action API.
+#[cfg(target_os = "macos")]
+fn atomic_input(frame: &FrameRef, actions: &[Action]) -> Result<Value> {
+    let point = |x, y| -> Result<(u16, u16)> {
+        let p = frame
+            .mapping
+            .map(x, y)
+            .map_err(|_| anyhow::anyhow!("source coordinates"))?;
+        let axis = |value: f64, size: u32| -> u16 {
+            if size == 1 {
+                32768
+            } else {
+                (value / f64::from(size - 1) * 65535.).round() as u16
+            }
+        };
+        Ok((
+            axis(p.x, frame.mapping.logical_size[0]),
+            axis(p.y, frame.mapping.logical_size[1]),
+        ))
+    };
+    match actions {
+        [
+            Action::PointerMove { x, y },
+            Action::ButtonDown { button },
+            Action::ButtonUp { button: up },
+        ] if button == up => {
+            let (x, y) = point(*x, *y)?;
+            let button = match button {
+                Button::Left => 0,
+                Button::Right => 1,
+                Button::Middle => 2,
+            };
+            Ok(json!({"kind":"click","x":x,"y":y,"button":button}))
+        }
+        [Action::KeyDown { usage }, Action::KeyUp { usage: up }] if usage == up && *usage < 224 => {
+            let key = super::macos_worker::mac_key(*usage).context("unsupported HID key")?;
+            Ok(json!({"kind":"key_press","key_code":key}))
+        }
+        [
+            Action::PointerMove { x, y },
+            Action::Wheel {
+                horizontal,
+                vertical,
+            },
+        ] if i32::from(*horizontal).unsigned_abs() <= 1200
+            && i32::from(*vertical).unsigned_abs() <= 1200 =>
+        {
+            let (x, y) = point(*x, *y)?;
+            Ok(json!({"kind":"scroll","x":x,"y":y,"delta_x":horizontal,"delta_y":vertical}))
+        }
+        _ => anyhow::bail!("one complete bounded gesture required"),
     }
 }
 fn rgba_layout(size: [u32; 2], encoding: &str, length: usize, maximum: usize) -> Result<()> {
@@ -454,7 +577,16 @@ mod tests {
     }
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn weavelo_worker_uses_real_private_socket_framing_and_exact_remote_target() {
+    async fn weavelo_observe_worker_uses_real_private_socket_and_exact_remote_target() {
+        socket_roundtrip(false).await;
+    }
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn weavelo_control_worker_forwards_original_frame_once_with_explicit_mac_keycode() {
+        socket_roundtrip(true).await;
+    }
+    #[cfg(target_os = "macos")]
+    async fn socket_roundtrip(control: bool) {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -465,6 +597,7 @@ mod tests {
         )
         .unwrap();
         let route = Route {
+            input_platform: control.then_some(InputPlatform::Macos),
             profile: dir.path().to_owned(),
             generation: "1-2".into(),
             gui_executable_sha256: "0".repeat(64),
@@ -482,7 +615,12 @@ mod tests {
         };
         let executor = identity.device_id;
         let server = tokio::spawn(async move {
-            for operation in ["open", "observe", "close"] {
+            let operations = if control {
+                vec!["open", "observe", "act", "close"]
+            } else {
+                vec!["open", "observe", "close"]
+            };
+            for operation in operations {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let size = stream.read_u32().await.unwrap() as usize;
                 assert!(size <= 4096);
@@ -495,6 +633,7 @@ mod tests {
                 assert_eq!(call["actor"]["executor_device_id"], executor.to_string());
                 let (body, data) = match operation {
                     "open" => {
+                        assert_eq!(call["control"], control);
                         assert_eq!(call["target"]["peer_device_id"], "synthetic-peer");
                         assert_eq!(call["target"]["source"], json!({"Window":42}));
                         (
@@ -506,6 +645,12 @@ mod tests {
                         json!({"ok":true,"lease_id":call["lease_id"],"source_revision":7,"frame_sequence":1,"size":[2,2],"bytes":16,"encoding":"rgba8_srgb"}),
                         vec![17; 16],
                     ),
+                    "act" => {
+                        assert_eq!(call["source_revision"], 7);
+                        assert_eq!(call["frame_sequence"], 1);
+                        assert_eq!(call["action"], json!({"kind":"key_press","key_code":0}));
+                        (json!({"ok":true,"effect_confirmed":false}), vec![])
+                    }
                     _ => (json!({"ok":true}), vec![]),
                 };
                 let bytes = serde_json::to_vec(&body).unwrap();
@@ -530,7 +675,7 @@ mod tests {
             logical_size: [2, 2],
             logical_position: [0, 0],
             max_frame_bytes: 16,
-            allow_input: false,
+            allow_input: control,
         };
         let mut session = None;
         let (opened, _, _) = handle(
@@ -559,9 +704,111 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(matches!(observed, Response::Observed { .. }));
+        let Response::Observed { frame } = observed else {
+            panic!("not observed")
+        };
         assert_eq!(pixels.unwrap().encoding, "rgba8_srgb");
         assert_eq!(bytes, vec![17; 16]);
+        let actions = vec![Action::KeyDown { usage: 4 }, Action::KeyUp { usage: 4 }];
+        let request = Request::Act {
+            frame: frame.clone(),
+            sequence: 1,
+            actions: actions.clone(),
+        };
+        // Invalid target/frame/sequence fail before an IPC effect and don't consume.
+        let mut changed = frame.clone();
+        changed.binding.identity.device_id = uuid::Uuid::new_v4();
+        assert!(
+            handle(
+                &approval,
+                &route,
+                &mut session,
+                uuid::Uuid::new_v4(),
+                &Request::Act {
+                    frame: changed,
+                    sequence: 1,
+                    actions: actions.clone()
+                }
+            )
+            .await
+            .is_err()
+        );
+        let mut changed = frame.clone();
+        changed.source_revision += 1;
+        assert!(
+            handle(
+                &approval,
+                &route,
+                &mut session,
+                uuid::Uuid::new_v4(),
+                &Request::Act {
+                    frame: changed,
+                    sequence: 1,
+                    actions: actions.clone()
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            handle(
+                &approval,
+                &route,
+                &mut session,
+                uuid::Uuid::new_v4(),
+                &Request::Act {
+                    frame,
+                    sequence: 2,
+                    actions
+                }
+            )
+            .await
+            .is_err()
+        );
+        let result = handle(
+            &approval,
+            &route,
+            &mut session,
+            uuid::Uuid::new_v4(),
+            &request,
+        )
+        .await;
+        if control {
+            assert!(matches!(
+                result.unwrap().0,
+                Response::Accepted {
+                    accepted_actions: 2,
+                    effect_confirmed: false,
+                    ..
+                }
+            ));
+            assert!(
+                handle(
+                    &approval,
+                    &route,
+                    &mut session,
+                    uuid::Uuid::new_v4(),
+                    &request
+                )
+                .await
+                .is_err()
+            );
+            assert!(
+                handle(
+                    &approval,
+                    &route,
+                    &mut session,
+                    uuid::Uuid::new_v4(),
+                    &Request::Observe {
+                        binding: binding.clone()
+                    }
+                )
+                .await
+                .is_err()
+            );
+        } else {
+            assert!(result.is_err());
+        }
         handle(
             &approval,
             &route,
@@ -573,9 +820,140 @@ mod tests {
         .unwrap();
         server.await.unwrap();
     }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn weavelo_atomic_gesture_maps_hid_and_source_edges_without_held_input() {
+        let frame = FrameRef {
+            binding: Binding {
+                identity: Identity {
+                    owner: "fixture".into(),
+                    task_id: uuid::Uuid::new_v4(),
+                    device_id: uuid::Uuid::new_v4(),
+                    desktop_id: "synthetic".into(),
+                },
+                epoch: uuid::Uuid::new_v4(),
+            },
+            source_revision: 7,
+            frame_sequence: 3,
+            mapping: FrameMapping {
+                frame_size: [101, 51],
+                logical_size: [101, 51],
+                desktop_position: [0, 0],
+                rotation: Rotation::R0,
+                content: ContentRect {
+                    left: 0,
+                    top: 0,
+                    width: 101,
+                    height: 51,
+                },
+            },
+        };
+        let click = |x, y| {
+            vec![
+                Action::PointerMove { x, y },
+                Action::ButtonDown {
+                    button: Button::Right,
+                },
+                Action::ButtonUp {
+                    button: Button::Right,
+                },
+            ]
+        };
+        assert_eq!(
+            atomic_input(&frame, &click(100., 50.)).unwrap(),
+            json!({"kind":"click","x":65535,"y":65535,"button":1})
+        );
+        assert_eq!(atomic_input(&frame, &click(0., 0.)).unwrap()["x"], 0);
+        for (x, y) in [
+            (101., 0.),
+            (-1., 0.),
+            (0., 51.),
+            (f64::NAN, 0.),
+            (0., f64::INFINITY),
+        ] {
+            assert!(atomic_input(&frame, &click(x, y)).is_err());
+        }
+        assert_eq!(
+            atomic_input(
+                &frame,
+                &[Action::KeyDown { usage: 40 }, Action::KeyUp { usage: 40 }]
+            )
+            .unwrap(),
+            json!({"kind":"key_press","key_code":36})
+        );
+        for usage in [0, 50, 224, 225, 231, u16::MAX] {
+            assert!(
+                atomic_input(
+                    &frame,
+                    &[Action::KeyDown { usage }, Action::KeyUp { usage }]
+                )
+                .is_err()
+            );
+        }
+        assert!(atomic_input(&frame, &[Action::KeyDown { usage: 4 }]).is_err());
+        assert!(
+            atomic_input(
+                &frame,
+                &[Action::KeyDown { usage: 4 }, Action::KeyUp { usage: 5 }]
+            )
+            .is_err()
+        );
+        assert!(
+            atomic_input(
+                &frame,
+                &[
+                    Action::PointerMove { x: 0., y: 0. },
+                    Action::Wheel {
+                        horizontal: 0,
+                        vertical: 1201
+                    }
+                ]
+            )
+            .is_err()
+        );
+        assert_eq!(
+            atomic_input(
+                &frame,
+                &[
+                    Action::PointerMove { x: 50., y: 25. },
+                    Action::Wheel {
+                        horizontal: -1200,
+                        vertical: 1200
+                    }
+                ]
+            )
+            .unwrap(),
+            json!({"kind":"scroll","x":32768,"y":32768,"delta_x":-1200,"delta_y":1200})
+        );
+        let mut single = frame.clone();
+        single.mapping.frame_size = [1, 1];
+        single.mapping.logical_size = [1, 1];
+        single.mapping.content.width = 1;
+        single.mapping.content.height = 1;
+        assert_eq!(atomic_input(&single, &click(0., 0.)).unwrap()["x"], 32768);
+    }
+    #[test]
+    fn weavelo_input_platform_is_an_explicit_remote_grant_not_an_executor_inference() {
+        let base = json!({"profile":"/synthetic/private","generation":"1-2","gui_executable_sha256":"c".repeat(64),
+            "target":{"peer_device_id":"remote-peer","source":{"Window":42},"connection_id":7}});
+        let route: Route = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(route.input_platform, None);
+        let mut mac = base.clone();
+        mac["input_platform"] = json!("macos");
+        assert_eq!(
+            serde_json::from_value::<Route>(mac).unwrap().input_platform,
+            Some(InputPlatform::Macos)
+        );
+        for value in [json!("linux"), json!("executor"), json!(true)] {
+            let mut invalid = base.clone();
+            invalid["input_platform"] = value;
+            assert!(serde_json::from_value::<Route>(invalid).is_err());
+        }
+    }
     #[test]
     fn remote_source_is_explicit_and_never_replaces_the_executor_device() {
         let route = Route {
+            input_platform: None,
             profile: PathBuf::from("/synthetic/private/profile"),
             generation: "1-2".into(),
             gui_executable_sha256: "0".repeat(64),

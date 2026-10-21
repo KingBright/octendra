@@ -421,7 +421,7 @@ fn request_wait_budget(
     }
 }
 /// Explicit USB HID keyboard-page mapping; unknown usages fail before any action.
-fn mac_key(usage: u16) -> Option<u16> {
+pub(super) fn mac_key(usage: u16) -> Option<u16> {
     const LETTERS: [u16; 26] = [
         0, 11, 8, 2, 14, 3, 5, 4, 34, 38, 40, 37, 46, 45, 31, 35, 12, 15, 1, 17, 32, 9, 13, 7, 16,
         6,

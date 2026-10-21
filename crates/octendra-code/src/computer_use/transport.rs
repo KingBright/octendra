@@ -134,11 +134,13 @@ impl LaunchApproval {
         if let Some(route) = &self.weavelo {
             ensure!(
                 cfg!(target_os = "macos")
-                    && !self.input
+                    && (!self.input
+                        || route.input_platform
+                            == Some(super::weavelo_worker::InputPlatform::Macos))
                     && self.desktop_session == "weavelo"
                     && self.logical_position == [0, 0]
                     && route.desktop_id() == self.identity.desktop_id,
-                "observe-only Weavelo authority required"
+                "explicit Weavelo source authority required"
             );
             route.validate(owner)?;
         } else {
@@ -506,9 +508,9 @@ impl NativeWorkers {
             .await
             .approval
             .as_ref()
-            .and_then(|a| a.weavelo.clone());
-        if let Some(route) = route {
-            let ready = super::weavelo_worker::probe(&route).await.is_ok();
+            .and_then(|a| a.weavelo.clone().map(|route| (route, a.input)));
+        if let Some((route, input)) = route {
+            let ready = super::weavelo_worker::probe(&route, input).await.is_ok();
             return self
                 .capabilities_with_probe("weavelo_source_canvas", |a| {
                     a.validate(&a.identity.device_id.to_string()).is_ok() && ready
@@ -579,12 +581,20 @@ impl NativeWorkers {
         Capabilities {
             available: true,
             backend: if a.weavelo.is_some() {
-                "weavelo_source_canvas_observe_only"
+                if a.input {
+                    "weavelo_source_canvas_bounded_gesture"
+                } else {
+                    "weavelo_source_canvas_observe_only"
+                }
             } else {
                 "macos_pid_private_window_poc"
             }
             .into(),
-            max_actions: if a.weavelo.is_some() { 0 } else { MAX_ACTIONS },
+            max_actions: if a.weavelo.is_some() {
+                if a.input { 3 } else { 0 }
+            } else {
+                MAX_ACTIONS
+            },
             ..Capabilities::default()
         }
     }
@@ -669,7 +679,7 @@ impl NativeWorkers {
             request.identity().is_none_or(|i| i == identity),
             "desktop request identity"
         );
-        if a.weavelo.is_some() && matches!(&request, Request::Act { .. }) {
+        if a.weavelo.is_some() && !a.input && matches!(&request, Request::Act { .. }) {
             return Ok(
                 serde_json::json!({"error":"unavailable","reason":"weavelo_observe_only","automatic_replay_safe":false}),
             );

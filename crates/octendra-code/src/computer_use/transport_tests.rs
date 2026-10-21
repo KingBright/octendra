@@ -24,6 +24,7 @@ fn weavelo_packed_rgba_declares_color_by_encoding_without_fabricating_spa_yuv() 
 async fn weavelo_observe_authority_never_spawns_or_dispatches_input() {
     let dir = tempfile::tempdir().unwrap();
     let route = super::super::weavelo_worker::Route {
+        input_platform: None,
         profile: dir.path().to_owned(),
         generation: "1-2".into(),
         gui_executable_sha256: "0".repeat(64),
