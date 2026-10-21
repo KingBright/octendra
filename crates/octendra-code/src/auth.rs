@@ -288,13 +288,13 @@ pub async fn require_auth(State(auth): State<Auth>, mut req: Request, next: Next
 }
 async fn resource_metadata(State(a): State<Auth>) -> Json<Value> {
     Json(
-        json!({"resource":format!("{}/mcp",a.config.public_url),"authorization_servers":[a.config.public_url],"scopes_supported":crate::SUPPORTED_SCOPES.split_whitespace().collect::<Vec<_>>(),"bearer_methods_supported":["header"]}),
+        json!({"resource":format!("{}/mcp",a.config.public_url),"resource_name":crate::branding::NAME,"resource_documentation":format!("{}/status",a.config.public_url),"authorization_servers":[a.config.public_url],"scopes_supported":crate::SUPPORTED_SCOPES.split_whitespace().collect::<Vec<_>>(),"bearer_methods_supported":["header"]}),
     )
 }
 async fn auth_metadata(State(a): State<Auth>) -> Json<Value> {
     let u = &a.config.public_url;
     Json(
-        json!({"issuer":u,"authorization_endpoint":format!("{u}/oauth/authorize"),"token_endpoint":format!("{u}/oauth/token"),"registration_endpoint":format!("{u}/oauth/register"),"revocation_endpoint":format!("{u}/oauth/revoke"),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["none","client_secret_basic","client_secret_post"],"revocation_endpoint_auth_methods_supported":["none","client_secret_basic","client_secret_post"],"code_challenge_methods_supported":["S256"],"scopes_supported":crate::SUPPORTED_SCOPES.split_whitespace().collect::<Vec<_>>(),"authorization_response_iss_parameter_supported":true}),
+        json!({"issuer":u,"service_documentation":format!("{u}/status"),"authorization_endpoint":format!("{u}/oauth/authorize"),"token_endpoint":format!("{u}/oauth/token"),"registration_endpoint":format!("{u}/oauth/register"),"revocation_endpoint":format!("{u}/oauth/revoke"),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["none","client_secret_basic","client_secret_post"],"revocation_endpoint_auth_methods_supported":["none","client_secret_basic","client_secret_post"],"code_challenge_methods_supported":["S256"],"scopes_supported":crate::SUPPORTED_SCOPES.split_whitespace().collect::<Vec<_>>(),"authorization_response_iss_parameter_supported":true}),
     )
 }
 async fn register(
@@ -375,7 +375,8 @@ async fn authorize(State(a): State<Auth>, Query(q): Query<Authorize>) -> HttpRes
         .await
         .map_err(internal)?;
     let html = format!(
-        "<!doctype html><html lang=zh-CN><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>Octendra 授权</title><body><main><h1>连接你的 Octendra</h1><p>客户端名称（由申请方提供，未经验证）：{}</p><p>客户端 ID：{}</p><p>授权回调：{}</p><p>允许该客户端访问已登记的个人电脑。终端权限可以在本机用户权限范围内执行任意命令，包括项目目录以外的操作。</p><p>本次权限：{}</p><form method=post action=/oauth/approve><input type=hidden name=nonce value='{}'><label>网关登录密码 <input type=password name=password required autocomplete=current-password></label><p><button type=submit>登录并授权</button></p></form></main></body></html>",
+        "<!doctype html><html lang=zh-CN><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>Octendra 授权</title>{}<body><main><h1>连接你的 Octendra</h1><p>客户端名称（由申请方提供，未经验证）：{}</p><p>客户端 ID：{}</p><p>授权回调：{}</p><p>允许该客户端访问已登记的个人电脑。终端权限可以在本机用户权限范围内执行任意命令，包括项目目录以外的操作。</p><p>本次权限：{}</p><form method=post action=/oauth/approve><input type=hidden name=nonce value='{}'><label>网关登录密码 <input type=password name=password required autocomplete=current-password></label><p><button type=submit>登录并授权</button></p></form></main></body></html>",
+        crate::branding::HEAD,
         html_escape(c.client_name.as_deref().unwrap_or("未提供")),
         html_escape(&c.client_id),
         html_escape(&pending.grant.redirect_uri),

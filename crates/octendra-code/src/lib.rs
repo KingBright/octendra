@@ -4,6 +4,7 @@ pub mod agent;
 pub mod agent_log;
 pub mod auth;
 pub mod auto_upgrade;
+mod branding;
 mod capabilities;
 mod code_payload;
 mod payload_budget;
@@ -199,7 +200,7 @@ impl GatewayConfig {
         origins.sort();
         origins.dedup();
         format!(
-            "default-src 'none'; form-action 'self' {}; frame-ancestors 'none'; base-uri 'none'",
+            "default-src 'none'; img-src 'self'; manifest-src 'self'; form-action 'self' {}; frame-ancestors 'none'; base-uri 'none'",
             origins.join(" ")
         )
     }

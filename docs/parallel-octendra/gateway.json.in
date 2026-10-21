@@ -1,0 +1,14 @@
+{
+  "public_url": "${OCTENDRA_PUBLIC_ORIGIN}",
+  "bind": "127.0.0.1:${OCTENDRA_LOOPBACK_PORT}",
+  "state_dir": "${OCTENDRA_NEW_STATE_DIR}",
+  "owner": "${OCTENDRA_OWNER}",
+  "password_hash": "${OCTENDRA_NEW_PASSWORD_HASH}",
+  "devices": [],
+  "redirect_uris": [],
+  "allowed_origins": [
+    "https://chatgpt.com",
+    "https://gemini.google.com"
+  ],
+  "forge_browser": null
+}

@@ -53,6 +53,7 @@ pub(crate) fn render(snapshot: &Value) -> String {
     let mut html = String::from(
         "<!doctype html><html lang=zh-CN><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><noscript><meta http-equiv=refresh content=30></noscript><script src='/status/live.js' defer></script><title>Octendra 连接与访问</title><style>body{font-family:system-ui;margin:0;background:#11151c;color:#e9edf5}main{max-width:1200px;margin:auto;padding:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,350px),1fr));gap:16px}.card{border:1px solid #354153;border-radius:12px;padding:16px;background:#19222e;overflow-wrap:anywhere}h1,h2,h3{line-height:1.3}.muted{color:#adb8c7}.state{font-weight:700}dl{display:grid;grid-template-columns:112px 1fr;gap:6px;margin:12px 0}dt{color:#adb8c7}dd{margin:0}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}button{padding:8px 16px;font:inherit}code{font-size:12px}</style></head><body><p id='octendra-observation' role='status' style='margin:16px 24px'>正在显示已确认快照</p><main id='octendra-status'><h1>Octendra 连接与访问</h1><p class=muted>状态随设备报告更新。</p>",
     );
+    html = html.replacen("</head>", &format!("{}</head>", crate::branding::HEAD), 1);
     html = html.replacen(
         "id='octendra-status'",
         &format!(

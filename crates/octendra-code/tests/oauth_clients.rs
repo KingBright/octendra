@@ -13,6 +13,110 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 
+#[tokio::test]
+async fn octendra_brand_metadata_and_assets_are_consistent() {
+    use rmcp::ServerHandler;
+    let f = Fixture::new().await;
+    let (status, _, resource) = f
+        .request(
+            "GET",
+            "/.well-known/oauth-protected-resource",
+            Value::Null,
+            false,
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resource["resource_name"], "Octendra");
+    assert_eq!(resource["resource"], RESOURCE);
+    assert_eq!(
+        resource["resource_documentation"],
+        format!("{ORIGIN}/status")
+    );
+    let info = serde_json::to_value(f.g.get_info()).unwrap();
+    assert_eq!(info["serverInfo"]["name"], "octendra-code");
+    assert_eq!(info["serverInfo"]["title"], "Octendra");
+    assert_eq!(info["serverInfo"]["websiteUrl"], format!("{ORIGIN}/status"));
+    assert!(
+        info["serverInfo"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Octendra")
+    );
+    let icon = &info["serverInfo"]["icons"][0];
+    assert_eq!(icon["src"], format!("{ORIGIN}/branding/octendra-512.png"));
+    assert_eq!(icon["mimeType"], "image/png");
+    let (status, headers, manifest) = f
+        .request("GET", "/manifest.webmanifest", Value::Null, false, &[])
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        headers["content-type"]
+            .to_str()
+            .unwrap()
+            .contains("application/manifest+json")
+    );
+    assert_eq!(manifest["name"], "Octendra");
+    assert_eq!(manifest["icons"][1]["src"], "/branding/octendra-512.png");
+    for (path, expected) in [
+        (
+            "/branding/octendra-192.png",
+            include_bytes!("../../../assets/brand/octendra/icon-192.png").as_slice(),
+        ),
+        (
+            "/branding/octendra-512.png",
+            include_bytes!("../../../assets/brand/octendra/icon-512.png").as_slice(),
+        ),
+        (
+            "/favicon.ico",
+            include_bytes!("../../../assets/brand/octendra/icon-192.png").as_slice(),
+        ),
+    ] {
+        let response = f
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("host", "mcp.example.com:8443")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "image/png");
+        assert!(!response.headers().contains_key("set-cookie"));
+        assert_eq!(
+            to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap()
+                .as_ref(),
+            expected
+        );
+    }
+    let (status, headers, page) = f.request("GET", "/status", Value::Null, false, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let html = page.as_str().unwrap();
+    assert!(html.contains("<title>Octendra Status</title>"));
+    assert!(html.contains("href='/manifest.webmanifest'"));
+    assert!(html.contains("href='/branding/octendra-192.png'"));
+    let csp = headers["content-security-policy"].to_str().unwrap();
+    assert!(csp.contains("img-src 'self'"));
+    assert!(csp.contains("manifest-src 'self'"));
+    assert!(csp.contains("frame-ancestors 'none'"));
+    let (status, _, _) = f
+        .request(
+            "POST",
+            "/mcp",
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            false,
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
 const ORIGIN: &str = "https://mcp.example.com:8443";
 const RESOURCE: &str = "https://mcp.example.com:8443/mcp";
 const GPT: &str = "https://chatgpt.com/connector_platform_oauth_redirect";
