@@ -79,6 +79,8 @@ pub struct WatchdogSpec {
     pub state_dir: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_identity_sha256: Option<String>,
     pub gateway_url: String,
     pub device_id: String,
     pub device_token: String,
@@ -1021,6 +1023,21 @@ async fn perform_agent_self_upgrade(
     directive: &UpgradeDirective,
 ) -> Result<bool> {
     let config = &agent.config;
+    #[cfg(target_os = "linux")]
+    let instance_identity_sha256 = {
+        let path = agent
+            .config_path
+            .as_ref()
+            .context("managed upgrade config identity missing")?;
+        let exe = std::env::current_exe()?;
+        let identity = crate::upgrade_identity::load("agent", path, &config.state_dir, &exe)?;
+        identity.verify_process(std::process::id())?;
+        Some(hash(std::fs::read(
+            crate::upgrade_identity::identity_path(path)?,
+        )?))
+    };
+    #[cfg(not(target_os = "linux"))]
+    let instance_identity_sha256 = None;
     // 1. Pre-flight cleanup of stale `.part` / old cached releases before writing new bytes
     let _ = prune_agent_releases_and_logs(&config.state_dir);
 
@@ -1147,6 +1164,9 @@ async fn perform_agent_self_upgrade(
         bail!("candidate binary failed --version verification");
     }
 
+    #[cfg(target_os = "linux")]
+    verify_instance_candidate(&staged_path).await?;
+
     let preflight_cfg = version_dir.join(".preflight-agent-config.json");
     crate::write_private(&preflight_cfg, &serde_json::to_vec_pretty(&**config)?)?;
     let check_out = tokio::process::Command::new(&staged_path)
@@ -1264,6 +1284,7 @@ async fn perform_agent_self_upgrade(
         receipt_path: receipt_path.clone(),
         state_dir: config.state_dir.clone(),
         config_path: agent.config_path.clone(),
+        instance_identity_sha256,
         gateway_url: config.gateway_url.clone(),
         device_id: config.device_id.clone(),
         device_token: config.device_token.clone(),
@@ -1299,14 +1320,9 @@ async fn perform_agent_self_upgrade(
 fn spawn_detached_watchdog(watchdog_exe: &Path, spec_path: &Path) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        let unit = format!("octendra-code-upgrade-{}-{}", std::process::id(), now());
+        let unit = format!("octendra-agent-upgrade-{}-{}", std::process::id(), now());
         let status = std::process::Command::new("systemd-run")
-            .args([
-                "--user",
-                "--collect",
-                "--no-block",
-                &format!("--unit={unit}"),
-            ])
+            .args(["--user", &format!("--unit={unit}")])
             .arg(watchdog_exe)
             .args(["self-upgrade-watchdog", "--spec"])
             .arg(spec_path)
@@ -1318,33 +1334,124 @@ fn spawn_detached_watchdog(watchdog_exe: &Path, spec_path: &Path) -> Result<()> 
             return Ok(());
         }
     }
-    let mut cmd = std::process::Command::new(watchdog_exe);
-    cmd.args(["self-upgrade-watchdog", "--spec"])
-        .arg(spec_path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    anyhow::bail!("independent watchdog service could not start; no in-service fallback");
+    #[cfg(not(target_os = "linux"))]
     {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
+        let mut cmd = std::process::Command::new(watchdog_exe);
+        cmd.args(["self-upgrade-watchdog", "--spec"])
+            .arg(spec_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const DETACHED_PROCESS: u32 = 0x00000008;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+        }
+        cmd.spawn()
+            .context("failed to spawn detached self-upgrade-watchdog")?;
+        Ok(())
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x00000008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
-    }
-    cmd.spawn()
-        .context("failed to spawn detached self-upgrade-watchdog")?;
+}
+
+async fn verify_instance_candidate(path: &Path) -> Result<()> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio::process::Command::new(path)
+            .arg("release-manifest")
+            .output(),
+    )
+    .await??;
+    ensure!(
+        output.status.success()
+            && crate::upgrade_identity::supports_upgrade_manifest(&output.stdout),
+        "candidate lacks instance-bound upgrade support"
+    );
     Ok(())
+}
+
+fn bound_agent_identity(spec: &WatchdogSpec) -> Result<crate::upgrade_identity::Identity> {
+    let config = spec
+        .config_path
+        .as_ref()
+        .context("managed upgrade config identity missing")?;
+    let identity =
+        crate::upgrade_identity::load("agent", config, &spec.state_dir, &spec.current_exe)?;
+    ensure!(
+        spec.instance_identity_sha256.as_deref()
+            == Some(
+                hash(std::fs::read(crate::upgrade_identity::identity_path(
+                    config
+                )?)?)
+                .as_str()
+            ),
+        "upgrade identity changed after staging"
+    );
+    let cfg: crate::AgentConfig = crate::read_config(config)?;
+    ensure!(
+        cfg.state_dir == spec.state_dir
+            && cfg.gateway_url == spec.gateway_url
+            && cfg.device_id == spec.device_id
+            && cfg.device_token == spec.device_token,
+        "watchdog config differs from bound instance"
+    );
+    Ok(identity)
 }
 
 /// Runs in an independent out-of-process watchdog to atomically swap the binary,
 /// restart the OS service, verify multi-sample 5-lane readiness, or automatically roll back.
 pub async fn run_self_upgrade_watchdog(spec_path: &Path) -> Result<Value> {
+    if cfg!(target_os = "linux") {
+        let spec: WatchdogSpec = serde_json::from_slice(&tokio::fs::read(spec_path).await?)?;
+        let identity = bound_agent_identity(&spec)?;
+        for path in [
+            &spec.staged_path,
+            &spec.rollback_path,
+            &spec.receipt_path,
+            spec_path,
+        ] {
+            ensure!(
+                path.starts_with(spec.state_dir.join("releases")),
+                "watchdog path outside instance releases"
+            );
+            ensure!(
+                path.components().all(|c| matches!(
+                    c,
+                    std::path::Component::RootDir | std::path::Component::Normal(_)
+                )),
+                "watchdog path is not normalized"
+            );
+            for parent in path.ancestors() {
+                if let Ok(meta) = std::fs::symlink_metadata(parent) {
+                    ensure!(
+                        !meta.file_type().is_symlink(),
+                        "watchdog path contains a symlink"
+                    );
+                }
+            }
+        }
+        identity.verify_process(spec.previous_pid)?;
+        ensure!(
+            hash(tokio::fs::read(&spec.staged_path).await?) == spec.expected_installed_sha256,
+            "staged candidate hash mismatch"
+        );
+        verify_instance_candidate(&spec.staged_path).await?;
+    }
+    run_bound_upgrade_watchdog(spec_path).await
+}
+
+// Tests of lock, receipts and rollback call this inner state machine with inert
+// fixture binaries. The public entry always checks the installed Linux binding.
+async fn run_bound_upgrade_watchdog(spec_path: &Path) -> Result<Value> {
     let raw = tokio::fs::read(spec_path)
         .await
         .context("failed to read watchdog-spec.json")?;
@@ -1585,7 +1692,7 @@ async fn restart_platform_agent_service(spec: &WatchdogSpec) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         let status = tokio::process::Command::new("systemctl")
-            .args(["--user", "restart", "octendra-code-agent.service"])
+            .args(["--user", "restart", &bound_agent_identity(spec)?.service])
             .status()
             .await;
         if status.is_ok_and(|s| s.success()) {
@@ -1606,14 +1713,18 @@ async fn restart_platform_agent_service(spec: &WatchdogSpec) -> Result<()> {
             return Ok(());
         }
     }
-    // Standalone fallback when not managed by launchd/systemd/ScheduledTask
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    anyhow::bail!("bound agent service restart failed; no standalone fallback");
+    // Standalone fallback when not managed by launchd/ScheduledTask
+    #[cfg(target_os = "macos")]
     if spec.previous_pid > 1 {
         unsafe {
             nix::libc::kill(spec.previous_pid as i32, nix::libc::SIGTERM);
         }
     }
+    #[cfg(not(target_os = "linux"))]
     tokio::time::sleep(Duration::from_millis(500)).await;
+    #[cfg(not(target_os = "linux"))]
     if let Some(cfg) = &spec.config_path {
         let mut cmd = std::process::Command::new(&spec.current_exe);
         cmd.args(["agent", "--config"])
@@ -1629,6 +1740,7 @@ async fn restart_platform_agent_service(spec: &WatchdogSpec) -> Result<()> {
         cmd.spawn()
             .context("failed to respawn standalone agent process")?;
     }
+    #[cfg(not(target_os = "linux"))]
     Ok(())
 }
 
@@ -1900,6 +2012,7 @@ mod tests {
             receipt_path: receipt_path.clone(),
             state_dir,
             config_path: None,
+            instance_identity_sha256: None,
             gateway_url: format!("http://{addr}"),
             device_id: uuid::Uuid::new_v4().to_string(),
             device_token: "t".repeat(64),
@@ -1915,7 +2028,7 @@ mod tests {
         let spec_path = tmp.path().join("watchdog-spec.json");
         fs::write(&spec_path, serde_json::to_vec(&spec).unwrap()).unwrap();
 
-        let result = run_self_upgrade_watchdog(&spec_path).await.unwrap();
+        let result = run_bound_upgrade_watchdog(&spec_path).await.unwrap();
         assert_eq!(result["state"], "rolled_back");
         assert_eq!(
             result["rollback"],
@@ -1985,6 +2098,7 @@ mod tests {
             receipt_path: receipt_path.clone(),
             state_dir: state_dir.clone(),
             config_path: None,
+            instance_identity_sha256: None,
             gateway_url: format!("http://{addr}"),
             device_id: uuid::Uuid::new_v4().to_string(),
             device_token: "t".repeat(64),
@@ -2009,7 +2123,7 @@ mod tests {
             .unwrap();
         fs2::FileExt::try_lock_exclusive(&external_lock).unwrap();
 
-        let busy = run_self_upgrade_watchdog(&spec_path).await.unwrap();
+        let busy = run_bound_upgrade_watchdog(&spec_path).await.unwrap();
         assert_eq!(busy["state"], "updater_busy");
         assert_eq!(busy["phase"], "upgrade_lock_contention");
         assert_eq!(busy["spec_preserved"], true);
@@ -2039,7 +2153,7 @@ mod tests {
         assert!(staged_path.is_file());
 
         // Recovery execution using the preserved spec must now complete the upgrade cleanly.
-        let recovered = run_self_upgrade_watchdog(&spec_path).await.unwrap();
+        let recovered = run_bound_upgrade_watchdog(&spec_path).await.unwrap();
         assert_eq!(recovered["state"], "upgraded");
         assert_eq!(recovered["service_changed"], true);
         assert_eq!(recovered["gateway_verified"], true);
@@ -2113,6 +2227,7 @@ mod tests {
             receipt_path: receipt_path.clone(),
             state_dir: state_dir.clone(),
             config_path: None,
+            instance_identity_sha256: None,
             gateway_url: format!("http://{addr}"),
             device_id: uuid::Uuid::new_v4().to_string(),
             device_token: "t".repeat(64),
@@ -2128,7 +2243,7 @@ mod tests {
         let spec_path = version_dir.join("watchdog-spec.json");
         fs::write(&spec_path, serde_json::to_vec(&spec).unwrap()).unwrap();
 
-        let err = run_self_upgrade_watchdog(&spec_path)
+        let err = run_bound_upgrade_watchdog(&spec_path)
             .await
             .expect_err("receipt persistence failure must return an explicit error");
         let err_msg = format!("{err:#}");
@@ -2151,7 +2266,7 @@ mod tests {
 
         // Clear the receipt persistence failure and retry recovery with the preserved spec.
         fs::remove_dir_all(&receipt_path).unwrap();
-        let recovered = run_self_upgrade_watchdog(&spec_path).await.unwrap();
+        let recovered = run_bound_upgrade_watchdog(&spec_path).await.unwrap();
         assert_eq!(recovered["state"], "upgraded");
         assert!(
             receipt_path.is_file(),

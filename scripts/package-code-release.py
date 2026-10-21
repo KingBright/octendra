@@ -120,6 +120,7 @@ def main():
         'launch-code-upgrade-windows.ps1': ROOT/'scripts/launch-code-upgrade-windows.ps1',
         'fleet-upgrade.py': ROOT/'scripts/fleet-upgrade.py',
         'gateway_self_upgrade_runner.py': ROOT/'scripts/gateway_self_upgrade_runner.py',
+        'upgrade_instance.py': ROOT/'scripts/upgrade_instance.py',
     }
     files.update(parallel_files(ROOT))
     binary_platforms = {
@@ -169,6 +170,7 @@ def main():
     shutil.copyfile(proof_path, stage/'source-verification.json')
     manifest = {
         'schema_version':1, **contract,
+        'default_install_strategy':'parallel-fresh-only',
         'packaged_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
         'snapshot_id':source_snapshot.identity(current, source_snapshot.executable_files(ROOT, current)),
         'build_execution_root':str(ROOT),

@@ -1868,6 +1868,11 @@ async fn gateway_upgrade(
         )
             .into_response();
     };
+    let identity = match crate::upgrade_identity::load("gateway", config_path, &g.config.state_dir, &binary)
+        .and_then(|identity| { identity.verify_process(std::process::id())?; Ok(identity) }) {
+        Ok(identity) => identity,
+        Err(_) => return (StatusCode::CONFLICT, Json(json!({"error":"gateway_upgrade_instance_identity_mismatch","service_changed":false}))).into_response(),
+    };
     let Some(root) = binary.parent() else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1879,7 +1884,7 @@ async fn gateway_upgrade(
     let result_path = release.join("self-upgrade-result.json");
     let marker_path = release.join("self-upgrade-request.json");
     let unit = format!(
-        "octendra-code-self-upgrade-{}",
+        "octendra-gateway-self-upgrade-{}",
         request.version.replace('.', "-")
     );
     if result_path.is_file() {
@@ -2017,6 +2022,23 @@ async fn gateway_upgrade(
                 .into_response();
         }
     }
+    let helper = release.join("upgrade_instance.py");
+    let helper_source = include_str!("../../../scripts/upgrade_instance.py");
+    if helper.is_file() {
+        if std::fs::read_to_string(&helper).ok().as_deref() != Some(helper_source) {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error":"gateway_upgrade_identity_helper_changed"})),
+            )
+                .into_response();
+        }
+    } else if std::fs::write(&helper, helper_source).is_err() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":"gateway_upgrade_identity_helper_stage_failed"})),
+        )
+            .into_response();
+    }
     let runner = release.join("gateway-self-upgrade-runner.py");
     let runner_source = include_str!("../../../scripts/gateway_self_upgrade_runner.py");
     if runner.is_file() {
@@ -2082,8 +2104,8 @@ async fn gateway_upgrade(
     let output = tokio::process::Command::new("systemd-run")
         .arg("--unit")
         .arg(&unit)
-        .arg("--collect")
-        .arg("--property=Type=exec")
+        .arg("--property=Type=simple")
+        .arg("--no-ask-password")
         .arg(python)
         .arg(&runner)
         .arg("--bundle")
@@ -2101,7 +2123,9 @@ async fn gateway_upgrade(
         .arg("--backup-root")
         .arg(root.join("releases"))
         .arg("--service-name")
-        .arg("octendra-code-gateway.service")
+        .arg(&identity.service)
+        .arg("--expected-pid")
+        .arg(std::process::id().to_string())
         .arg("--gateway-bind")
         .arg(&g.config.bind)
         .output()

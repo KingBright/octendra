@@ -115,6 +115,7 @@ def main():
     parser.add_argument('--config-path', required=True, type=pathlib.Path)
     parser.add_argument('--backup-root', required=True, type=pathlib.Path)
     parser.add_argument('--service-name', default='octendra-code-gateway.service')
+    parser.add_argument('--expected-pid', type=int)
     parser.add_argument('--gateway-bind', default='127.0.0.1:18787')
     args = parser.parse_args()
 
@@ -132,6 +133,11 @@ def main():
     backup_root = args.backup_root.resolve()
     gateway_config = json.loads(config.read_text())
     state_dir = pathlib.Path(gateway_config['state_dir']).resolve()
+    instance = None
+    if args.service_name == 'octendra-gateway.service' or (config.parent.parent/'bin/upgrade-identity.json').exists() or 'octendra' in config.parts:
+        from upgrade_instance import load_gateway, validate_release_paths
+        instance = load_gateway(config,binary,args.service_name,args.expected_pid)
+        validate_release_paths(instance,args.candidate,args.result,args.backup_root)
     record = {'state': 'preflight', 'version': args.version, 'candidate_sha256': args.sha256}
     changed = False
     stopped = False
@@ -148,6 +154,11 @@ def main():
             [str(args.candidate), 'check', '--config', str(config)],
             stdout=subprocess.DEVNULL,
         )
+        if instance is not None:
+            candidate_contract=json.loads(subprocess.check_output([str(args.candidate),'release-manifest'],text=True,timeout=15))
+            protocol=candidate_contract.get('instance_upgrade_protocol')
+            if type(protocol) is not int or protocol!=1:
+                raise RuntimeError('candidate lacks instance-bound upgrade support')
         require_task_authorization_support(database, args.candidate, 'preflight')
         backup.mkdir(parents=True, exist_ok=False)
         shutil.copy2(binary, backup / binary.name)
@@ -161,6 +172,8 @@ def main():
 
         # Stop the sole policy writer before the decisive check. A grant added
         # after preflight must not race a downgrade or be ignored by rollback.
+        if instance is not None:
+            load_gateway(config,binary,args.service_name,args.expected_pid)
         subprocess.check_call(['systemctl', 'stop', args.service_name], timeout=30)
         stopped = True
         require_task_authorization_support(database, args.candidate, 'cutover')

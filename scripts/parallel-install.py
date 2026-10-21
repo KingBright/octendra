@@ -305,6 +305,8 @@ def plan(args):
     if not re.fullmatch(r'[0-9a-f]{64}', args.manifest_sha256 or '') or digest(manifest_path) != args.manifest_sha256:
         raise Refusal('require the exact verified --manifest-sha256; local manifest is not its own trust anchor')
     manifest = json.loads(manifest_path.read_text())
+    if manifest.get('instance_upgrade_protocol')!=1:
+        raise Refusal('bundle lacks verified instance-bound upgrade support; use the rebuilt delivery')
     filename = 'octendra-code-'+{'linux':'linux-amd64','macos':'macos-arm64','windows':'windows-amd64.exe'}[target]
     source = clean_path(package/filename); expected = manifest['artifacts'][filename]['sha256']
     if digest(source) != expected:
@@ -334,6 +336,13 @@ def plan(args):
     elif binary.exists() or marker.exists() or candidate.exists() or (root/'bin').exists() or (root/'service').exists():
         raise Refusal('new installation path is occupied; no replacement or automatic resume')
     content = definition(target, args.role, label, binary, config, args)
+    if args.action == 'activate' and target=='linux':
+        identity_path=root/'bin/upgrade-identity.json'
+        expected_identity={'schema':1,'role':args.role,'service':label,'executable':str(binary),
+                           'config':str(config),'state_dir':str(state),'definition':str(destination),
+                           'definition_sha256':hashlib.sha256(content).hexdigest()}
+        if identity_path.is_symlink() or not identity_path.is_file() or json.loads(identity_path.read_text())!=expected_identity:
+            raise Refusal('staged instance upgrade identity differs from its new service binding')
     if args.action == 'activate' and hashlib.sha256(content).hexdigest() != saved['definition_sha256']:
         raise Refusal('current account or service definition differs from the original staged plan')
     return {'target':target,'role':args.role,'root':root,'state':state,'config':config,'source':source,
@@ -341,7 +350,7 @@ def plan(args):
             'destination':destination,'label':label,'marker':marker,'uid':uid,'gid':gid,
             'manifest_sha256':args.manifest_sha256,'config_sha256':config_sha,'origin':new_origin,
             'runtime_identity':(args.service_user+':'+args.service_group) if args.role=='gateway' else 'current interactive account',
-            'upgrade_policy':'no release pointers; use reviewed proxy upgrade-deny template; built-in Gateway/Linux Agent upgrades are not parallel-safe'}
+            'upgrade_policy':'installed Linux instance binding required; no inferred service/path targets'}
 
 
 def exclusive(path, data, mode):
@@ -364,6 +373,17 @@ def stage(p):
     if digest(p['binary']) != p['binary_sha256']:
         raise Refusal('candidate changed during copy; inspect only this new installation')
     exclusive(p['candidate'], p['definition'], 0o600)
+    if p['target']=='linux':
+        identity={'schema':1,'role':p['role'],'service':p['label'],
+                  'executable':str(p['binary']),'config':str(p['config']),
+                  'state_dir':str(p['state']),'definition':str(p['destination']),
+                  'definition_sha256':digest(p['candidate'])}
+        exclusive(p['root']/'bin/upgrade-identity.json',(json.dumps(identity,indent=2)+'\n').encode(),0o644)
+        if p['role']=='gateway':
+            # Only the newly-created binary directory belongs to the selected
+            # runtime; self-upgrade can stage bytes without touching old paths.
+            os.chown(p['root']/'bin',p['uid'],p['gid'],follow_symlinks=False)
+            os.chown(p['binary'],p['uid'],p['gid'],follow_symlinks=False)
     record = {'binary_sha256':p['binary_sha256'],'config_sha256':p['config_sha256'],
               'definition_sha256':digest(p['candidate']),'manifest_sha256':p['manifest_sha256'],
               'plan':public_plan(p),'credentials_created_or_copied':False}

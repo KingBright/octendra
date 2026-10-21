@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fixed runner launched by the authenticated Gateway self-upgrade endpoint."""
 import argparse,hashlib,json,pathlib,subprocess,tarfile,tempfile,os
+from upgrade_instance import load_gateway, validate_release_paths
 
 def digest(path):
     h=hashlib.sha256()
@@ -9,7 +10,9 @@ def digest(path):
     return h.hexdigest()
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--bundle',type=pathlib.Path,required=True);p.add_argument('--bundle-sha256',required=True);p.add_argument('--version',required=True);p.add_argument('--result',type=pathlib.Path,required=True);p.add_argument('--binary-path',required=True);p.add_argument('--config-path',required=True);p.add_argument('--backup-root',required=True);p.add_argument('--service-name',default='octendra-code-gateway.service');p.add_argument('--gateway-bind',default='127.0.0.1:18787');args=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--bundle',type=pathlib.Path,required=True);p.add_argument('--bundle-sha256',required=True);p.add_argument('--version',required=True);p.add_argument('--result',type=pathlib.Path,required=True);p.add_argument('--binary-path',required=True);p.add_argument('--config-path',required=True);p.add_argument('--backup-root',required=True);p.add_argument('--service-name',required=True);p.add_argument('--expected-pid',type=int,required=True);p.add_argument('--gateway-bind',default='127.0.0.1:18787');args=p.parse_args()
+    identity=load_gateway(args.config_path,args.binary_path,args.service_name,args.expected_pid)
+    validate_release_paths(identity,args.bundle,args.result,args.backup_root)
     if digest(args.bundle)!=args.bundle_sha256:raise SystemExit('bundle checksum mismatch')
     release=args.bundle.parent;manifest_path=release/'manifest.json'
     with tarfile.open(args.bundle) as archive:
@@ -28,5 +31,5 @@ def main():
         path=release/name
         if not path.is_file() or digest(path)!=meta['sha256'] or path.stat().st_size!=meta['size']:raise SystemExit('artifact mismatch: '+name)
     binary=release/'octendra-code-linux-amd64';updater=release/'upgrade-code-gateway.py'
-    subprocess.run(['python3',str(updater),'--candidate',str(binary),'--sha256',manifest['artifacts'][binary.name]['sha256'],'--version',args.version,'--result',str(args.result),'--binary-path',args.binary_path,'--config-path',args.config_path,'--backup-root',args.backup_root,'--service-name',args.service_name,'--gateway-bind',args.gateway_bind],check=True,timeout=300)
+    subprocess.run(['python3',str(updater),'--candidate',str(binary),'--sha256',manifest['artifacts'][binary.name]['sha256'],'--version',args.version,'--result',str(args.result),'--binary-path',args.binary_path,'--config-path',args.config_path,'--backup-root',args.backup_root,'--service-name',args.service_name,'--expected-pid',str(args.expected_pid),'--gateway-bind',args.gateway_bind],check=True,timeout=300)
 if __name__=='__main__':main()

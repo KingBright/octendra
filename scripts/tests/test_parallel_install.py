@@ -37,7 +37,7 @@ class ParallelInstallTests(unittest.TestCase):
         for name in ('linux-amd64','macos-arm64','windows-amd64.exe'):
             p=self.package/('octendra-code-'+name);p.write_bytes(self.binary)
             artifacts[p.name]={'sha256':install.digest(p),'size':len(self.binary)}
-        (self.package/'manifest.json').write_text(json.dumps({'artifacts':artifacts}))
+        (self.package/'manifest.json').write_text(json.dumps({'artifacts':artifacts,'instance_upgrade_protocol':1}))
         self.legacy = self.base/'remote-hosts-code';self.legacy.mkdir()
         for name in ('binary','config','database','service','proxy'):
             (self.legacy/name).write_bytes(('original-'+name).encode())
@@ -62,6 +62,32 @@ class ParallelInstallTests(unittest.TestCase):
 
     def tearDown(self):
         self.assertEqual(self.old,self.snapshot(self.legacy),'legacy bytes, modes and mtimes must not change')
+
+    def test_linux_stage_binds_upgrade_to_only_new_paths_and_definition(self):
+        p=install.plan(self.args);install.stage(p)
+        identity=json.loads((self.root/'bin/upgrade-identity.json').read_text())
+        self.assertEqual(identity['service'],'octendra-agent.service')
+        self.assertEqual(identity['executable'],str(p['binary']))
+        self.assertEqual(identity['config'],str(self.config))
+        self.assertEqual(identity['state_dir'],str(self.state))
+        self.assertEqual(identity['definition_sha256'],install.digest(p['candidate']))
+        self.assertNotIn('SYNTHETIC-TEST-ONLY',json.dumps(identity))
+        self.assertFalse(self.state.exists())
+
+    def test_activation_refuses_tampered_upgrade_binding(self):
+        p=install.plan(self.args);install.stage(p)
+        path=self.root/'bin/upgrade-identity.json'
+        identity=json.loads(path.read_text());identity['service']='other.service';path.write_text(json.dumps(identity))
+        self.args.action='activate'
+        with self.assertRaisesRegex(install.Refusal,'upgrade identity'):install.plan(self.args)
+        self.assertFalse(self.state.exists())
+        self.assertFalse(self.service.exists())
+
+    def test_old_bundle_without_instance_binding_protocol_refuses(self):
+        manifest=self.package/'manifest.json';value=json.loads(manifest.read_text());value.pop('instance_upgrade_protocol');manifest.write_text(json.dumps(value))
+        self.args.manifest_sha256=install.digest(manifest)
+        with self.assertRaisesRegex(install.Refusal,'instance-bound upgrade'):install.plan(self.args)
+        self.assertFalse((self.root/'bin').exists())
 
     def test_default_plan_has_no_writes_or_service_activation(self):
         before=self.snapshot(self.root);p=install.plan(self.args)
@@ -322,14 +348,15 @@ class ParallelInstallTests(unittest.TestCase):
             old_name=next(x for x in install.BLOCKED_COMPONENTS if x!='octendra-code')
             target.write_text('title = '+repr(old_name)+'\n');self.assertFalse(guard.inspect(self.base)['passed'])
 
-    def test_new_proxy_template_preserves_unfilled_scope_and_denies_unsafe_upgrades(self):
+    def test_new_proxy_template_preserves_scope_and_routes_upgrade_apis(self):
         text=(SCRIPT.parents[1]/'docs/parallel-octendra/new-host.caddy.in').read_text()
         self.assertIn('${OCTENDRA_NEW_HOST}',text)
         self.assertIn('${OCTENDRA_REVIEWED_TLS_CONFIGURATION}',text)
         self.assertIn('reverse_proxy 127.0.0.1:18788',text)
         self.assertNotIn('127.0.0.1:18787',text)
         for path in ('/admin/gateway-upgrade','/admin/release-bundle','/device/upgrade-directive','/device/release-artifact/*'):
-            self.assertIn(path,text)
+            self.assertNotIn(path,text)
+        self.assertNotIn('respond ',text)
 
 
 if __name__=='__main__':unittest.main()

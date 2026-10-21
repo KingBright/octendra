@@ -56,6 +56,7 @@ mod transfer_journal;
 mod transfer_receiver;
 mod transfer_watch;
 pub mod transfers;
+mod upgrade_identity;
 mod work_events;
 mod workspace_context;
 

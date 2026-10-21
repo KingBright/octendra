@@ -64,6 +64,8 @@ def verify_base(root, expected):
     if not expected or digest(release/'manifest.json')!=expected:
         raise ValueError('base manifest differs from the explicit verified delivery hash')
     manifest=json.loads((release/'manifest.json').read_text())
+    if manifest.get('instance_upgrade_protocol')!=1:
+        raise ValueError('base binaries lack verified instance-bound upgrades; binary rebuild required')
     expected_members=set(manifest['artifacts'])|{'manifest.json','README.md','SHA256SUMS','source-verification.json'}
     if manifest.get('packaging'):expected_members.add('parallel-install-verification.json')
     if {p.name for p in release.iterdir()} != expected_members:
@@ -147,7 +149,7 @@ def stage(root, base, validation_path, delta, source_commit=None):
     receipt=json.loads(validation_path.read_text())
     manifest['packaged_at']=datetime.datetime.now(datetime.timezone.utc).isoformat()
     manifest['default_install_strategy']='parallel-fresh-only'
-    manifest['parallel_limitations']=['built-in Gateway/Linux Agent upgraders still reference maintenance service names; no release pointers are seeded; use the supplied upgrade-deny proxy template until runtime service identities are made configurable']
+    manifest.pop('parallel_limitations',None)
     manifest['packaging']={
         'mode':'entrypoints-only; no binaries rebuilt','binary_source_snapshot_id':base['snapshot_id'],
         'binary_source_manifest_sha256':receipt['base_manifest_sha256'],'source_commit':source_commit,

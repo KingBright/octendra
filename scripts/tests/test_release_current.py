@@ -268,7 +268,7 @@ class CurrentTests(unittest.TestCase):
             'native_release_client.py', 'publish-code.py', 'check-collaboration.py',
             'install-code-agent.py', 'upgrade-code-agent-linux.py', 'upgrade-code-agent-windows.ps1',
             'launch-code-upgrade-windows.ps1', 'fleet-upgrade.py', 'gateway_self_upgrade_runner.py',
-            'parallel-install.py']
+            'parallel-install.py', 'upgrade_instance.py']
         for name in helpers: (self.root/'scripts'/name).write_text('# fixture helper\n')
         docs=self.root/'docs/parallel-octendra';docs.mkdir(parents=True)
         (docs/'README.md').write_text('fresh parallel installation fixture\n')

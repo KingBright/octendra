@@ -40,7 +40,7 @@ class RepackageTests(unittest.TestCase):
         proof={'state':'passed','source_inputs_unchanged':True,'source_inputs':self.compiled,
                'functional_tests':{'passed':1708,'failed':0,'evidence_complete':True}}
         (self.current/'source-verification.json').write_text(json.dumps(proof))
-        self.manifest={'version':'0.12.0','snapshot_id':'original-binary-fingerprint','source_inputs':self.compiled,
+        self.manifest={'instance_upgrade_protocol':1,'version':'0.12.0','snapshot_id':'original-binary-fingerprint','source_inputs':self.compiled,
             'source_verification_sha256':repack.digest(self.current/'source-verification.json'),
             'included_platforms':['macos','linux','windows'],'pending_platforms':[],
             'artifacts':artifacts,'tests':proof['functional_tests'],'deployed':False}
@@ -64,6 +64,11 @@ class RepackageTests(unittest.TestCase):
     def test_binary_source_change_is_not_a_packaging_exception(self):
         changed=dict(self.now);changed['crates/example.rs']='different'
         with self.assertRaisesRegex(ValueError,'non-packaging'):repack.source_delta(self.compiled,changed)
+
+    def test_old_binary_contract_cannot_receive_new_parallel_installer(self):
+        self.manifest.pop('instance_upgrade_protocol')
+        manifest=self.current/'manifest.json';manifest.write_text(json.dumps(self.manifest))
+        with self.assertRaisesRegex(ValueError,'binary rebuild required'):repack.verify_base(self.root,repack.digest(manifest))
 
     def test_removed_and_unknown_sources_are_rejected(self):
         for changed in ({},dict(self.now,**{'Cargo.toml':'changed'})):

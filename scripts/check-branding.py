@@ -34,6 +34,8 @@ LOCAL_EVIDENCE = (".integration-artifacts/", ".rust-storage/")
 # Exact reviewed lines only: the fresh installer's rejected namespace set and
 # an immutable-byte legacy fixture. No presentation, file or substring exemption.
 LEGACY_NAMESPACE_GUARDS = {
+    'crates/octendra-code/src/upgrade_identity.rs': {'9a02c6bd0f58d8e440126822f548fa6aac55b4a575f19944fc2c46d6b47490b2', '0c01784a44bb2561ab3db4a97d55cfed1e81aa672c1a4b4a6f152e3d113e6c84'},
+    'scripts/upgrade_instance.py': {'9597b526a97a023f26171fce7c0c0c916da13c8f56fb625b453e2931bd375c50'},
     'scripts/parallel-install.py': {'78326bf9f9da3fb3988ac1d292423767ae981357aeb9761bb7414d2be9e3373a'},
     'scripts/tests/test_parallel_install.py': {
         '29ce43e425a7093dfe010f6963bcd19018b173afb460e267c91fcaf0c313ca27',

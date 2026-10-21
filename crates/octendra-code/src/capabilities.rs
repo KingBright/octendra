@@ -369,6 +369,7 @@ pub fn release_manifest() -> Value {
             object.remove(key);
         }
         object.insert("machine_contract_protocol".into(), json!(1));
+        object.insert("instance_upgrade_protocol".into(), json!(1));
     }
     manifest
 }
@@ -388,6 +389,7 @@ mod release_manifest_tests {
         assert_eq!(manifest["terminal_observation_protocol"], 2);
         assert_eq!(manifest["request_receipt_protocol"], 2);
         assert_eq!(manifest["machine_contract_protocol"], 1);
+        assert_eq!(manifest["instance_upgrade_protocol"], 1);
         assert_eq!(
             manifest["optional_inputs"]["terminal_exec"],
             json!(["wait_ms", "sudo"])
