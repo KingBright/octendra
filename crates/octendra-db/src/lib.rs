@@ -3036,7 +3036,9 @@ impl HostWriteLeaseRepository {
                 SELECT 1
                 FROM host_write_leases conflicting
                 WHERE conflicting.host_id = ?
-                  AND conflicting.expires_at > ?
+                  -- UTC RFC3339 fractions omit trailing zeros. Removing Z
+                  -- preserves exact ordering without rounding nanoseconds.
+                  AND rtrim(conflicting.expires_at, 'Z') > rtrim(?, 'Z')
                   AND conflicting.holder_agent_session_id != ?
                   AND (
                     conflicting.coordination_scope = 'host'
@@ -3061,7 +3063,7 @@ impl HostWriteLeaseRepository {
                 heartbeat_at = excluded.heartbeat_at,
                 expires_at = excluded.expires_at
             WHERE host_write_leases.holder_agent_session_id = excluded.holder_agent_session_id
-               OR host_write_leases.expires_at <= ?
+               OR rtrim(host_write_leases.expires_at, 'Z') <= rtrim(?, 'Z')
             RETURNING *
             ",
             )
@@ -3107,7 +3109,7 @@ impl HostWriteLeaseRepository {
             r"
             SELECT *
             FROM host_write_leases
-            WHERE host_id = ? AND expires_at > ?
+            WHERE host_id = ? AND rtrim(expires_at, 'Z') > rtrim(?, 'Z')
             ORDER BY coordination_scope ASC
             ",
         )
@@ -3233,13 +3235,18 @@ impl HostWriteLeaseRepository {
             let result = sqlx::query(
                 r"
                 UPDATE host_write_leases
-                SET heartbeat_at = ?, expires_at = MIN(expires_at, ?)
+                SET heartbeat_at = ?,
+                    expires_at = CASE
+                        WHEN rtrim(expires_at, 'Z') > rtrim(?, 'Z') THEN ?
+                        ELSE expires_at
+                    END
                 WHERE host_id = ?
                   AND coordination_scope = ?
                   AND holder_agent_session_id = ?
                 ",
             )
             .bind(heartbeat_at)
+            .bind(expires_at)
             .bind(expires_at)
             .bind(host_id.to_string())
             .bind(coordination_scope)
@@ -4739,7 +4746,7 @@ impl PtyInputEventRepository {
                         SELECT 1
                         FROM host_write_leases
                         WHERE host_write_leases.host_id = queued_input.host_id
-                          AND host_write_leases.expires_at > ?
+                          AND rtrim(host_write_leases.expires_at, 'Z') > rtrim(?, 'Z')
                           AND host_write_leases.holder_agent_session_id
                               != queued_input.agent_session_id
                           AND EXISTS (
@@ -5219,7 +5226,7 @@ impl OperationRunRepository {
                         SELECT 1
                         FROM host_write_leases
                         WHERE host_write_leases.host_id = candidate.host_id
-                          AND host_write_leases.expires_at > ?
+                          AND rtrim(host_write_leases.expires_at, 'Z') > rtrim(?, 'Z')
                           AND host_write_leases.holder_agent_session_id
                               != candidate.agent_session_id
                           AND EXISTS (
@@ -9337,6 +9344,122 @@ mod tests {
                 now,
             )
             .await?;
+        // RFC3339 omits trailing fractional zeros. Exercise expiry boundaries
+        // with fixed instants, including one-nanosecond handoffs.
+        for nanoseconds in [
+            0,
+            120_000_000,
+            120_000_001,
+            123_456_000,
+            123_456_001,
+            123_456_789,
+        ] {
+            let expires_at = (now + time::Duration::days(2)).replace_nanosecond(nanoseconds)?;
+            let before = expires_at - time::Duration::nanoseconds(1);
+            let after = expires_at + time::Duration::nanoseconds(1);
+            let first = HostWriteLease {
+                acquired_at: expires_at - time::Duration::seconds(1),
+                heartbeat_at: expires_at - time::Duration::seconds(1),
+                expires_at,
+                ..lease_a.clone()
+            };
+            assert!(
+                repos
+                    .host_write_leases
+                    .try_acquire(&first, before)
+                    .await?
+                    .is_some()
+            );
+            assert_eq!(
+                repos
+                    .host_write_leases
+                    .list_active(host.id, before)
+                    .await?
+                    .len(),
+                1
+            );
+            let blocked = HostWriteLease {
+                acquired_at: before,
+                heartbeat_at: before,
+                expires_at: expires_at + time::Duration::seconds(1),
+                ..lease_b.clone()
+            };
+            assert!(
+                repos
+                    .host_write_leases
+                    .try_acquire(&blocked, before)
+                    .await?
+                    .is_none(),
+                "a live foreign lease must block writes even at a fractional prefix"
+            );
+            assert!(
+                repos
+                    .host_write_leases
+                    .list_active(host.id, expires_at)
+                    .await?
+                    .is_empty()
+            );
+            assert!(
+                repos
+                    .host_write_leases
+                    .list_active(host.id, after)
+                    .await?
+                    .is_empty(),
+                "expired lease must not become live again after {expires_at}"
+            );
+            let second = HostWriteLease {
+                acquired_at: after,
+                heartbeat_at: after,
+                expires_at: expires_at + time::Duration::nanoseconds(100),
+                ..lease_b.clone()
+            };
+            assert_eq!(
+                repos.host_write_leases.try_acquire(&second, after).await?,
+                Some(second.clone())
+            );
+            assert!(
+                repos
+                    .host_write_leases
+                    .shorten(
+                        host.id,
+                        "host",
+                        agent_session_b.id,
+                        after,
+                        second.expires_at + time::Duration::nanoseconds(1)
+                    )
+                    .await?
+            );
+            let active = repos.host_write_leases.list_active(host.id, after).await?;
+            assert_eq!(active.len(), 1);
+            assert_eq!(
+                active[0].expires_at, second.expires_at,
+                "shorten must never extend a lease"
+            );
+            assert!(
+                repos
+                    .host_write_leases
+                    .shorten(host.id, "host", agent_session_b.id, after, expires_at)
+                    .await?
+            );
+            assert!(
+                repos
+                    .host_write_leases
+                    .list_active(host.id, after)
+                    .await?
+                    .is_empty()
+            );
+            repos
+                .host_write_leases
+                .shorten(
+                    host.id,
+                    "host",
+                    agent_session_b.id,
+                    now,
+                    now - time::Duration::seconds(1),
+                )
+                .await?;
+        }
+
         let updated_workspace = repos
             .workspaces
             .update_state(workspace.id, WorkspaceState::Working, now)

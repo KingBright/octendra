@@ -15034,8 +15034,9 @@ exec "$@"
             OperationState::Queued
         );
 
-        let handoff_at = now_utc();
-        fixture
+        // Include a whole-second RFC3339 expiry; it must precede later fractions.
+        let handoff_at = now_utc().replace_nanosecond(0)?;
+        let shortened = fixture
             .repositories
             .host_write_leases
             .shorten(
@@ -15046,6 +15047,20 @@ exec "$@"
                 handoff_at,
             )
             .await?;
+        assert!(
+            shortened,
+            "foreign write lease must still be owned before handoff"
+        );
+        let observed_at = now_utc();
+        let active = fixture
+            .repositories
+            .host_write_leases
+            .list_active(fixture.host_id, observed_at)
+            .await?;
+        assert!(
+            active.is_empty(),
+            "expired handoff lease remains active: handoff={handoff_at}, observed={observed_at}, leases={active:?}"
+        );
         let outcome = worker
             .run_once()
             .await?
