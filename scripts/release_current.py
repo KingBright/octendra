@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 import source_snapshot
 
@@ -90,7 +91,20 @@ def invoke(root, action, *args, required=True):
         try:
             report = json.loads(raw)
         except json.JSONDecodeError as error:
-            raise ValueError('shared current helper returned a non-JSON receipt; exit='+str(result.returncode)+'; evidence='+repr(raw[:4096])) from error
+            # The runner bounds failure_detail. Save the complete bounded helper
+            # receipt first and lead its summary with the actual final cause.
+            diagnostics = root/'target/release-helper-failures'
+            diagnostics.mkdir(parents=True, exist_ok=True)
+            limit = 65536
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=diagnostics,
+                                             prefix=action+'-', suffix='.json', delete=False) as stream:
+                json.dump({'action': action, 'exit_code': result.returncode,
+                           'stdout': result.stdout[:limit], 'stderr': result.stderr[:limit],
+                           'truncated': len(result.stdout) > limit or len(result.stderr) > limit}, stream)
+                receipt = Path(stream.name).relative_to(root)
+            tail = raw.splitlines()[-1] if raw.splitlines() else 'empty helper output'
+            raise ValueError('non_json_helper:'+action+'; exit='+str(result.returncode)+
+                             '; evidence='+repr(tail[:160])+'; receipt='+str(receipt)) from error
         if result.returncode or not isinstance(report, dict) or report.get('mode') == 'refused':
             raise ValueError('shared current transaction refused: '+str(report))
         return report

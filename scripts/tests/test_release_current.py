@@ -67,6 +67,23 @@ class CurrentTests(unittest.TestCase):
         self.assertFalse((self.root/'source-snapshot.json').exists())
         self.assertNotIn('checkout', [p.name for p in self.root.rglob('*')])
 
+    def test_long_helper_trace_saves_receipt_and_keeps_actual_cause_in_bounded_summary(self):
+        cause = 'release_cleanup_backend.Refusal: process references release'
+        trace = 'Traceback (most recent call last):\n' + 'frame\n' * 2000 + cause
+        failure = subprocess.CompletedProcess([], 1, '', trace)
+        with mock.patch.object(subprocess, 'run', return_value=failure):
+            with self.assertRaises(ValueError) as observed:
+                lifecycle.invoke(self.root, 'release-admit')
+        self.assertIn(cause, str(observed.exception)[:400])
+        receipts = list((self.root/'target/release-helper-failures').glob('release-admit-*.json'))
+        self.assertEqual(len(receipts), 1)
+        saved = json.loads(receipts[0].read_text())
+        self.assertEqual(saved['action'], 'release-admit')
+        self.assertEqual(saved['exit_code'], 1)
+        self.assertEqual(saved['stderr'], trace)
+        self.assertFalse(saved['truncated'])
+        self.assertIn(str(receipts[0].relative_to(self.root)), str(observed.exception)[:400])
+
     def test_detached_worker_is_bound_to_launch_inputs(self):
         report = self.root/'detached.json'
         with mock.patch.object(runner, 'ROOT', self.root), mock.patch.object(os, 'posix_spawn', return_value=12345) as spawn, contextlib.redirect_stdout(io.StringIO()):
