@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fixed runner launched by the authenticated Gateway self-upgrade endpoint."""
 import argparse,hashlib,json,pathlib,subprocess,tarfile,tempfile,os
-from upgrade_instance import load_gateway, validate_release_paths
+from _gateway_instance_binding import load_gateway, validate_release_paths
 
 def digest(path):
     h=hashlib.sha256()

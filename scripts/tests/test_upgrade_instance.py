@@ -2,12 +2,14 @@
 import hashlib
 import importlib.util
 import json
+import re
 import contextlib
 import io
 import sqlite3
 from pathlib import Path
 import sys
 import tempfile
+import tarfile
 import unittest
 from unittest import mock
 
@@ -161,6 +163,38 @@ class UpgradeInstanceTests(unittest.TestCase):
                 self.assertTrue(service_calls)
                 self.assertTrue(all(c[2]=='octendra-gateway.service' for c in service_calls))
                 self.assertEqual(self.cfg_bytes,self.config.read_bytes());self.assertEqual(self.db_bytes,database.read_bytes())
+
+    def test_runner_can_unpack_new_helper_without_overwriting_current_controller(self):
+        # The running controller is embedded under a distinct name. Future
+        # candidates may change their helper without colliding at extraction.
+        gateway_source=(SCRIPTS.parent/'crates/octendra-code/src/gateway.rs').read_text()
+        helper_name=re.search(r'let helper = release.join\("([^"]+)"\)',gateway_source).group(1)
+        controller=self.release/helper_name;controller.write_bytes(b'# current controller unchanged')
+        helper=b'# different next-version helper\n'
+        files={'upgrade_instance.py':helper,'octendra-code-linux-amd64':self.candidate.read_bytes(),
+               'upgrade-code-gateway.py':b'# candidate upgrader fixture'}
+        manifest={'version':'0.12.1','artifacts':{name:{'sha256':hashlib.sha256(data).hexdigest(),'size':len(data)} for name,data in files.items()}}
+        files['manifest.json']=json.dumps(manifest).encode()
+        bundle=self.release/'bundle.tgz'
+        with tarfile.open(bundle,'w:gz') as archive:
+            for name,data in files.items():
+                member=tarfile.TarInfo(name);member.size=len(data);archive.addfile(member,io.BytesIO(data))
+        args=['runner','--bundle',str(bundle),'--bundle-sha256',hashlib.sha256(bundle.read_bytes()).hexdigest(),
+              '--version','0.12.1','--result',str(self.result),'--binary-path',str(self.binary),
+              '--config-path',str(self.config),'--backup-root',str(self.binary.parent/'releases'),
+              '--service-name','octendra-gateway.service','--expected-pid','2468']
+        identity=self.load()
+        module_spec=importlib.util.spec_from_file_location('fixture_bound_runner',SCRIPTS/'gateway_self_upgrade_runner.py')
+        runner=importlib.util.module_from_spec(module_spec)
+        with mock.patch.dict(sys.modules,{controller.stem:binding}),\
+             mock.patch.object(binding,'load_gateway',return_value=identity),\
+             mock.patch.object(sys,'argv',args),mock.patch('subprocess.run') as run:
+            module_spec.loader.exec_module(runner);runner.main()
+        self.assertEqual(controller.read_bytes(),b'# current controller unchanged')
+        self.assertEqual((self.release/'upgrade_instance.py').read_bytes(),helper)
+        command=run.call_args.args[0]
+        self.assertEqual(command[command.index('--service-name')+1],'octendra-gateway.service')
+        self.assertEqual(command[command.index('--expected-pid')+1],'2468')
 
     def test_runner_requires_process_and_service_identity(self):
         source=(SCRIPTS/'gateway_self_upgrade_runner.py').read_text()

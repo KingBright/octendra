@@ -2022,7 +2022,7 @@ async fn gateway_upgrade(
                 .into_response();
         }
     }
-    let helper = release.join("upgrade_instance.py");
+    let helper = release.join("_gateway_instance_binding.py");
     let helper_source = include_str!("../../../scripts/upgrade_instance.py");
     if helper.is_file() {
         if std::fs::read_to_string(&helper).ok().as_deref() != Some(helper_source) {
