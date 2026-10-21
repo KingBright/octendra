@@ -267,8 +267,13 @@ class CurrentTests(unittest.TestCase):
             'maintenance_client.py', 'release_targets.py', 'sync_bundle.py', 'release_client.py',
             'native_release_client.py', 'publish-code.py', 'check-collaboration.py',
             'install-code-agent.py', 'upgrade-code-agent-linux.py', 'upgrade-code-agent-windows.ps1',
-            'launch-code-upgrade-windows.ps1', 'fleet-upgrade.py', 'gateway_self_upgrade_runner.py']
+            'launch-code-upgrade-windows.ps1', 'fleet-upgrade.py', 'gateway_self_upgrade_runner.py',
+            'parallel-install.py']
         for name in helpers: (self.root/'scripts'/name).write_text('# fixture helper\n')
+        docs=self.root/'docs/parallel-octendra';docs.mkdir(parents=True)
+        (docs/'README.md').write_text('fresh parallel installation fixture\n')
+        (docs/'gateway.json.in').write_text('{}\n')
+        (docs/'new-host.caddy.in').write_text('# proxy fixture\n')
         binaries = ['release/octendra-code', 'x86_64-unknown-linux-musl/release/octendra-code',
                     'x86_64-pc-windows-msvc/release/octendra-code.exe',
                     'release/octendra', 'x86_64-unknown-linux-musl/release/octendra',
@@ -328,6 +333,11 @@ class CurrentTests(unittest.TestCase):
         self.assertIn('octendra-windows-amd64.exe', names)
         self.assertIn('source-verification.json', names)
         self.assertIn('manifest.json', names)
+        self.assertIn('parallel-install.py',names)
+        self.assertIn('PARALLEL-INSTALL.md',names)
+        self.assertIn('parallel-gateway.json.in',names)
+        self.assertIn('parallel-new-host.caddy.in',names)
+        self.assertIn('read-only plan',(stage/'README.md').read_text())
         self.assertEqual((current/'old').read_bytes(), b'old current')
         self.assertEqual(current_bundle.read_bytes(), b'old bundle')
         manifest = json.loads((stage/'manifest.json').read_text())

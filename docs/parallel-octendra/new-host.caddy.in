@@ -1,0 +1,14 @@
+# PREPARATION TEMPLATE ONLY. Do not apply/reload until the new hostname and
+# DNS/TLS scope are confirmed. Existing host/routes remain unchanged.
+${OCTENDRA_NEW_HOST} {
+    ${OCTENDRA_REVIEWED_TLS_CONFIGURATION}
+
+    # Reused 0.12 binaries still target canonical maintenance service names in
+    # their built-in upgraders. Keep that capability unavailable on this new host.
+    @parallel_upgrade_disabled path /admin/gateway-upgrade /admin/release-bundle /device/upgrade-directive /device/release-artifact/*
+    respond @parallel_upgrade_disabled "Parallel instance upgrade is not enabled" 409
+
+    reverse_proxy 127.0.0.1:18788 {
+        header_up Host ${OCTENDRA_NEW_HOST}
+    }
+}

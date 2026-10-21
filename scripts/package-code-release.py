@@ -21,6 +21,23 @@ import source_snapshot
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
+def parallel_files(root):
+    return {'parallel-install.py':root/'scripts/parallel-install.py',
+            'PARALLEL-INSTALL.md':root/'docs/parallel-octendra/README.md',
+            'parallel-gateway.json.in':root/'docs/parallel-octendra/gateway.json.in',
+            'parallel-new-host.caddy.in':root/'docs/parallel-octendra/new-host.caddy.in'}
+
+
+def release_readme(version):
+    return ('# Octendra '+version+'\n\n'
+        'New independent installs start with PARALLEL-INSTALL.md and parallel-install.py. '
+        'The default action is a read-only plan. New HTTPS origin and separately provisioned private authentication are required; neither falls back to the existing instance.\n'
+        'Keep the existing binaries, configuration, state, services, reverse proxy and credentials unchanged. '
+        'The parallel entry uses new paths and service identities and Gateway loopback port 18788.\n'
+        'fleet-upgrade.py and upgrade-code-* are existing-instance maintenance tools, not this parallel installation entry.\n'
+        'The bundle is the release identity; verify manifest.json and SHA256SUMS before installation. '
+        'Source verification and cross-builds are not deployed-process or client acceptance receipts.\n')
+
 def digest(path):
     h = hashlib.sha256()
     with path.open('rb') as file:
@@ -104,6 +121,7 @@ def main():
         'fleet-upgrade.py': ROOT/'scripts/fleet-upgrade.py',
         'gateway_self_upgrade_runner.py': ROOT/'scripts/gateway_self_upgrade_runner.py',
     }
+    files.update(parallel_files(ROOT))
     binary_platforms = {
         'octendra-code-macos-arm64': 'macos',
         'octendra-code-linux-amd64': 'linux',
@@ -176,7 +194,7 @@ def main():
     }
     (stage/'manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')
     (stage/'SHA256SUMS').write_text(''.join(digest(stage/name)+'  '+name+'\n' for name in sorted([*files,'manifest.json','source-verification.json'])))
-    (stage/'README.md').write_text('# Octendra '+args.version+'\n\nThe bundle is the release identity. Upgrade the Gateway before Agents, or use fleet-upgrade.py to converge the whole fleet. Keep existing device identities.\nIncluded platform binaries and updater helpers are bound by manifest.json; omitted platforms remain pending.\nRecord actual runtime versions and check binary SHA-256 against manifest.json.\nAcceptance is capability-based: required capabilities must be present; additive tools are allowed.\nSource verification is not a deployment acceptance receipt.\n')
+    (stage/'README.md').write_text(release_readme(args.version))
     with tarfile.open(bundle,'x:gz') as archive:
         for path in sorted(dest.iterdir(), key=lambda p:p.name):
             if path.is_file(): archive.add(path,arcname=path.name)

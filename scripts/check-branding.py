@@ -31,6 +31,14 @@ HISTORICAL_PLANS = {
     'docs/shell-script-diagnostics.md',
 }
 LOCAL_EVIDENCE = (".integration-artifacts/", ".rust-storage/")
+# Exact reviewed lines only: the fresh installer's rejected namespace set and
+# an immutable-byte legacy fixture. No presentation, file or substring exemption.
+LEGACY_NAMESPACE_GUARDS = {
+    'scripts/parallel-install.py': {'78326bf9f9da3fb3988ac1d292423767ae981357aeb9761bb7414d2be9e3373a'},
+    'scripts/tests/test_parallel_install.py': {
+        '29ce43e425a7093dfe010f6963bcd19018b173afb460e267c91fcaf0c313ca27',
+    },
+}
 
 
 def historical(name):
@@ -64,6 +72,8 @@ def inspect(root):
             continue
         for number, line in enumerate(text.splitlines(), 1):
             if OBSOLETE.search(line):
+                if hashlib.sha256(line.encode()).hexdigest() in LEGACY_NAMESPACE_GUARDS.get(name, set()):
+                    continue
                 # Only locations are emitted: a scanner never echoes a secret
                 # simply because it happens to contain a deprecated word.
                 violations.append({"path": name, "line": number, "kind": "content"})
