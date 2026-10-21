@@ -89,7 +89,8 @@ pub struct FrameMapping {
     /// Pixel centers run from (left, top) through (left + width - 1, top + height - 1).
     pub content: ContentRect,
     pub logical_size: [u32; 2],
-    /// Informational global layout position; portal input remains source-local.
+    /// Backend layout origin: global for native desktop windows, [0,0] for a
+    /// Weavelo source-local canvas. Never interpreted as a remote monitor origin.
     pub desktop_position: [i32; 2],
     pub rotation: Rotation,
 }
@@ -269,7 +270,8 @@ pub struct WorkerRequest {
 pub struct RawPixels {
     pub encoding: String,
     pub size: [u32; 2],
-    /// Exact SPA range, matrix, transfer and primaries; no guessed conversion.
+    /// Exact SPA range/matrix/transfer/primaries for YUV. Packed rgba8/rgba8_srgb
+    /// uses [0;4] (not SPA YUV); its encoding explicitly declares color semantics.
     pub color: [u32; 4],
     pub plane_lengths: Vec<usize>,
     pub plane_sha256: Vec<String>,

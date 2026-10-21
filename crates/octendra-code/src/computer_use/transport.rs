@@ -23,6 +23,8 @@ const APP_ID: &str = "fun.hackerlife.octendra.desktop-worker";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchApproval {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weavelo: Option<super::weavelo_worker::Route>,
     pub enabled: bool,
     pub observe: bool,
     pub input: bool,
@@ -39,19 +41,23 @@ pub struct LaunchApproval {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WorkerApproval {
-    enabled: bool,
-    app_id: String,
-    desktop_uid: u32,
-    desktop_session: String,
-    identity: Identity,
-    worker_sha256: String,
-    agent_sha256: String,
-    expires_at_ms: u64,
-    logical_size: [u32; 2],
-    logical_position: [i32; 2],
-    max_frame_bytes: usize,
-    allow_input: bool,
+pub(super) struct WorkerApproval {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) capability_version: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) weavelo: Option<super::weavelo_worker::Route>,
+    pub(super) enabled: bool,
+    pub(super) app_id: String,
+    pub(super) desktop_uid: u32,
+    pub(super) desktop_session: String,
+    pub(super) identity: Identity,
+    pub(super) worker_sha256: String,
+    pub(super) agent_sha256: String,
+    pub(super) expires_at_ms: u64,
+    pub(super) logical_size: [u32; 2],
+    pub(super) logical_position: [i32; 2],
+    pub(super) max_frame_bytes: usize,
+    pub(super) allow_input: bool,
 }
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -86,7 +92,7 @@ fn uid() -> Result<u32> {
     );
     Ok(actual)
 }
-fn owned_file(path: &Path, mode: u32, max: u64, owner: u32) -> Result<Vec<u8>> {
+pub(super) fn owned_file(path: &Path, mode: u32, max: u64, owner: u32) -> Result<Vec<u8>> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let meta = std::fs::symlink_metadata(path)?;
     ensure!(
@@ -117,7 +123,7 @@ fn owned_file(path: &Path, mode: u32, max: u64, owner: u32) -> Result<Vec<u8>> {
 impl LaunchApproval {
     pub fn validate(&self, device: &str) -> Result<()> {
         ensure!(
-            self.enabled && self.observe && self.input && self.capability_version > 0,
+            self.enabled && self.observe && self.capability_version > 0,
             "desktop authority unavailable"
         );
         ensure!(
@@ -125,15 +131,31 @@ impl LaunchApproval {
             "desktop authority identity"
         );
         let owner = uid()?;
+        if let Some(route) = &self.weavelo {
+            ensure!(
+                cfg!(target_os = "macos")
+                    && !self.input
+                    && self.desktop_session == "weavelo"
+                    && self.logical_position == [0, 0]
+                    && route.desktop_id() == self.identity.desktop_id,
+                "observe-only Weavelo authority required"
+            );
+            route.validate(owner)?;
+        } else {
+            ensure!(
+                self.input
+                    && !self.desktop_session.is_empty()
+                    && self
+                        .desktop_session
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric())
+                    && self.identity.desktop_id
+                        == format!("uid:{owner}:session:{}", self.desktop_session),
+                "local desktop authority required"
+            );
+        }
         ensure!(
             self.desktop_uid == owner
-                && self.identity.desktop_id
-                    == format!("uid:{owner}:session:{}", self.desktop_session)
-                && !self.desktop_session.is_empty()
-                && self
-                    .desktop_session
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric())
                 && self.logical_size.iter().all(|n| *n > 0 && *n <= 8192)
                 && self
                     .logical_position
@@ -195,7 +217,13 @@ struct Pipe {
 impl Pipe {
     fn spawn(approval: &LaunchApproval, config: &Path) -> Result<Self> {
         let mut command = Command::new(&approval.worker_path);
-        command.args(["--approval"]).arg(config);
+        command
+            .arg(if approval.weavelo.is_some() {
+                "--weavelo-approval"
+            } else {
+                "--approval"
+            })
+            .arg(config);
         Self::spawn_command(command)
     }
     fn spawn_command(mut command: Command) -> Result<Self> {
@@ -349,8 +377,9 @@ impl Pipe {
 }
 fn validate_pixels(p: &RawPixels) -> Result<()> {
     let [w, h] = p.size;
+    let rgba = matches!(p.encoding.as_str(), "rgba8" | "rgba8_srgb");
     ensure!(
-        w > 0 && h > 0 && w <= 8192 && h <= 8192 && w % 2 == 0 && h % 2 == 0,
+        w > 0 && h > 0 && w <= 8192 && h <= 8192 && (rgba || (w % 2 == 0 && h % 2 == 0)),
         "pixel dimensions"
     );
     let count = (w as usize)
@@ -359,6 +388,13 @@ fn validate_pixels(p: &RawPixels) -> Result<()> {
     let expected = match p.encoding.as_str() {
         "nv12" => vec![count, count / 2],
         "i420" => vec![count, count / 4, count / 4],
+        "rgba8" | "rgba8_srgb" => {
+            ensure!(
+                p.color == [0; 4],
+                "RGBA encoding declares color; SPA YUV fields must be unset"
+            );
+            vec![count.checked_mul(4).context("RGBA overflow")?]
+        }
         _ => bail!("unsupported raw pixels"),
     };
     ensure!(
@@ -464,6 +500,21 @@ impl NativeWorkers {
     }
     #[cfg(target_os = "macos")]
     pub async fn capabilities(&self) -> Capabilities {
+        let route = self
+            .state
+            .lock()
+            .await
+            .approval
+            .as_ref()
+            .and_then(|a| a.weavelo.clone());
+        if let Some(route) = route {
+            let ready = super::weavelo_worker::probe(&route).await.is_ok();
+            return self
+                .capabilities_with_probe("weavelo_source_canvas", |a| {
+                    a.validate(&a.identity.device_id.to_string()).is_ok() && ready
+                })
+                .await;
+        }
         self.capabilities_with_probe(super::macos_worker::platform_status(), |a| {
             a.validate(&a.identity.device_id.to_string()).is_ok()
                 && super::macos_worker::window_scope_ready(
@@ -522,12 +573,18 @@ impl NativeWorkers {
         if !target_valid(a) {
             return blocked("window_target_unavailable");
         }
-        if platform != "screencapturekit" {
+        if platform != "screencapturekit" && platform != "weavelo_source_canvas" {
             return blocked(platform);
         }
         Capabilities {
             available: true,
-            backend: "macos_pid_private_window_poc".into(),
+            backend: if a.weavelo.is_some() {
+                "weavelo_source_canvas_observe_only"
+            } else {
+                "macos_pid_private_window_poc"
+            }
+            .into(),
+            max_actions: if a.weavelo.is_some() { 0 } else { MAX_ACTIONS },
             ..Capabilities::default()
         }
     }
@@ -612,6 +669,11 @@ impl NativeWorkers {
             request.identity().is_none_or(|i| i == identity),
             "desktop request identity"
         );
+        if a.weavelo.is_some() && matches!(&request, Request::Act { .. }) {
+            return Ok(
+                serde_json::json!({"error":"unavailable","reason":"weavelo_observe_only","automatic_replay_safe":false}),
+            );
+        }
         if matches!(request, Request::Capabilities {}) {
             return Ok(serde_json::to_value(unavailable(&request).unwrap())?);
         }
@@ -741,7 +803,7 @@ impl NativeWorkers {
         let is_close = matches!(request, Request::Close { .. });
         // Worker handling has a 25-second bound after startup. Leave time for
         // private approval validation and delivery of its terminal response.
-        let budget = if matches!(request, Request::Open { .. }) {
+        let budget = if matches!(request, Request::Open { .. }) || a.weavelo.is_some() {
             35
         } else {
             3
@@ -1053,6 +1115,8 @@ impl NativeWorkers {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         let config = WorkerApproval {
+            capability_version: a.weavelo.as_ref().map(|_| a.capability_version),
+            weavelo: a.weavelo.clone(),
             enabled: true,
             app_id: APP_ID.into(),
             desktop_uid: a.desktop_uid,
@@ -1157,6 +1221,13 @@ impl NativeWorkers {
             bytes.len() == artifact.bytes && digest(&bytes) == artifact.sha256,
             "frame artifact changed"
         );
+        if let Some(route) = &a.weavelo {
+            super::weavelo_worker::validate_lease(route, &artifact.binding).await?;
+            ensure!(
+                artifact.expires_at_ms > crate_now_ms() && state.expires_at_ms > crate_now_ms(),
+                "frame expired during source validation"
+            );
+        }
         Ok(bytes)
     }
     pub async fn revoke(&self, binding: Option<&Binding>) -> bool {

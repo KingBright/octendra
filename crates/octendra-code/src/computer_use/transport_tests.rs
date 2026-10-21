@@ -1,6 +1,91 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
+#[test]
+fn weavelo_packed_rgba_declares_color_by_encoding_without_fabricating_spa_yuv() {
+    let mut pixels = RawPixels {
+        encoding: "rgba8_srgb".into(),
+        size: [3, 1],
+        color: [0; 4],
+        plane_lengths: vec![12],
+        plane_sha256: vec![digest(&[17; 12])],
+    };
+    assert!(validate_pixels(&pixels).is_ok());
+    pixels.color = [1; 4];
+    assert!(validate_pixels(&pixels).is_err());
+    pixels.color = [0; 4];
+    pixels.plane_lengths = vec![13];
+    assert!(validate_pixels(&pixels).is_err());
+    pixels.size = [8192, 8192];
+    pixels.plane_lengths = vec![8192 * 8192 * 4];
+    assert!(validate_pixels(&pixels).is_err());
+}
+#[tokio::test]
+async fn weavelo_observe_authority_never_spawns_or_dispatches_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let route = super::super::weavelo_worker::Route {
+        profile: dir.path().to_owned(),
+        generation: "1-2".into(),
+        gui_executable_sha256: "0".repeat(64),
+        target: super::super::weavelo_worker::Target {
+            peer_device_id: "synthetic-peer".into(),
+            source: super::super::weavelo_worker::Source::Window(42),
+            connection_id: 7,
+        },
+    };
+    let mut id = identity();
+    id.desktop_id = route.desktop_id();
+    let workers = fixture(
+        &dir.path().join("state"),
+        &dir.path().join("lock"),
+        &id,
+        "normal",
+    );
+    {
+        let mut state = workers.state.lock().await;
+        let a = state.approval.as_mut().unwrap();
+        a.weavelo = Some(route);
+        a.input = false;
+    }
+    let frame = FrameRef {
+        binding: Binding {
+            identity: id.clone(),
+            epoch: Uuid::new_v4(),
+        },
+        source_revision: 1,
+        frame_sequence: 1,
+        mapping: FrameMapping {
+            frame_size: [2, 2],
+            content: ContentRect {
+                left: 0,
+                top: 0,
+                width: 2,
+                height: 2,
+            },
+            logical_size: [2, 2],
+            desktop_position: [0, 0],
+            rotation: Rotation::R0,
+        },
+    };
+    let request = Request::Act {
+        frame,
+        sequence: 1,
+        actions: vec![Action::PointerMove { x: 0., y: 0. }],
+    };
+    assert!(
+        workers
+            .dispatch(Uuid::new_v4(), &id, 8, request.clone())
+            .await
+            .is_err()
+    );
+    let result = workers
+        .dispatch(Uuid::new_v4(), &id, 7, request)
+        .await
+        .unwrap();
+    assert_eq!(result["reason"], "weavelo_observe_only");
+    assert!(workers.state.lock().await.pipe.is_none());
+}
+
 pub(crate) const FIXTURE: &str = r#"
 import sys,struct,json,time,hashlib
 MODE="normal"
@@ -65,6 +150,7 @@ pub(crate) fn fixture(path: &Path, lock_path: &Path, id: &Identity, mode: &str) 
     let mut workers = NativeWorkers::disabled(path);
     workers.lock_path = lock_path.into();
     let a = LaunchApproval {
+        weavelo: None,
         enabled: true,
         observe: true,
         input: true,

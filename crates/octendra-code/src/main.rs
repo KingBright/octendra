@@ -161,6 +161,13 @@ async fn main() -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         let args: Vec<_> = std::env::args_os().collect();
+        if args.get(1).is_some_and(|v| v == "--weavelo-approval") {
+            ensure!(args.len() == 3, "worker requires one private approval path");
+            return octendra_code::computer_use::weavelo_worker::run(std::path::Path::new(
+                &args[2],
+            ))
+            .await;
+        }
         if args.get(1).is_some_and(|v| v == "--approval") {
             ensure!(args.len() == 3, "worker requires one private approval path");
             return octendra_code::computer_use::macos_worker::run(std::path::Path::new(&args[2]))
