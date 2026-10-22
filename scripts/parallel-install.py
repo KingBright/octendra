@@ -75,22 +75,34 @@ def new_namespace(value):
 
 
 def origin(value):
-    if not value or '${' in value:
+    if not isinstance(value,str) or not value or '${' in value:
         raise Refusal('missing new --public-origin; no existing origin is used')
-    parsed = urlsplit(value)
-    if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password
-            or parsed.path not in ('', '/') or parsed.query or parsed.fragment
-            or parsed.port not in (None, 443) or '*' in value):
-        raise Refusal('public origin must be one exact HTTPS hostname on port 443')
+    # urlsplit silently removes some whitespace/control characters. Reject them
+    # before parsing instead of accepting a different origin from the input.
+    if any(c.isspace() or ord(c)<32 or ord(c)==127 for c in value):
+        raise Refusal('public origin must be one exact HTTPS hostname and optional valid port')
     try:
-        ipaddress.ip_address(parsed.hostname)
+        parsed = urlsplit(value)
+        hostname,port = parsed.hostname,parsed.port
+    except ValueError as error:
+        raise Refusal('public origin has an invalid hostname or port') from error
+    if (parsed.scheme != 'https' or not hostname or parsed.username is not None
+            or parsed.password is not None or parsed.path not in ('', '/')
+            or '?' in value or '#' in value or '*' in value
+            or parsed.netloc.endswith(':') or (port is not None and not 1<=port<=65535)):
+        raise Refusal('public origin must be one exact HTTPS hostname and optional valid port')
+    try:
+        ipaddress.ip_address(hostname)
     except ValueError:
         pass
     else:
         raise Refusal('public origin must use the confirmed DNS hostname, not an IP address')
-    if not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+',parsed.hostname):
+    labels=hostname.split('.')
+    if (len(hostname)>253 or len(labels)<2 or labels[-1].isdigit()
+            or any(len(label)>63 or not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?',label)
+                   for label in labels)):
         raise Refusal('public origin must use the confirmed fully qualified DNS hostname')
-    return 'https://' + parsed.hostname.lower()
+    return 'https://' + hostname.lower() + (':'+str(port) if port not in (None,443) else '')
 
 
 def host_platform():

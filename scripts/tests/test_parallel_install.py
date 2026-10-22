@@ -125,10 +125,73 @@ class ParallelInstallTests(unittest.TestCase):
 
     def test_exact_https_origin_only(self):
         for value in ('http://new.invalid','https://user:pass@new.invalid','https://new.invalid/path',
-                      'https://new.invalid:8443','https://*.invalid','${NEW_DOMAIN}',
+                      'https://*.invalid','${NEW_DOMAIN}',
                       'https://127.0.0.1','https://local','https://not_a_domain.invalid'):
             with self.subTest(value=value):
                 with self.assertRaises(install.Refusal):install.origin(value)
+
+    def test_https_origin_preserves_nondefault_port_and_normalizes_default(self):
+        cases={'https://new.example.invalid':'https://new.example.invalid',
+               'https://NEW.EXAMPLE.INVALID:443/':'https://new.example.invalid',
+               'https://new.example.invalid:8443/':'https://new.example.invalid:8443',
+               'https://new.example.invalid:1':'https://new.example.invalid:1',
+               'https://new.example.invalid:65535':'https://new.example.invalid:65535'}
+        for value,expected in cases.items():
+            with self.subTest(value=value):self.assertEqual(install.origin(value),expected)
+
+    def test_invalid_port_or_ambiguous_https_origin_is_rejected(self):
+        cases=('https://new.invalid:0','https://new.invalid:65536','https://new.invalid:-1',
+               'https://new.invalid:+8443','https://new.invalid:abc','https://new.invalid:',
+               'https://new.invalid:8443:443','https://[broken','https://[::1]:8443',
+               'https://@new.invalid:8443','https://new.invalid:8443?',
+               'https://new.invalid:8443#',' https://new.invalid:8443',
+               'https://new.invalid:8443\n','https://new.in\tvalid:8443',
+               'https://new.invalid:8443/extra','https://new.invalid.:8443',
+               'https://127.1:8443','https://'+'a'*64+'.invalid:8443',
+               'https://'+'.'.join(['a'*63]*4)+':8443')
+        for value in cases:
+            with self.subTest(value=value):
+                with self.assertRaises(install.Refusal):install.origin(value)
+
+    def test_nondefault_origin_plan_preserves_config_without_writes(self):
+        self.args.public_origin='https://new.example.invalid:8443'
+        self.cfg['gateway_url']=self.args.public_origin;self.save_config()
+        before=self.snapshot(self.root);p=install.plan(self.args)
+        self.assertEqual(p['origin'],'https://new.example.invalid:8443')
+        self.assertEqual(install.public_plan(p)['origin'],self.cfg['gateway_url'])
+        self.assertEqual(before,self.snapshot(self.root))
+        self.assertFalse(self.state.exists())
+
+    def test_explicit_default_port_is_not_a_distinct_legacy_instance(self):
+        self.args.public_origin='https://same.example.invalid:443'
+        self.args.legacy_origin='https://same.example.invalid'
+        with mock.patch.object(Path,'read_bytes',side_effect=AssertionError('no auth read')):
+            with self.assertRaisesRegex(install.Refusal,'different explicit'):install.plan(self.args)
+
+    def test_nondefault_port_is_distinct_but_never_falls_back_to_legacy(self):
+        self.args.public_origin='https://same.example.invalid:8443'
+        self.args.legacy_origin='https://same.example.invalid'
+        self.cfg['gateway_url']=self.args.public_origin;self.save_config()
+        self.assertEqual(install.plan(self.args)['origin'],self.args.public_origin)
+        self.cfg['gateway_url']=self.args.legacy_origin;self.save_config()
+        with self.assertRaisesRegex(install.Refusal,'configuration origin differs'):install.plan(self.args)
+
+    def test_agent_and_gateway_port_mismatch_stop_before_platform_checks(self):
+        self.args.public_origin='https://new.example.invalid:8443'
+        for role,key in (('agent','gateway_url'),('gateway','public_url')):
+            with self.subTest(role=role):
+                self.config.unlink();self.args.role=role
+                self.config=self.root/'config'/(role+'.json');self.args.config=str(self.config)
+                self.cfg={'state_dir':str(self.state),key:'https://new.example.invalid'}
+                self.save_config()
+                with mock.patch.object(install,'checked',side_effect=AssertionError('no platform commands')):
+                    with self.assertRaisesRegex(install.Refusal,'configuration origin differs'):install.plan(self.args)
+                self.assertFalse((self.root/'bin').exists());self.assertFalse(self.state.exists())
+
+    def test_invalid_port_stops_before_reading_auth(self):
+        self.args.public_origin='https://new.example.invalid:65536'
+        with mock.patch.object(Path,'read_bytes',side_effect=AssertionError('no auth read')):
+            with self.assertRaises(install.Refusal):install.plan(self.args)
 
     def test_unfilled_auth_template_cannot_pass_by_setting_attestation(self):
         self.cfg['device_token']='${NEW_DEVICE_TOKEN}';self.save_config()

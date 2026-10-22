@@ -187,9 +187,50 @@ async fn oauth_pkce_mcp_and_refresh_replay() {
     let d = tempfile::tempdir().unwrap();
     let (g, password, _) = gateway(d.path()).await;
     let router = g.router().unwrap();
+    let (status, _, metadata) = request(
+        &router,
+        "GET",
+        "/.well-known/oauth-authorization-server",
+        json!({}),
+        None,
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(metadata["issuer"], "https://mcp.example.com:8443");
+    for (field, path) in [
+        ("authorization_endpoint", "/oauth/authorize"),
+        ("token_endpoint", "/oauth/token"),
+        ("registration_endpoint", "/oauth/register"),
+        ("revocation_endpoint", "/oauth/revoke"),
+    ] {
+        assert_eq!(
+            metadata[field],
+            format!("https://mcp.example.com:8443{path}")
+        );
+    }
+    let (status, _, metadata) = request(
+        &router,
+        "GET",
+        "/.well-known/oauth-protected-resource",
+        json!({}),
+        None,
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(metadata["resource"], "https://mcp.example.com:8443/mcp");
+    assert_eq!(
+        metadata["authorization_servers"],
+        json!(["https://mcp.example.com:8443"])
+    );
     let (status, headers, _) = request(&router, "POST", "/mcp", json!({}), None, None, false).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert!(headers.contains_key("www-authenticate"));
+    assert!(headers["www-authenticate"].to_str().unwrap().contains(
+        "resource_metadata=\"https://mcp.example.com:8443/.well-known/oauth-protected-resource\""
+    ));
     let (status, _, _) = request(
         &router,
         "POST",
@@ -202,10 +243,19 @@ async fn oauth_pkce_mcp_and_refresh_replay() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let token = login(&router, &password).await;
+    assert_eq!(token["resource"], "https://mcp.example.com:8443/mcp");
     let bearer = token["access_token"].as_str().unwrap();
     let(status,_,result)=request(&router,"POST","/mcp",json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}),Some(bearer),None,false).await;
     assert_eq!(status, StatusCode::OK);
     assert!(result["result"]["capabilities"]["tools"].is_object());
+    assert_eq!(
+        result["result"]["serverInfo"]["websiteUrl"],
+        "https://mcp.example.com:8443/status"
+    );
+    assert_eq!(
+        result["result"]["serverInfo"]["icons"][0]["src"],
+        "https://mcp.example.com:8443/branding/octendra-512.png"
+    );
     let(status,_,result)=request(&router,"POST","/mcp",json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"devices_list","arguments":{}}}),Some(bearer),None,false).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
@@ -224,6 +274,7 @@ async fn oauth_pkce_mcp_and_refresh_replay() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(new["resource"], "https://mcp.example.com:8443/mcp");
     let (status, _, _) = request(&router, "POST", "/oauth/token", form, None, None, true).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let (status, _, _) = request(
@@ -241,6 +292,49 @@ async fn oauth_pkce_mcp_and_refresh_replay() {
         StatusCode::UNAUTHORIZED,
         "a public client ID is not proof that refresh replay is a safe retry"
     );
+}
+
+#[tokio::test]
+async fn nondefault_https_origin_requires_matching_host_and_origin_port() {
+    let dir = tempfile::tempdir().unwrap();
+    let (gateway, _, _) = gateway(dir.path()).await;
+    let router = gateway.router().unwrap();
+    for (host, origin, expected) in [
+        (
+            "mcp.example.com:8443",
+            "https://mcp.example.com:8443",
+            StatusCode::OK,
+        ),
+        (
+            "mcp.example.com",
+            "https://mcp.example.com:8443",
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "mcp.example.com:8444",
+            "https://mcp.example.com:8443",
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "mcp.example.com:8443",
+            "https://mcp.example.com",
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/oauth-authorization-server")
+                    .header("Host", host)
+                    .header("Origin", origin)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "Host={host}, Origin={origin}");
+    }
 }
 #[tokio::test]
 async fn relay_edit_retry_and_isolation() {
