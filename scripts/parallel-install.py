@@ -185,7 +185,9 @@ def windows_task(binary, config, sid):
     actions = child(task, 'Actions', Context='CurrentUser'); action = child(actions, 'Exec')
     child(action, 'Command', str(binary))
     child(action, 'Arguments', subprocess.list2cmdline(['agent', '--config', str(config)]))
-    return ET.tostring(task, encoding='utf-8', xml_declaration=True)
+    # Task Scheduler receives a Unicode COM BSTR after ReadAllText. A UTF-8
+    # declaration contradicts that input and fails with 0x8004131a.
+    return ET.tostring(task, encoding='utf-8', xml_declaration=False)
 
 
 def definition(target, role, label, binary, config, args):

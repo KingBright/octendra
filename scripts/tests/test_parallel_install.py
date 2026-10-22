@@ -318,6 +318,19 @@ class ParallelInstallTests(unittest.TestCase):
         self.assertEqual(root.find('.//t:Command',ns).text,str(binary))
         self.assertEqual(root.find('.//t:Arguments',ns).text,subprocess.list2cmdline(['agent','--config',str(config)]))
 
+    def test_windows_xml_can_be_passed_as_unicode_to_task_scheduler(self):
+        # COM's XmlText/RegisterTask consume a BSTR, not the original UTF-8
+        # bytes. An encoding declaration causes native error 0x8004131a.
+        binary=PureWindowsPath('C:/Users/测试 User/octendra/agent/bin/octendra-code.exe')
+        config=binary.parent.parent/'config/agent.json'
+        text=install.windows_task(binary,config,'S-1-5-21-test').decode('utf-8')
+        self.assertNotIn('<?xml',text)
+        root=ET.fromstring(text)
+        ns={'t':'http://schemas.microsoft.com/windows/2004/02/mit/task'}
+        self.assertEqual(root.find('.//t:Command',ns).text,str(binary))
+        self.assertEqual(root.find('.//t:Arguments',ns).text,
+                         subprocess.list2cmdline(['agent','--config',str(config)]))
+
     def test_windows_registration_is_create_only_without_policy_or_acl_override(self):
         with mock.patch.object(install,'host_platform',return_value='windows'), mock.patch.object(install,'task_sid',return_value='S-1-5-21-test'):
             p=install.plan(self.args);install.stage(p);self.args.action='activate';p=install.plan(self.args);install.activate(p)
