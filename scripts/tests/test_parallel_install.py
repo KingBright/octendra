@@ -411,7 +411,9 @@ class ParallelInstallTests(unittest.TestCase):
             self.args.signed_binary=str(signed);self.args.signing_receipt=str(receipt)
             p=install.plan(self.args)
         self.assertEqual(plistlib.loads(p['definition'])['Label'],install.MAC_ID)
-        self.assertTrue(any('-R' in call.args[0] and install.MAC_ID in ' '.join(call.args[0]) for call in self.checked.call_args_list))
+        verification = [call.args[0] for call in self.checked.call_args_list if '-R' in call.args[0]]
+        self.assertEqual(verification, [['codesign', '--verify', '--strict', '-R',
+            '=identifier "'+install.MAC_ID+'" and certificate leaf = H"'+'a'*40+'"', str(signed)]])
 
     def test_brand_guard_exempts_only_exact_rejected_namespace_line(self):
         s=importlib.util.spec_from_file_location('brand_guard_fixture',SCRIPT.with_name('check-branding.py'))

@@ -236,7 +236,8 @@ def mac_signature(args, raw_sha):
     if (receipt.get('candidate_sha256') != raw_sha or receipt.get('installed_sha256') != digest(binary)
             or receipt.get('code_identifier') != MAC_ID or not re.fullmatch(r'[0-9a-fA-F]{40}', certificate)):
         raise Refusal('signed candidate receipt does not match this release and new macOS identity')
-    requirement = 'identifier "'+MAC_ID+'" and certificate leaf = H"'+certificate+'"'
+    # codesign -R treats an unprefixed value as a requirements file path.
+    requirement = '=identifier "'+MAC_ID+'" and certificate leaf = H"'+certificate+'"'
     checked(['codesign', '--verify', '--strict', '-R', requirement, str(binary)])
     return binary
 
