@@ -60,6 +60,7 @@ class AgentService : Service() {
             AgentRuntime.connectionDiagnostics = diagnostics
             val net = Transport(config, diagnostics); transport = net
             alive = true; started = true; AgentRuntime.running = true; AgentRuntime.lastContact = 0; AgentRuntime.state = "正在连接"; AgentRuntime.changed()
+            Log.i("OctendraConnection", "channel=lifecycle event=service_started")
             AgentRuntime.bridge = ShellBridge(this); updateBridge()
             val dispatcher = Dispatcher(this, config, db, net)
             workers.submit { poll(net, db, dispatcher) }
@@ -67,6 +68,7 @@ class AgentService : Service() {
             workers.submit { receipts(net, db) }
             diagnosticsWorker.scheduleAtFixedRate({ diagnostics.reportStalls() }, 15, 15, TimeUnit.SECONDS)
         } catch (e: Exception) {
+            Log.w("OctendraConnection", "channel=lifecycle event=start_failed code=${ConnectionDiagnostics.errorCode(e)}")
             AgentRuntime.state = "启动失败：" + Policy.error(e).optString("error"); AgentRuntime.changed(); stopSelf()
         }
         return START_STICKY
@@ -141,6 +143,7 @@ class AgentService : Service() {
         }
     }
     override fun onDestroy() {
+        Log.i("OctendraConnection", "channel=lifecycle event=service_stopped")
         alive = false; AgentRuntime.running = false; AgentRuntime.currentOperation = null
         transport?.close(); AgentRuntime.bridge?.close(); AgentRuntime.bridge = null
         workers.shutdownNow()

@@ -40,6 +40,9 @@ class ConnectionDiagnosticsTest {
             javax.net.ssl.SSLHandshakeException(sensitive) to "tls_handshake",
             java.net.ConnectException(sensitive) to "connect_failure",
             java.net.SocketException(sensitive) to "socket_failure",
+            SecurityException(sensitive) to "android_permission_denied",
+            AgentError("config_unreadable", sensitive) to "config_unreadable",
+            AgentError(sensitive) to "agent_error",
             IllegalStateException(sensitive) to "request_failure",
             HttpFailure(403) to "http_403"
         )

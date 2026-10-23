@@ -25,6 +25,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import android.util.Log
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.Executors
@@ -180,7 +181,20 @@ class MainActivity : Activity() {
     private fun guarded(block: () -> Unit) { try { block() } catch (e: Exception) { showError(e) } }
     private fun showError(e: Exception) { AlertDialog.Builder(this).setTitle("操作未完成").setMessage(Policy.error(e).optString("message")).setPositiveButton("关闭", null).show() }
     private fun toast(text: String) { Toast.makeText(this, text, Toast.LENGTH_LONG).show() }
-    override fun onResume() { super.onResume(); revision = Long.MIN_VALUE; handler.post(refresh) }
+    override fun onResume() {
+        super.onResume()
+        if (ServiceStartPolicy.resumeVisibleActivity(controls(this).getBoolean("remote_enabled", false), AgentRuntime.running)) {
+            try {
+                Log.i("OctendraConnection", "channel=lifecycle event=restore_requested trigger=visible_activity")
+                startForegroundService(Intent(this, AgentService::class.java))
+            } catch (error: Exception) {
+                val code = ConnectionDiagnostics.errorCode(error)
+                Log.w("OctendraConnection", "channel=lifecycle event=restore_failed code=$code")
+                AgentRuntime.state = "连接恢复失败：$code"; AgentRuntime.changed()
+            }
+        }
+        revision = Long.MIN_VALUE; handler.post(refresh)
+    }
     override fun onPause() { handler.removeCallbacks(refresh); super.onPause() }
     override fun onDestroy() { io.shutdownNow(); super.onDestroy() }
 }

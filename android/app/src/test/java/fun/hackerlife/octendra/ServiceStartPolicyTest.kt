@@ -7,6 +7,13 @@ class ServiceStartPolicyTest {
     private val replacement = "android.intent.action.MY_PACKAGE_REPLACED"
     private val boot = "android.intent.action.BOOT_COMPLETED"
 
+    @Test fun returningToVisibleActivityRestoresOnlyAnAlreadyEnabledStoppedSession() {
+        assertTrue(ServiceStartPolicy.resumeVisibleActivity(remoteEnabled = true, running = false))
+        assertFalse(ServiceStartPolicy.resumeVisibleActivity(remoteEnabled = true, running = true))
+        assertFalse(ServiceStartPolicy.resumeVisibleActivity(remoteEnabled = false, running = false))
+        assertFalse(ServiceStartPolicy.resumeVisibleActivity(remoteEnabled = false, running = true))
+    }
+
     @Test fun replacingAnEnabledAppRestoresItsExistingConnectionWithoutBootOptIn() {
         assertTrue(ServiceStartPolicy.restore(replacement, remoteEnabled = true, startAtBoot = false))
         assertTrue(ServiceStartPolicy.restore(replacement, remoteEnabled = true, startAtBoot = true))

@@ -50,6 +50,11 @@ class ConnectionDiagnostics(
             else -> Channel.FILE_SOURCE
         }
         fun errorCode(error: Exception): String = when (error) {
+            is SecurityException -> "android_permission_denied"
+            is AgentError -> when (error.code) {
+                "missing_configuration", "config_unreadable", "gateway_wire_incompatible", "invalid_gateway_response", "transport_stopped" -> error.code
+                else -> "agent_error"
+            }
             is HttpFailure -> if (error.status in 100..599) "http_${error.status}" else "http_other"
             is java.net.UnknownHostException -> "dns_failure"
             is java.net.SocketTimeoutException -> "network_timeout"
@@ -59,7 +64,8 @@ class ConnectionDiagnostics(
             is java.net.SocketException -> "socket_failure"
             is java.io.IOException -> "io_failure"
             is InterruptedException -> "interrupted"
-            else -> "request_failure"
+            else -> if (error.javaClass.simpleName == "ForegroundServiceStartNotAllowedException")
+                "foreground_service_start_not_allowed" else "request_failure"
         }
     }
 }

@@ -75,7 +75,7 @@ class Dispatcher(private val context: Context, private val config: GatewayConfig
         "shell_enabled_locally" to controls(context).getBoolean("shell_enabled", false), "shell_connected" to (AgentRuntime.bridge?.connected() == true),
         "shell_uid" to AgentRuntime.bridge?.uid, "shared_root" to root.path, "max_file_bytes" to Policy.MAX_FILE,
         "permissions_are_independent" to true, "transfer_resume" to false, "continuous_recording" to false,
-        "connection_diagnostics" to AgentRuntime.connectionDiagnostics?.snapshot())
+        "connection_diagnostics" to AgentRuntime.connectionDiagnostics?.let { JSONObject(it.snapshot()) })
     private fun command(text: String, id: String): JSONObject {
         demand(text.length <= 65536 && text.startsWith("android "), "android_command_required", "Use android help; arbitrary desktop shell text is not executed on the phone.")
         val command = text.removePrefix("android ").trim()

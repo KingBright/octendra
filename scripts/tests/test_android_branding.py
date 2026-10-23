@@ -68,7 +68,7 @@ class AndroidBrandingTests(unittest.TestCase):
         signature = f"Signer #1 certificate SHA-256 digest: {android_identity.OWNER_CERT_SHA256}\n"
         android_identity.verify_apk(badging, signature, identity)
         with self.assertRaisesRegex(ValueError, 'declared release identity'):
-            android_identity.verify_apk(badging.replace("versionCode='1200'", "versionCode='1'"), signature, identity)
+            android_identity.verify_apk(badging.replace(f"versionCode='{identity['version_code']}'", "versionCode='1'"), signature, identity)
         with self.assertRaisesRegex(ValueError, 'Owner signing identity'):
             android_identity.verify_apk(badging, signature.replace(android_identity.OWNER_CERT_SHA256, 'a' * 64), identity)
 
