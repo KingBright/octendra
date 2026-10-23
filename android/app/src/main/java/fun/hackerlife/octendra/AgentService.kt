@@ -10,6 +10,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.util.Log
 import org.json.JSONObject
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -21,6 +22,7 @@ object AgentRuntime {
     @Volatile var state = "已停止"
     @Volatile var lastContact = 0L
     @Volatile var currentOperation: String? = null
+    @Volatile var connectionDiagnostics: ConnectionDiagnostics? = null
     val revision = AtomicLong()
     fun changed() { revision.incrementAndGet() }
 }
@@ -28,6 +30,7 @@ object AgentRuntime {
 class AgentService : Service() {
     private val workers = Executors.newFixedThreadPool(3)
     private val receiptWake = java.util.concurrent.Semaphore(0)
+    private val diagnosticsWorker = Executors.newSingleThreadScheduledExecutor()
     private var transport: Transport? = null
     private var journal: Journal? = null
     @Volatile private var alive = false
@@ -53,13 +56,16 @@ class AgentService : Service() {
         try {
             config = ConfigStore(this).read() ?: throw AgentError("missing_configuration")
             val db = Journal(this, config); db.recover(); journal = db
-            val net = Transport(config); transport = net
+            val diagnostics = ConnectionDiagnostics(emit = { Log.i("OctendraConnection", it) })
+            AgentRuntime.connectionDiagnostics = diagnostics
+            val net = Transport(config, diagnostics); transport = net
             alive = true; started = true; AgentRuntime.running = true; AgentRuntime.lastContact = 0; AgentRuntime.state = "正在连接"; AgentRuntime.changed()
             AgentRuntime.bridge = ShellBridge(this); updateBridge()
             val dispatcher = Dispatcher(this, config, db, net)
             workers.submit { poll(net, db, dispatcher) }
             workers.submit { heartbeat(net) }
             workers.submit { receipts(net, db) }
+            diagnosticsWorker.scheduleAtFixedRate({ diagnostics.reportStalls() }, 15, 15, TimeUnit.SECONDS)
         } catch (e: Exception) {
             AgentRuntime.state = "启动失败：" + Policy.error(e).optString("error"); AgentRuntime.changed(); stopSelf()
         }
@@ -138,6 +144,7 @@ class AgentService : Service() {
         alive = false; AgentRuntime.running = false; AgentRuntime.currentOperation = null
         transport?.close(); AgentRuntime.bridge?.close(); AgentRuntime.bridge = null
         workers.shutdownNow()
+        diagnosticsWorker.shutdownNow()
         val db = journal
         Thread({ try { if (workers.awaitTermination(35, TimeUnit.SECONDS)) db?.close() } catch (_: Exception) {} }, "octendra-shutdown").start()
         if (!AgentRuntime.state.startsWith("启动失败")) AgentRuntime.state = "已停止"

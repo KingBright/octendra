@@ -1,14 +1,17 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
 val signingFile = providers.environmentVariable("OCTENDRA_ANDROID_KEYSTORE").orNull
-val releaseVersion = java.util.Properties().apply {
+val releaseVersion = Properties().apply {
     rootProject.file("version.properties").inputStream().use { load(it) }
 }
 android {
     namespace = "fun.hackerlife.octendra"
     compileSdk = 36
+    buildToolsVersion = "36.1.0"
     defaultConfig {
         applicationId = "fun.hackerlife.octendra"
         minSdk = 30

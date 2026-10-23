@@ -48,7 +48,7 @@ def main():
     subprocess.run(['./gradlew','--no-daemon','testDebugUnitTest','lintRelease','assembleDebug','assembleDebugAndroidTest','assembleRelease'],cwd=ROOT/'android',env=env,check=True)
     apk=ROOT/'android/app/build/outputs/apk/release/app-release.apk'
     if not apk.exists(): raise SystemExit('signed release APK missing')
-    tools=sdk/'build-tools/35.0.0'
+    tools=sdk/'build-tools/36.1.0'
     verify=subprocess.run([str(tools/'apksigner'),'verify','--verbose','--print-certs',str(apk)],env=env,check=True,capture_output=True,text=True).stdout
     badging=subprocess.run([str(tools/'aapt'),'dump','badging',str(apk)],check=True,capture_output=True,text=True).stdout
     android_identity.verify_apk(badging,verify,identity)

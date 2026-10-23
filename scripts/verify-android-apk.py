@@ -13,7 +13,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--apk', required=True, type=pathlib.Path)
     p.add_argument('--build-tools', type=pathlib.Path,
-                   default=pathlib.Path.home()/'Library/Android/sdk/build-tools/35.0.0')
+                   default=pathlib.Path.home()/'Library/Android/sdk/build-tools/36.1.0')
     p.add_argument('--report', required=True, type=pathlib.Path)
     a = p.parse_args()
     checks = []
