@@ -83,6 +83,53 @@ fn windows_authority_identity_and_acl_policy_are_platform_bound() {
     ));
 }
 
+#[test]
+fn windows_owner_rights_resolves_only_to_the_verified_current_owner() {
+    let ours = "S-1-5-21-10-20-30-1001";
+    let other = "S-1-5-21-10-20-30-1002";
+    for principal in [ours, "S-1-5-18", "S-1-5-32-544", "S-1-3-4"] {
+        assert!(file_principal_trusted(ours, ours, principal));
+        assert!(!file_principal_trusted(other, ours, principal));
+        assert!(!file_principal_trusted(ours, other, principal));
+    }
+}
+
+#[test]
+fn windows_owner_rights_does_not_admit_creator_owner_or_sid_prefixes() {
+    let ours = "S-1-5-21-10-20-30-1001";
+    for principal in [
+        "S-1-3-0",  // CREATOR OWNER is not the object's current OWNER RIGHTS SID.
+        "S-1-1-0",  // Everyone.
+        "S-1-5-11", // Authenticated Users.
+        "S-1-5-21-10-20-30-1002",
+        "S-1-3-40",
+        "S-1-3-4-1",
+        "S-1-5-18-1",
+        "S-1-5-32-544-1",
+        "S-1-5-21-10-20-30-10010",
+        "",
+    ] {
+        assert!(!file_principal_trusted(ours, ours, principal));
+    }
+}
+
+#[test]
+fn windows_owner_rights_preserves_private_read_and_external_write_guards() {
+    let ours = "S-1-5-21-10-20-30-1001";
+    let owner_rights = file_principal_trusted(ours, ours, "S-1-3-4");
+    let outsider = file_principal_trusted(ours, ours, "S-1-5-11");
+    for mask in [
+        0x2, 0x4, 0x10, 0x40, 0x100, 0x10000, 0x40000, 0x80000, 0x10000000, 0x40000000,
+    ] {
+        assert!(file_grant_allowed(owner_rights, true, mask));
+        assert!(!file_grant_allowed(outsider, false, mask));
+        assert!(!file_grant_allowed(outsider, true, mask));
+    }
+    let read_mask = 0x20000000 | 0x20000 | 0x1 | 0x20;
+    assert!(file_grant_allowed(outsider, false, read_mask));
+    assert!(!file_grant_allowed(outsider, true, read_mask));
+}
+
 #[derive(Default)]
 struct Calls {
     open: usize,

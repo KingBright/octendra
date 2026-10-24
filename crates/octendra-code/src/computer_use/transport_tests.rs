@@ -1,6 +1,77 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
+#[tokio::test]
+async fn local_observe_only_rejects_input_before_spawning_a_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = identity();
+    let workers = fixture(
+        &dir.path().join("state"),
+        &dir.path().join("lock"),
+        &id,
+        "normal",
+    );
+    workers.state.lock().await.approval.as_mut().unwrap().input = false;
+    let frame = FrameRef {
+        binding: Binding {
+            identity: id.clone(),
+            epoch: Uuid::new_v4(),
+        },
+        source_revision: 1,
+        frame_sequence: 1,
+        mapping: FrameMapping {
+            frame_size: [2, 2],
+            content: ContentRect {
+                left: 0,
+                top: 0,
+                width: 2,
+                height: 2,
+            },
+            logical_size: [2, 2],
+            desktop_position: [0, 0],
+            rotation: Rotation::R0,
+        },
+    };
+    let result = workers
+        .dispatch(
+            Uuid::new_v4(),
+            &id,
+            7,
+            Request::Act {
+                frame,
+                sequence: 1,
+                actions: vec![Action::PointerMove { x: 0., y: 0. }],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["reason"], "linux_portal_window_observe_only");
+    let state = workers.state.lock().await;
+    assert!(state.pipe.is_none());
+    assert!(state.binding.is_none());
+    assert_eq!(state.sequence, 0);
+}
+
+#[tokio::test]
+async fn linux_window_capability_advertises_no_actions_and_never_spawns() {
+    let dir = tempfile::tempdir().unwrap();
+    let (workers, _id, _) = capability_fixture(dir.path()).await;
+    {
+        let mut state = workers.state.lock().await;
+        let approval = state.approval.as_mut().unwrap();
+        approval.input = false;
+        approval.logical_size = [0, 0];
+        approval.logical_position = [0, 0];
+    }
+    let caps = workers
+        .capabilities_with_probe("linux_portal_window_observe_only", |_| true)
+        .await;
+    assert!(caps.available);
+    assert_eq!(caps.backend, "linux_portal_window_observe_only");
+    assert_eq!(caps.max_actions, 0);
+    assert!(workers.state.lock().await.pipe.is_none());
+}
+
 #[test]
 fn weavelo_packed_rgba_declares_color_by_encoding_without_fabricating_spa_yuv() {
     let mut pixels = RawPixels {

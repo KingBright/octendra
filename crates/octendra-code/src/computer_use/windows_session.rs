@@ -24,6 +24,12 @@ impl WindowAuthority {
         )
     }
 }
+/// OWNER RIGHTS denotes this object's current owner, not CREATOR OWNER or an
+/// arbitrary principal. Resolve it only after establishing our object ownership.
+pub(super) fn file_principal_trusted(owner: &str, current: &str, principal: &str) -> bool {
+    owner == current
+        && (principal == current || matches!(principal, "S-1-5-18" | "S-1-5-32-544" | "S-1-3-4"))
+}
 pub(super) fn file_grant_allowed(trusted: bool, private: bool, mask: u32) -> bool {
     let write_mask =
         0x10000000 | 0x40000000 | 0x2 | 0x4 | 0x10 | 0x40 | 0x100 | 0x10000 | 0x40000 | 0x80000;

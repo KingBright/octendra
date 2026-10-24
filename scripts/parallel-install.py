@@ -222,9 +222,10 @@ def definition(target, role, label, binary, config, args):
             user = f'User={args.service_user}\nGroup={args.service_group}\n';prefix=[]
     else: prefix=[]
     command=prefix+[str(binary),role,'--config',str(config)]
+    agent_hardening = 'NoNewPrivileges=true\n' if role == 'agent' else ''
     return ('[Unit]\nDescription=Octendra independent '+role+'\nAfter=network-online.target\n'
             '[Service]\nType=simple\n'+user+'ExecStart='+' '.join(unit_quote(x) for x in command)+
-            '\nRestart=on-failure\nRestartSec=5\nUmask=0077\n'
+            '\nRestart=on-failure\nRestartSec=5\nUmask=0077\n'+agent_hardening+
             '[Install]\nWantedBy='+('multi-user.target' if role == 'gateway' else 'default.target')+'\n').encode()
 
 

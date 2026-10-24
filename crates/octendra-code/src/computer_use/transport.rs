@@ -162,7 +162,7 @@ impl LaunchApproval {
                 route.validate(owner)?;
             } else {
                 ensure!(
-                    self.input
+                    (self.input || cfg!(target_os = "linux"))
                         && !self.desktop_session.is_empty()
                         && self
                             .desktop_session
@@ -173,13 +173,20 @@ impl LaunchApproval {
                     "local desktop authority required"
                 );
             }
-            ensure!(
-                self.desktop_uid == owner
-                    && self.logical_size.iter().all(|n| *n > 0 && *n <= 8192)
+            let window_observation =
+                cfg!(target_os = "linux") && !self.input && self.weavelo.is_none();
+            let geometry_valid = if window_observation {
+                self.logical_size == [0, 0] && self.logical_position == [0, 0]
+            } else {
+                self.logical_size.iter().all(|n| *n > 0 && *n <= 8192)
                     && self
                         .logical_position
                         .iter()
                         .all(|n| n.unsigned_abs() <= 1_000_000)
+            };
+            ensure!(
+                self.desktop_uid == owner
+                    && geometry_valid
                     && self.max_frame_bytes > 0
                     && self.max_frame_bytes <= MAX_WORKER_PIXELS,
                 "desktop capability geometry/identity"
@@ -569,7 +576,14 @@ impl NativeWorkers {
         })
         .await
     }
-    #[cfg(any(target_os = "macos", windows, test))]
+    #[cfg(target_os = "linux")]
+    pub async fn capabilities(&self) -> Capabilities {
+        self.capabilities_with_probe("linux_portal_window_observe_only", |a| {
+            !a.input && a.weavelo.is_none() && a.validate(&a.identity.device_id.to_string()).is_ok()
+        })
+        .await
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
     async fn capabilities_with_probe(
         &self,
         platform: &str,
@@ -620,12 +634,15 @@ impl NativeWorkers {
         if platform != "screencapturekit"
             && platform != "weavelo_source_canvas"
             && platform != "windows_wgc_uia_standard_control_click_only"
+            && platform != "linux_portal_window_observe_only"
         {
             return blocked(platform);
         }
         Capabilities {
             available: true,
-            backend: if platform == "windows_wgc_uia_standard_control_click_only" {
+            backend: if platform == "windows_wgc_uia_standard_control_click_only"
+                || platform == "linux_portal_window_observe_only"
+            {
                 platform
             } else if a.weavelo.is_some() {
                 if a.input {
@@ -637,7 +654,9 @@ impl NativeWorkers {
                 "macos_pid_private_window_poc"
             }
             .into(),
-            max_actions: if platform == "windows_wgc_uia_standard_control_click_only" {
+            max_actions: if platform == "linux_portal_window_observe_only" {
+                0
+            } else if platform == "windows_wgc_uia_standard_control_click_only" {
                 3
             } else if a.weavelo.is_some() {
                 if a.input { 3 } else { 0 }
@@ -728,9 +747,9 @@ impl NativeWorkers {
             request.identity().is_none_or(|i| i == identity),
             "desktop request identity"
         );
-        if a.weavelo.is_some() && !a.input && matches!(&request, Request::Act { .. }) {
+        if !a.input && matches!(&request, Request::Act { .. }) {
             return Ok(
-                serde_json::json!({"error":"unavailable","reason":"weavelo_observe_only","automatic_replay_safe":false}),
+                serde_json::json!({"error":"unavailable","reason":if a.weavelo.is_some() {"weavelo_observe_only"} else {"linux_portal_window_observe_only"},"automatic_replay_safe":false}),
             );
         }
         if matches!(request, Request::Capabilities {}) {

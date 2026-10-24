@@ -334,13 +334,13 @@ impl Agent {
             crate::tools::validate(&job.tool, v)?;
             let args: DesktopJob = serde_json::from_value(v.clone())?;
             if matches!(args.request, crate::computer_use::Request::Capabilities {}) {
-                #[cfg(any(target_os = "macos", windows))]
+                #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 return Ok(serde_json::to_value(
                     crate::computer_use::Response::Capabilities {
                         capabilities: self.desktop_workers.capabilities().await,
                     },
                 )?);
-                #[cfg(not(any(target_os = "macos", windows)))]
+                #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
                 return Ok(serde_json::to_value(
                     crate::computer_use::unavailable(&args.request)
                         .expect("capabilities are always available"),

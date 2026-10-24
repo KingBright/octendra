@@ -84,15 +84,17 @@ impl Approval {
                 .desktop_session
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric())
-            || self.logical_size.contains(&0)
-            || self.logical_size.iter().any(|n| *n > 8192)
+            || if self.allow_input {
+                self.logical_size.contains(&0) || self.logical_size.iter().any(|n| *n > 8192)
+            } else {
+                self.logical_size != [0, 0] || self.logical_position != [0, 0]
+            }
             || self.identity.task_id.is_nil()
             || self.identity.device_id.is_nil()
             || self.max_frame_bytes == 0
             || self.max_frame_bytes > MAX_PIXELS_BYTES
             || self.expires_at_ms <= now_ms()
             || self.expires_at_ms > now_ms().saturating_add(600_000)
-            || !self.allow_input
         {
             return Err("approval bounds or identity".into());
         }
@@ -187,5 +189,24 @@ mod tests {
         c.enabled = true;
         assert!(c.validate(1000).is_err());
         assert!(c.validate(0).is_err());
+    }
+    #[test]
+    fn window_observation_uses_no_desktop_geometry_or_input_grant() {
+        let mut c: Approval =
+            serde_json::from_str(include_str!("../approval.example.json")).unwrap();
+        c.enabled = true;
+        c.desktop_session = "2".into();
+        c.identity.desktop_id = "uid:1000:session:2".into();
+        c.identity.owner = "fixture-owner".into();
+        c.identity.task_id = uuid::Uuid::new_v4();
+        c.worker_sha256 = "a".repeat(64);
+        c.agent_sha256 = "b".repeat(64);
+        c.expires_at_ms = now_ms() + 30_000;
+        assert!(c.validate(1000).is_ok());
+        c.logical_size = [2649, 1490];
+        assert!(c.validate(1000).is_err());
+        c.logical_size = [0, 0];
+        c.allow_input = true;
+        assert!(c.validate(1000).is_err());
     }
 }

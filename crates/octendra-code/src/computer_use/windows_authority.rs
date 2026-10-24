@@ -138,8 +138,9 @@ pub fn validate_handle(file: &File, private: bool) -> Result<()> {
     ensure!(status.0 == 0, "file authority query failed");
     let _allocation = Allocation(sd.0);
     let ours = current_sid()?;
+    let owner_sid = sid_string(owner)?;
     ensure!(
-        sid_string(owner)? == ours && !dacl.is_null(),
+        owner_sid == ours && !dacl.is_null(),
         "owned non-null DACL required"
     );
     let acl = unsafe { &*dacl };
@@ -186,7 +187,7 @@ pub fn validate_handle(file: &File, private: bool) -> Result<()> {
             "ACE SID bound"
         );
         let principal = sid_string(PSID(raw.cast_mut().cast()))?;
-        let trusted = principal == ours || principal == "S-1-5-18" || principal == "S-1-5-32-544";
+        let trusted = super::windows_session::file_principal_trusted(&owner_sid, &ours, &principal);
         ensure!(
             super::windows_session::file_grant_allowed(trusted, private, allowed.Mask),
             "untrusted file ACE grants authority"

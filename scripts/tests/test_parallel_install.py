@@ -71,6 +71,7 @@ class ParallelInstallTests(unittest.TestCase):
         self.assertEqual(identity['config'],str(self.config))
         self.assertEqual(identity['state_dir'],str(self.state))
         self.assertEqual(identity['definition_sha256'],install.digest(p['candidate']))
+        self.assertEqual(p['candidate'].read_text().splitlines().count('NoNewPrivileges=true'),1)
         self.assertNotIn('SYNTHETIC-TEST-ONLY',json.dumps(identity))
         self.assertFalse(self.state.exists())
 
@@ -277,6 +278,8 @@ class ParallelInstallTests(unittest.TestCase):
         self.assertIn(mock.call(['systemctl','--user','start','octendra-agent.service']),self.checked.call_args_list)
         self.assertFalse(any('--now' in call.args[0] for call in self.checked.call_args_list))
         self.assertTrue(self.service.exists());self.assertTrue(self.state.exists())
+        self.assertEqual(self.service.read_bytes(),p['definition'])
+        self.assertIn(b'\nNoNewPrivileges=true\n',self.service.read_bytes())
 
     def test_gateway_activation_never_requests_or_assumes_elevation(self):
         p=install.plan(self.args);p['role']='gateway'
@@ -305,6 +308,7 @@ class ParallelInstallTests(unittest.TestCase):
             p=install.plan(self.args)
         probe.assert_called_once_with(18788)
         self.assertEqual(p['label'],'octendra-gateway.service')
+        self.assertNotIn(b'NoNewPrivileges=',p['definition'])
         line=next(x for x in p['definition'].decode().splitlines() if x.startswith('ExecStart='))
         self.assertEqual(shlex.split(line.split('=',1)[1])[1:3],['gateway','--config'])
         self.assertFalse(self.state.exists());self.assertFalse(self.service.exists())

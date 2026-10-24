@@ -4,10 +4,10 @@ use crate::config::{APP_ID, Approval, now_ms};
 use host::linux_frame::{OwnedFrame, PixelFormat, Transform};
 use host::{
     PortalSourceKind, PreparedPortalCapture, prepare_pipewire_capture_bounded,
-    request_registered_portal_control_capture,
+    request_registered_portal_control_capture, request_registered_portal_window_capture,
 };
-use protocol::InputEvent;
 use octendra_desktop_protocol::*;
+use protocol::InputEvent;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
@@ -126,6 +126,10 @@ impl Worker {
         if request.identity() != Some(&approval.identity) {
             return Err(ErrorCode::IdentityMismatch);
         }
+        // Reject before Portal calls, hold renewal or sequence consumption.
+        if !approval.allow_input && matches!(&request, Request::Act { .. }) {
+            return Err(ErrorCode::Unavailable);
+        }
         if self.session.as_ref().is_some_and(|s| {
             s.holds.budget(s.deadline, Instant::now()).is_zero() || s.capture.is_revoked()
         }) {
@@ -145,20 +149,27 @@ impl Worker {
                 self.spent = true; // failed/cancelled Open never reopens on this process.
                 let (cancel, rx) = watch::channel(false);
                 crate::lifecycle::phase(self.request_id, "portal_request_started");
-                let mut lease = request_registered_portal_control_capture(APP_ID, "", rx)
-                    .await
-                    .map_err(|_| ErrorCode::OutcomeUnknown)?;
+                let mut lease = if approval.allow_input {
+                    request_registered_portal_control_capture(APP_ID, "", rx).await
+                } else {
+                    request_registered_portal_window_capture(APP_ID, "", rx).await
+                }
+                .map_err(|_| ErrorCode::OutcomeUnknown)?;
                 crate::lifecycle::phase(self.request_id, "portal_session_ready");
                 let selected = lease.selected_source();
-                if selected.kind != PortalSourceKind::Monitor
-                    || selected.logical_size
-                        != Some((
-                            approval.logical_size[0] as i32,
-                            approval.logical_size[1] as i32,
-                        ))
-                    || selected.logical_position
-                        != Some((approval.logical_position[0], approval.logical_position[1]))
-                {
+                let selected_matches = if approval.allow_input {
+                    selected.kind == PortalSourceKind::Monitor
+                        && selected.logical_size
+                            == Some((
+                                approval.logical_size[0] as i32,
+                                approval.logical_size[1] as i32,
+                            ))
+                        && selected.logical_position
+                            == Some((approval.logical_position[0], approval.logical_position[1]))
+                } else {
+                    selected.kind == PortalSourceKind::Window
+                };
+                if !selected_matches {
                     if !lease.close().await {
                         return Err(ErrorCode::OutcomeUnknown);
                     }
@@ -172,7 +183,7 @@ impl Worker {
                 .await
                 .map_err(|_| ErrorCode::OutcomeUnknown)?;
                 crate::lifecycle::phase(self.request_id, "capture_attached");
-                if !capture.input_available() {
+                if approval.allow_input && !capture.input_available() {
                     capture.close_owned().await.map_err(|_| {
                         self.unknown = true;
                         ErrorCode::OutcomeUnknown
@@ -238,7 +249,7 @@ impl Worker {
                         frame.source_format.pixel_format,
                         PixelFormat::Nv12 | PixelFormat::I420
                     )
-                    || !session.capture.input_available()
+                    || (approval.allow_input && !session.capture.input_available())
                 {
                     self.shutdown().await?;
                     return Err(ErrorCode::StaleFrame);
@@ -266,8 +277,18 @@ impl Worker {
                             width: frame.width,
                             height: frame.height,
                         },
-                        logical_size: approval.logical_size,
-                        desktop_position: approval.logical_position,
+                        // Window frames are a source-local pixel canvas, with
+                        // no inferred compositor geometry or input mapping.
+                        logical_size: if approval.allow_input {
+                            approval.logical_size
+                        } else {
+                            [frame.width, frame.height]
+                        },
+                        desktop_position: if approval.allow_input {
+                            approval.logical_position
+                        } else {
+                            [0, 0]
+                        },
                         rotation: Rotation::R0,
                     },
                 };
