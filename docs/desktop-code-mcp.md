@@ -14,7 +14,10 @@ current listener's exact origin; this does not add a browser CORS origin.
 
 ## Codex setup
 
-Use the deployment's canonical public HTTPS origin, without an alternate port:
+Use the deployment's canonical public HTTPS origin, including its confirmed
+nondefault port. For the parallel Octendra deployment, the MCP URL is
+`https://octendra.hackerlife.fun:8443/mcp`; keep `:8443` in the OAuth issuer,
+endpoints and resource as well. The example below uses a default-port deployment:
 
 ```sh
 codex mcp add octendra-code --url https://YOUR_GATEWAY/mcp
@@ -39,6 +42,11 @@ tool_timeout_sec = 60
 
 Preserve other server entries and the client's existing approval policy. Reload
 MCP or start a new task to load the new catalog; an old task's tools are a snapshot.
+
+During a parallel migration, add the new origin under a distinct, unused server
+name and retain the working maintenance entry until the new connection passes
+acceptance. Do not copy its credentials into the new entry.
+
 The desktop app and CLI share the Codex host's MCP configuration. See the
 [official MCP documentation](https://developers.openai.com/codex/mcp).
 
