@@ -60,8 +60,13 @@ class NativeSession:
         self.origin, self.binary, self.timeout = origin, pathlib.Path(binary), timeout
         if not self.binary.is_file() or not os.access(self.binary, os.X_OK):
             raise ValueError('native_adapter_binary_unavailable')
+        # Managed NAS Python may predate hashlib.file_digest (Python 3.11).
+        # Keep hashing bounded without depending on that optional convenience API.
+        binary_digest = hashlib.sha256()
         with self.binary.open('rb') as source:
-            binary_sha256 = hashlib.file_digest(source, 'sha256').hexdigest()
+            for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                binary_digest.update(chunk)
+        binary_sha256 = binary_digest.hexdigest()
         root = state_root or pathlib.Path.home() / '.local/share/octendra-code/release-clients'
         root = pathlib.Path(root).absolute()
         for path in (root, *root.parents):

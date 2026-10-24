@@ -1,5 +1,6 @@
 """Real stdio child fault injection. No network, real credentials or service writes."""
 import json
+import hashlib
 import os
 import pathlib
 import subprocess
@@ -77,6 +78,18 @@ class NativeStdioTests(unittest.TestCase):
 
     def received(self, s):
         return [json.loads(x) for x in (s.directory/'received.jsonl').read_text().splitlines()]
+
+    def test_native_session_on_python_without_file_digest(self):
+        with mock.patch.object(native.hashlib, 'file_digest', None, create=True):
+            s = self.session()
+            result = s.rpc('tools/call', {'mode': 'ok'})
+        expected = hashlib.sha256(pathlib.Path(sys.executable).read_bytes()).hexdigest()
+        self.assertEqual(s.status['binary_sha256'], expected)
+        self.assertEqual(result['structuredContent']['answer'], 42)
+        self.assertEqual(self.spawn.call_count, 1)
+        self.assertTrue(s.close())
+        self.assertFalse(s._token.exists())
+        self.assertFalse(s._config.exists())
 
     def test_one_process_for_multiple_calls_and_private_credentials(self):
         s = self.session()
