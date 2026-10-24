@@ -30,8 +30,27 @@ pub fn process_identity(pid: u32) -> Value {
         linux_identity(Path::new("/proc"), pid)
             .unwrap_or_else(|| json!({"pid":pid,"identity_state":"unavailable"}))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    {
+        super::windows_authority::process_identity(pid)
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
     json!({"pid":pid,"identity_state":"platform_identity_unavailable"})
+}
+pub fn valid_process_identity(v: &Value) -> bool {
+    if v["identity_state"] != "observed" || !v["pid"].as_u64().is_some_and(|n| n > 0) {
+        return false;
+    }
+    #[cfg(windows)]
+    return v["created_100ns"].as_u64().is_some_and(|n| n > 0)
+        && v["session_id"].as_u64().is_some_and(|n| n > 0);
+    #[cfg(not(windows))]
+    {
+        v["start_ticks"].as_u64().is_some_and(|n| n > 0)
+            && v["boot_id"]
+                .as_str()
+                .is_some_and(|s| Uuid::parse_str(s).is_ok())
+    }
 }
 #[cfg(any(target_os = "linux", test))]
 fn linux_identity(root: &Path, pid: u32) -> Option<Value> {

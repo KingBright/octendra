@@ -26,7 +26,7 @@ pub struct Agent {
     pub config_path: Option<PathBuf>,
     pub store: Store,
     pub(crate) terminals: Terminals,
-    #[cfg(any(target_os = "linux", target_os = "macos", test))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
     pub(crate) desktop_workers: crate::computer_use::transport::NativeWorkers,
     scheduler: Arc<Scheduler>,
     pub(crate) active: Arc<ActiveJobs>,
@@ -132,14 +132,14 @@ impl Agent {
         )
         .await?;
         store.put("runtime", "build", &json!({"version":env!("CARGO_PKG_VERSION"),"pid":std::process::id(),"started_at":crate::now()}), i64::MAX).await?;
-        #[cfg(any(target_os = "linux", target_os = "macos", test))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
         let desktop_workers = crate::computer_use::transport::NativeWorkers::load(
             &config.state_dir,
             &config.device_id,
         )
         .with_store(store.clone());
         Ok(Self {
-            #[cfg(any(target_os = "linux", target_os = "macos", test))]
+            #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
             desktop_workers,
             config: Arc::new(config),
             config_path: None,
@@ -160,7 +160,7 @@ impl Agent {
         agent.config_path = Some(config_path);
         Ok(agent)
     }
-    #[cfg(any(target_os = "linux", target_os = "macos", test))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
     pub async fn read_desktop_frame(&self, job: &Job) -> Result<Vec<u8>> {
         ensure!(
             job.tool == "desktop_worker" && job.device_id == self.config.device_id,
@@ -188,7 +188,7 @@ impl Agent {
             .read_frame(&artifact, &identity, args.capability_version)
             .await
     }
-    #[cfg(any(target_os = "linux", target_os = "macos", test))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
     pub async fn revoke_desktop(&self, binding: &crate::computer_use::Binding) -> bool {
         self.desktop_workers.revoke(Some(binding)).await
     }
@@ -328,19 +328,19 @@ impl Agent {
     }
     async fn perform(&self, job: &Job, progress: &crate::progress::Progress) -> Result<Value> {
         let v = &job.arguments;
-        #[cfg(any(target_os = "linux", target_os = "macos", test))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
         if job.tool == "desktop_worker" {
             // Typed catalog admission is independent of shell/code permissions.
             crate::tools::validate(&job.tool, v)?;
             let args: DesktopJob = serde_json::from_value(v.clone())?;
             if matches!(args.request, crate::computer_use::Request::Capabilities {}) {
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", windows))]
                 return Ok(serde_json::to_value(
                     crate::computer_use::Response::Capabilities {
                         capabilities: self.desktop_workers.capabilities().await,
                     },
                 )?);
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(not(any(target_os = "macos", windows)))]
                 return Ok(serde_json::to_value(
                     crate::computer_use::unavailable(&args.request)
                         .expect("capabilities are always available"),
@@ -358,7 +358,7 @@ impl Agent {
                 .await;
         }
 
-        #[cfg(any(target_os = "linux", target_os = "macos", test))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
         if job.tool == "desktop_frame" {
             crate::tools::validate(&job.tool, v)?;
             let args: DesktopFrameJob = serde_json::from_value(v.clone())?;
@@ -668,7 +668,7 @@ impl Agent {
             self.run_loop(None),
             crate::history_retention::agent_loop(self.config.clone(), self.history_access.clone())
         );
-        #[cfg(any(target_os = "linux", target_os = "macos", test))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
         self.desktop_workers.revoke(None).await;
         result?;
         Ok(())
@@ -682,7 +682,7 @@ impl Agent {
             self.run_loop(Some(&home)),
             crate::history_retention::agent_loop(self.config.clone(), self.history_access.clone())
         );
-        #[cfg(any(target_os = "linux", target_os = "macos", test))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
         self.desktop_workers.revoke(None).await;
         result?;
         Ok(())

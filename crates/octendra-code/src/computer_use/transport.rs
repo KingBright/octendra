@@ -23,8 +23,10 @@ const APP_ID: &str = "fun.hackerlife.octendra.desktop-worker";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchApproval {
+    #[cfg(windows)]
+    pub windows: super::windows_session::WindowAuthority,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub weavelo: Option<super::weavelo_worker::Route>,
+    pub weavelo: Option<super::weavelo_route::Route>,
     pub enabled: bool,
     pub observe: bool,
     pub input: bool,
@@ -42,10 +44,12 @@ pub struct LaunchApproval {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct WorkerApproval {
+    #[cfg(windows)]
+    pub(super) windows: super::windows_session::WindowAuthority,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) capability_version: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) weavelo: Option<super::weavelo_worker::Route>,
+    pub(super) weavelo: Option<super::weavelo_route::Route>,
     pub(super) enabled: bool,
     pub(super) app_id: String,
     pub(super) desktop_uid: u32,
@@ -78,7 +82,7 @@ fn uid() -> Result<u32> {
     );
     Ok(values[0])
 }
-#[cfg(all(test, not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(all(test, not(any(target_os = "linux", target_os = "macos", windows))))]
 fn uid() -> Result<u32> {
     use std::os::unix::fs::MetadataExt;
     Ok(std::fs::metadata(std::env::current_exe()?)?.uid())
@@ -92,6 +96,15 @@ fn uid() -> Result<u32> {
     );
     Ok(actual)
 }
+#[cfg(windows)]
+fn uid() -> Result<u32> {
+    Ok(0)
+} // SID/session authority is checked below, never inferred from this compatibility field.
+#[cfg(windows)]
+pub(super) fn owned_file(path: &Path, mode: u32, max: u64, _owner: u32) -> Result<Vec<u8>> {
+    super::windows_authority::owned_file(path, mode, max)
+}
+#[cfg(not(windows))]
 pub(super) fn owned_file(path: &Path, mode: u32, max: u64, owner: u32) -> Result<Vec<u8>> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let meta = std::fs::symlink_metadata(path)?;
@@ -122,82 +135,87 @@ pub(super) fn owned_file(path: &Path, mode: u32, max: u64, owner: u32) -> Result
 }
 impl LaunchApproval {
     pub fn validate(&self, device: &str) -> Result<()> {
-        ensure!(
-            self.enabled && self.observe && self.capability_version > 0,
-            "desktop authority unavailable"
-        );
-        ensure!(
-            self.identity.device_id.to_string() == device && !self.identity.owner.is_empty(),
-            "desktop authority identity"
-        );
-        let owner = uid()?;
-        if let Some(route) = &self.weavelo {
+        #[cfg(windows)]
+        return super::windows_authority::validate_launch(self, device);
+        #[cfg(not(windows))]
+        {
             ensure!(
-                cfg!(target_os = "macos")
-                    && (!self.input
-                        || route.input_platform
-                            == Some(super::weavelo_worker::InputPlatform::Macos))
-                    && self.desktop_session == "weavelo"
-                    && self.logical_position == [0, 0]
-                    && route.desktop_id() == self.identity.desktop_id,
-                "explicit Weavelo source authority required"
+                self.enabled && self.observe && self.capability_version > 0,
+                "desktop authority unavailable"
             );
-            route.validate(owner)?;
-        } else {
             ensure!(
-                self.input
-                    && !self.desktop_session.is_empty()
+                self.identity.device_id.to_string() == device && !self.identity.owner.is_empty(),
+                "desktop authority identity"
+            );
+            let owner = uid()?;
+            if let Some(route) = &self.weavelo {
+                ensure!(
+                    cfg!(target_os = "macos")
+                        && (!self.input
+                            || route.input_platform
+                                == Some(super::weavelo_route::InputPlatform::Macos))
+                        && self.desktop_session == "weavelo"
+                        && self.logical_position == [0, 0]
+                        && route.desktop_id() == self.identity.desktop_id,
+                    "explicit Weavelo source authority required"
+                );
+                route.validate(owner)?;
+            } else {
+                ensure!(
+                    self.input
+                        && !self.desktop_session.is_empty()
+                        && self
+                            .desktop_session
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric())
+                        && self.identity.desktop_id
+                            == format!("uid:{owner}:session:{}", self.desktop_session),
+                    "local desktop authority required"
+                );
+            }
+            ensure!(
+                self.desktop_uid == owner
+                    && self.logical_size.iter().all(|n| *n > 0 && *n <= 8192)
                     && self
-                        .desktop_session
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric())
-                    && self.identity.desktop_id
-                        == format!("uid:{owner}:session:{}", self.desktop_session),
-                "local desktop authority required"
+                        .logical_position
+                        .iter()
+                        .all(|n| n.unsigned_abs() <= 1_000_000)
+                    && self.max_frame_bytes > 0
+                    && self.max_frame_bytes <= MAX_WORKER_PIXELS,
+                "desktop capability geometry/identity"
             );
+            use std::os::unix::fs::MetadataExt;
+            let executable = std::env::current_exe()?;
+            ensure!(
+                digest(&owned_file(
+                    &executable,
+                    std::fs::metadata(&executable)?.mode() & 0o777,
+                    256 * 1024 * 1024,
+                    owner
+                )?) == self.agent_sha256,
+                "Agent hash changed"
+            );
+            let worker = std::fs::symlink_metadata(&self.worker_path)?;
+            ensure!(
+                self.worker_path.is_absolute()
+                    && worker.is_file()
+                    && !worker.file_type().is_symlink()
+                    && worker.uid() == owner
+                    && worker.mode() & 0o022 == 0
+                    && worker.mode() & 0o111 != 0,
+                "worker executable authority"
+            );
+            ensure!(
+                digest(&owned_file(
+                    &self.worker_path,
+                    worker.mode() & 0o777,
+                    256 * 1024 * 1024,
+                    owner
+                )?) == self.worker_sha256,
+                "worker hash changed"
+            );
+            Ok(())
         }
-        ensure!(
-            self.desktop_uid == owner
-                && self.logical_size.iter().all(|n| *n > 0 && *n <= 8192)
-                && self
-                    .logical_position
-                    .iter()
-                    .all(|n| n.unsigned_abs() <= 1_000_000)
-                && self.max_frame_bytes > 0
-                && self.max_frame_bytes <= MAX_WORKER_PIXELS,
-            "desktop capability geometry/identity"
-        );
-        use std::os::unix::fs::MetadataExt;
-        let executable = std::env::current_exe()?;
-        ensure!(
-            digest(&owned_file(
-                &executable,
-                std::fs::metadata(&executable)?.mode() & 0o777,
-                256 * 1024 * 1024,
-                owner
-            )?) == self.agent_sha256,
-            "Agent hash changed"
-        );
-        let worker = std::fs::symlink_metadata(&self.worker_path)?;
-        ensure!(
-            self.worker_path.is_absolute()
-                && worker.is_file()
-                && !worker.file_type().is_symlink()
-                && worker.uid() == owner
-                && worker.mode() & 0o022 == 0
-                && worker.mode() & 0o111 != 0,
-            "worker executable authority"
-        );
-        ensure!(
-            digest(&owned_file(
-                &self.worker_path,
-                worker.mode() & 0o777,
-                256 * 1024 * 1024,
-                owner
-            )?) == self.worker_sha256,
-            "worker hash changed"
-        );
-        Ok(())
     }
 }
 fn crate_now_ms() -> u64 {
@@ -346,13 +364,25 @@ impl Pipe {
         self.disconnect_child().await
     }
     async fn disconnect_child(&mut self) -> Result<()> {
+        #[cfg(unix)]
         use std::os::unix::process::ExitStatusExt;
+        let signal = |status: &std::process::ExitStatus| {
+            #[cfg(unix)]
+            {
+                status.signal()
+            }
+            #[cfg(windows)]
+            {
+                let _ = status;
+                None::<i32>
+            }
+        };
         self.input.take(); // EOF gives the worker its bounded release/Close path.
         match tokio::time::timeout(Duration::from_secs(3), self.child.wait()).await {
             Ok(Ok(status)) => {
                 self.exit_evidence = Some(serde_json::json!({
                     "protocol":1,"pid":self.worker_pid,"reaped":true,
-                    "exit_code":status.code(),"signal":status.signal(),
+                    "exit_code":status.code(),"signal":signal(&status),
                     "forced_stop":false,"exit_success":status.success()
                 }));
                 ensure!(status.success(), "worker cleanup outcome unknown");
@@ -364,7 +394,7 @@ impl Pipe {
                 self.exit_evidence = Some(match reaped {
                     Ok(Ok(status)) => serde_json::json!({
                         "protocol":1,"pid":self.worker_pid,"reaped":true,
-                        "exit_code":status.code(),"signal":status.signal(),
+                        "exit_code":status.code(),"signal":signal(&status),
                         "forced_stop":true,"kill_request_succeeded":kill_requested,"exit_success":status.success()
                     }),
                     _ => serde_json::json!({
@@ -431,12 +461,17 @@ struct State {
     fixture: Option<String>,
 }
 fn desktop_lock_path() -> PathBuf {
+    #[cfg(windows)]
+    return std::env::temp_dir().join(format!(
+        "octendra-desktop-{}.lock",
+        super::windows_authority::current_sid().unwrap_or_else(|_| "unavailable".into())
+    ));
     #[cfg(target_os = "macos")]
     return std::env::temp_dir().join(format!(
         "octendra-desktop-{}.lock",
         uid().unwrap_or(u32::MAX)
     ));
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     PathBuf::from(format!(
         "/run/user/{}/octendra-desktop.lock",
         uid().unwrap_or(u32::MAX)
@@ -527,7 +562,14 @@ impl NativeWorkers {
         })
         .await
     }
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(windows)]
+    pub async fn capabilities(&self) -> Capabilities {
+        self.capabilities_with_probe("windows_wgc_uia_standard_control_click_only", |a| {
+            a.validate(&a.identity.device_id.to_string()).is_ok()
+        })
+        .await
+    }
+    #[cfg(any(target_os = "macos", windows, test))]
     async fn capabilities_with_probe(
         &self,
         platform: &str,
@@ -575,12 +617,17 @@ impl NativeWorkers {
         if !target_valid(a) {
             return blocked("window_target_unavailable");
         }
-        if platform != "screencapturekit" && platform != "weavelo_source_canvas" {
+        if platform != "screencapturekit"
+            && platform != "weavelo_source_canvas"
+            && platform != "windows_wgc_uia_standard_control_click_only"
+        {
             return blocked(platform);
         }
         Capabilities {
             available: true,
-            backend: if a.weavelo.is_some() {
+            backend: if platform == "windows_wgc_uia_standard_control_click_only" {
+                platform
+            } else if a.weavelo.is_some() {
                 if a.input {
                     "weavelo_source_canvas_bounded_gesture"
                 } else {
@@ -590,7 +637,9 @@ impl NativeWorkers {
                 "macos_pid_private_window_poc"
             }
             .into(),
-            max_actions: if a.weavelo.is_some() {
+            max_actions: if platform == "windows_wgc_uia_standard_control_click_only" {
+                3
+            } else if a.weavelo.is_some() {
                 if a.input { 3 } else { 0 }
             } else {
                 MAX_ACTIONS
@@ -1017,10 +1066,7 @@ impl NativeWorkers {
             && evidence["persistence_failed"] == false
             && evidence["shutdown_status"] == "confirmed"
             && worker["identity_state"] == "observed"
-            && worker["start_ticks"].as_u64().is_some_and(|n| n > 0)
-            && worker["boot_id"]
-                .as_str()
-                .is_some_and(|s| Uuid::parse_str(s).is_ok())
+            && super::lifecycle::valid_process_identity(worker)
             && guard["worker_pid"] == worker["pid"]
             && exit["pid"] == worker["pid"]
             && exit == &guard["worker_exit"]
@@ -1061,6 +1107,11 @@ impl NativeWorkers {
             "worker_lifecycle":evidence}),
         ))
     }
+    #[cfg(windows)]
+    fn acquire_lock(&self) -> Result<std::fs::File> {
+        super::windows_authority::lock(&self.lock_path)
+    }
+    #[cfg(not(windows))]
     fn acquire_lock(&self) -> Result<std::fs::File> {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
         let parent =
@@ -1088,6 +1139,23 @@ impl NativeWorkers {
         fs2::FileExt::try_lock_exclusive(&file).context("desktop busy across Agents/tasks")?;
         Ok(file)
     }
+    #[cfg(windows)]
+    fn write_frame(&self, id: Uuid, bytes: &[u8]) -> Result<()> {
+        use std::io::Write;
+        if !self.cache.exists() {
+            std::fs::create_dir(&self.cache)?;
+        }
+        super::windows_authority::directory(&self.cache)?;
+        let path = self.cache.join(id.to_string());
+        let mut file = super::windows_authority::create_private(&path)?;
+        if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+            drop(file);
+            let _ = std::fs::remove_file(path);
+            return Err(error.into());
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
     fn write_frame(&self, id: Uuid, bytes: &[u8]) -> Result<()> {
         use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
         if !self.cache.exists() {
@@ -1123,8 +1191,14 @@ impl NativeWorkers {
         expires: u64,
     ) -> Result<PathBuf> {
         use std::io::Write;
+        #[cfg(not(windows))]
         use std::os::unix::fs::OpenOptionsExt;
         let config = WorkerApproval {
+            #[cfg(windows)]
+            windows: a.windows.clone(),
+            #[cfg(windows)]
+            capability_version: Some(a.capability_version),
+            #[cfg(not(windows))]
             capability_version: a.weavelo.as_ref().map(|_| a.capability_version),
             weavelo: a.weavelo.clone(),
             enabled: true,
@@ -1145,6 +1219,9 @@ impl NativeWorkers {
             .parent()
             .context("state directory")?
             .join(format!("desktop-worker-{id}.json"));
+        #[cfg(windows)]
+        let mut file = super::windows_authority::create_private(&path)?;
+        #[cfg(not(windows))]
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1231,6 +1308,7 @@ impl NativeWorkers {
             bytes.len() == artifact.bytes && digest(&bytes) == artifact.sha256,
             "frame artifact changed"
         );
+        #[cfg(not(windows))]
         if let Some(route) = &a.weavelo {
             super::weavelo_worker::validate_lease(route, &artifact.binding).await?;
             ensure!(

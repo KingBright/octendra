@@ -1,6 +1,7 @@
-//! Read-only authority and lifetime checks for a future window-scoped Windows backend.
+//! Read-only window inspection and explicit approved-window lifetime preparation.
 //! This module never injects input, activates windows, or captures another window.
 //! WGC pixels and UIA semantic operations must be verified before admission is enabled.
+use super::windows_session::WindowAuthority;
 use anyhow::{Context, Result, ensure};
 use std::{mem::size_of, ptr};
 use windows_sys::Win32::{
@@ -14,7 +15,8 @@ use windows_sys::Win32::{
         },
     },
     UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+        EnumWindows, GetPropW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, RemovePropW,
+        SetPropW,
     },
 };
 struct OwnedHandle(HANDLE);
@@ -106,9 +108,21 @@ fn geometry(window: HWND) -> Option<([u32; 2], [i32; 2])> {
         right: 0,
         bottom: 0,
     };
+    if unsafe { IsWindowVisible(window) == 0 || IsIconic(window) != 0 } {
+        return None;
+    }
+    // DWM bounds are physical pixels and exclude invisible resize borders.
+    // WGC must report exactly these dimensions before input can be admitted.
     if unsafe {
-        IsWindowVisible(window) == 0 || IsIconic(window) != 0 || GetWindowRect(window, &mut r) == 0
-    } {
+        windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+            windows::Win32::Foundation::HWND(window),
+            windows::Win32::Graphics::Dwm::DWMWA_EXTENDED_FRAME_BOUNDS,
+            (&mut r as *mut RECT).cast(),
+            size_of::<RECT>() as u32,
+        )
+    }
+    .is_err()
+    {
         return None;
     }
     let width = i64::from(r.right) - i64::from(r.left);
@@ -144,8 +158,40 @@ pub struct Target {
     window: HWND,
     created_100ns: u64,
     session: u32,
+    marker: Option<(Vec<u16>, usize)>,
 }
 impl Target {
+    pub fn bind_expected(expected: &WindowAuthority) -> Result<Self> {
+        ensure!(
+            super::windows_authority::current_sid()? == expected.owner_sid,
+            "target SID changed"
+        );
+        let mut target = Self::bind(expected.process_id, expected.window_id)?;
+        ensure!(
+            target.created_100ns == expected.process_created_100ns
+                && target.session == expected.session_id,
+            "target process/session changed"
+        );
+        ensure!(
+            expected.scope_key.starts_with("Octendra.Window.")
+                && expected.scope_key.len() <= 128
+                && expected
+                    .scope_key
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b".-".contains(&c))
+                && expected.scope_value > 0
+                && expected.scope_value <= usize::MAX as u64,
+            "window scope marker invalid"
+        );
+        let key: Vec<u16> = expected.scope_key.encode_utf16().chain(Some(0)).collect();
+        ensure!(
+            unsafe { GetPropW(target.window, key.as_ptr()) } as usize
+                == expected.scope_value as usize,
+            "window object replaced or authority revoked"
+        );
+        target.marker = Some((key, expected.scope_value as usize));
+        Ok(target)
+    }
     pub fn bind(pid: u32, window: u64) -> Result<Self> {
         ensure!(
             pid > 0 && window > 0 && window <= usize::MAX as u64,
@@ -174,12 +220,23 @@ impl Target {
             "target must belong to current session"
         );
         let created_100ns = creation(process.0)?;
+        ensure!(
+            super::windows_authority::input_desktop_available(),
+            "interactive input desktop unavailable"
+        );
+        let ours = super::windows_authority::integrity(unsafe { GetCurrentProcess() })?;
+        let theirs = super::windows_authority::integrity(process.0)?;
+        ensure!(
+            ours < 0x3000 && theirs <= ours,
+            "elevated/protected target is outside desktop authority"
+        );
         let target = Self {
             process,
             pid,
             window,
             created_100ns,
             session,
+            marker: None,
         };
         target
             .live_geometry()
@@ -187,7 +244,10 @@ impl Target {
         Ok(target)
     }
     pub fn live_geometry(&self) -> Option<([u32; 2], [i32; 2])> {
-        if unsafe { WaitForSingleObject(self.process.0, 0) } != WAIT_TIMEOUT
+        if self.marker.as_ref().is_some_and(
+            |(key, value)| unsafe { GetPropW(self.window, key.as_ptr()) } as usize != *value,
+        ) || !super::windows_authority::input_desktop_available()
+            || unsafe { WaitForSingleObject(self.process.0, 0) } != WAIT_TIMEOUT
             || creation(self.process.0).ok() != Some(self.created_100ns)
             || session(self.pid).ok() != Some(self.session)
         {
@@ -215,15 +275,58 @@ impl Target {
         geometry(self.window)
     }
 }
+/// Explicitly approved-window preparation only: lifetime metadata, never a device
+/// grant or desktop-launch authority. This is not called during Agent startup.
+pub fn prepare_authority(pid: u32, window: u64, path: &std::path::Path) -> Result<()> {
+    use std::io::Write;
+    let target = Target::bind(pid, window)?;
+    let scope_key = format!("Octendra.Window.{}", uuid::Uuid::new_v4());
+    // The UUID property name pins the object lifetime. A unit value avoids
+    // lossy UInt64 round-trips in JSON-based Windows provisioning clients.
+    let scope_value = 1u64;
+    let authority = WindowAuthority {
+        owner_sid: super::windows_authority::current_sid()?,
+        session_id: target.session,
+        process_id: pid,
+        process_created_100ns: target.created_100ns,
+        window_id: window,
+        scope_key: scope_key.clone(),
+        scope_value,
+    };
+    let key: Vec<u16> = scope_key.encode_utf16().chain(Some(0)).collect();
+    let mut file = super::windows_authority::create_private(path)?;
+    ensure!(
+        unsafe { GetPropW(target.window, key.as_ptr()) }.is_null(),
+        "window scope marker exists"
+    );
+    ensure!(
+        unsafe { SetPropW(target.window, key.as_ptr(), scope_value as usize as HANDLE) } != 0,
+        "window scope marker denied"
+    );
+    let result = (|| -> Result<()> {
+        file.write_all(&serde_json::to_vec_pretty(&authority)?)?;
+        file.sync_all()?;
+        Target::bind_expected(&authority)?;
+        Ok(())
+    })();
+    if result.is_err()
+        && unsafe { GetPropW(target.window, key.as_ptr()) } as usize == scope_value as usize
+    {
+        unsafe {
+            RemovePropW(target.window, key.as_ptr());
+        }
+    }
+    result
+}
 pub fn window_target(pid: u32, window: u64) -> Result<serde_json::Value> {
     let target = Target::bind(pid, window)?;
     let (size, position) = target.live_geometry().context("target window changed")?;
     Ok(serde_json::json!({
         "process_id":pid,"window_id":window,"process_created_100ns":target.created_100ns,
         "desktop_session_id":target.session,"logical_size":size,"logical_position":position,
-        "geometry_coordinate_space":"Win32 caller DPI context; WGC mapping must be verified",
+        "geometry_coordinate_space":"DWM physical pixels; WGC dimensions must match",
         "scope":"current_user_current_session_single_window",
-        "input_backend":"uia_semantic_pending","capture_backend":"wgc_window_pending",
+        "input_backend":"uia_standard_control_click_only","capture_backend":"wgc_window",
         "available":false,"noninterference_verified":false,
         "same_application_concurrency_supported":false
     }))

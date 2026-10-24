@@ -3,44 +3,17 @@
 //! Bounded gestures use the original GUI receipt; HID is explicitly translated.
 use anyhow::{Context, Result, ensure};
 use octendra_desktop_protocol::*;
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::path::PathBuf;
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     time::{Duration, Instant},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Source {
-    MainDisplay,
-    Display(u32),
-    Window(u32),
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Target {
-    pub peer_device_id: String,
-    pub source: Source,
-    pub connection_id: u32,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Route {
-    /// Explicit owner-approved remote key space; never inferred from the executor OS.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_platform: Option<InputPlatform>,
-    pub profile: PathBuf,
-    pub generation: String,
-    pub gui_executable_sha256: String,
-    pub target: Target,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InputPlatform {
-    Macos,
-}
+pub use super::weavelo_route::*;
 impl Route {
     pub fn desktop_id(&self) -> String {
         let source = match self.target.source {

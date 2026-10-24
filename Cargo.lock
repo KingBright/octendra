@@ -2368,6 +2368,299 @@ dependencies = [
 ]
 
 [[package]]
+name = "octendra-admin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "fs2",
+ "nix 0.30.1",
+ "octendra-admin-win32",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "octendra-admin-win32"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "octendra-api"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "octendra-core",
+ "octendra-db",
+ "octendra-domain",
+ "octendra-mcp",
+ "octendra-sync",
+ "octendra-vault",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tower",
+ "tower-http 0.7.0",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "octendra-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "octendra-api",
+ "octendra-connector",
+ "octendra-core",
+ "octendra-db",
+ "octendra-domain",
+ "octendra-mcp",
+ "octendra-vault",
+ "secrecy",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "octendra-code"
+version = "0.12.0"
+dependencies = [
+ "anyhow",
+ "argon2 0.5.3",
+ "axum",
+ "base64",
+ "cap-std",
+ "clap",
+ "core-graphics",
+ "diffy",
+ "foreign-types",
+ "fs2",
+ "futures-util",
+ "globset",
+ "ignore",
+ "nix 0.30.1",
+ "octendra-admin",
+ "octendra-desktop-protocol",
+ "octendra-token-output",
+ "portable-pty",
+ "regex",
+ "reqwest",
+ "rmcp",
+ "screencapturekit",
+ "security-framework",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "similar",
+ "sqlx",
+ "subtle",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "tree-sitter",
+ "tree-sitter-javascript",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
+ "url",
+ "uuid",
+ "windows",
+ "windows-sys 0.61.2",
+ "zeroize",
+]
+
+[[package]]
+name = "octendra-connector"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "md-5",
+ "octendra-core",
+ "octendra-db",
+ "octendra-domain",
+ "octendra-vault",
+ "openssh",
+ "openssh-sftp-client",
+ "reqwest",
+ "russh",
+ "russh-sftp",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "octendra-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "octendra-domain",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "octendra-db"
+version = "0.1.0"
+dependencies = [
+ "octendra-domain",
+ "postcard",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "uuid",
+ "zstd",
+]
+
+[[package]]
+name = "octendra-desktop-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "uuid",
+]
+
+[[package]]
+name = "octendra-domain"
+version = "0.1.0"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+ "time",
+ "uuid",
+]
+
+[[package]]
+name = "octendra-launcher"
+version = "0.1.0"
+
+[[package]]
+name = "octendra-mcp"
+version = "0.1.0"
+dependencies = [
+ "octendra-code",
+ "octendra-core",
+ "octendra-db",
+ "octendra-domain",
+ "octendra-sync",
+ "octendra-token-output",
+ "octendra-vault",
+ "reqwest",
+ "rmcp",
+ "schemars",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "time",
+ "tokio",
+ "tower",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "octendra-release"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "fs2",
+ "nix 0.30.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "octendra-sync"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chacha20poly1305",
+ "octendra-db",
+ "octendra-domain",
+ "octendra-vault",
+ "reqwest",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "octendra-token-output"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "octendra-vault"
+version = "0.1.0"
+dependencies = [
+ "argon2 0.5.3",
+ "base64",
+ "chacha20poly1305",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2998,298 +3291,6 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
-
-[[package]]
-name = "octendra-admin"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "fs2",
- "nix 0.30.1",
- "octendra-admin-win32",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "octendra-admin-win32"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "octendra-api"
-version = "0.1.0"
-dependencies = [
- "axum",
- "octendra-core",
- "octendra-db",
- "octendra-domain",
- "octendra-mcp",
- "octendra-sync",
- "octendra-vault",
- "secrecy",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 2.0.18",
- "time",
- "tokio",
- "tower",
- "tower-http 0.7.0",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "octendra-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "octendra-api",
- "octendra-connector",
- "octendra-core",
- "octendra-db",
- "octendra-domain",
- "octendra-mcp",
- "octendra-vault",
- "secrecy",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "octendra-code"
-version = "0.12.0"
-dependencies = [
- "anyhow",
- "argon2 0.5.3",
- "axum",
- "base64",
- "cap-std",
- "clap",
- "core-graphics",
- "diffy",
- "foreign-types",
- "fs2",
- "futures-util",
- "globset",
- "ignore",
- "nix 0.30.1",
- "portable-pty",
- "regex",
- "octendra-admin",
- "octendra-desktop-protocol",
- "octendra-token-output",
- "reqwest",
- "rmcp",
- "screencapturekit",
- "security-framework",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "similar",
- "sqlx",
- "subtle",
- "tempfile",
- "tokio",
- "tokio-util",
- "tower",
- "tracing",
- "tracing-subscriber",
- "tree-sitter",
- "tree-sitter-javascript",
- "tree-sitter-python",
- "tree-sitter-rust",
- "tree-sitter-typescript",
- "url",
- "uuid",
- "windows-sys 0.61.2",
- "zeroize",
-]
-
-[[package]]
-name = "octendra-connector"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64",
- "md-5",
- "openssh",
- "openssh-sftp-client",
- "octendra-core",
- "octendra-db",
- "octendra-domain",
- "octendra-vault",
- "reqwest",
- "russh",
- "russh-sftp",
- "secrecy",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sqlx",
- "tempfile",
- "thiserror 2.0.18",
- "time",
- "tokio",
- "tracing",
- "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "octendra-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "regex",
- "octendra-domain",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "time",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "octendra-db"
-version = "0.1.0"
-dependencies = [
- "postcard",
- "octendra-domain",
- "serde",
- "serde_json",
- "sqlx",
- "tempfile",
- "thiserror 2.0.18",
- "time",
- "tokio",
- "uuid",
- "zstd",
-]
-
-[[package]]
-name = "octendra-desktop-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "uuid",
-]
-
-[[package]]
-name = "octendra-domain"
-version = "0.1.0"
-dependencies = [
- "schemars",
- "serde",
- "serde_json",
- "time",
- "uuid",
-]
-
-[[package]]
-name = "octendra-launcher"
-version = "0.1.0"
-
-[[package]]
-name = "octendra-mcp"
-version = "0.1.0"
-dependencies = [
- "octendra-code",
- "octendra-core",
- "octendra-db",
- "octendra-domain",
- "octendra-sync",
- "octendra-token-output",
- "octendra-vault",
- "reqwest",
- "rmcp",
- "schemars",
- "secrecy",
- "serde",
- "serde_json",
- "sqlx",
- "tempfile",
- "time",
- "tokio",
- "tower",
- "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "octendra-release"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "fs2",
- "nix 0.30.1",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "octendra-sync"
-version = "0.1.0"
-dependencies = [
- "base64",
- "chacha20poly1305",
- "octendra-db",
- "octendra-domain",
- "octendra-vault",
- "reqwest",
- "secrecy",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.18",
- "time",
- "tokio",
- "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "octendra-token-output"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "octendra-vault"
-version = "0.1.0"
-dependencies = [
- "argon2 0.5.3",
- "base64",
- "chacha20poly1305",
- "secrecy",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "uuid",
- "zeroize",
-]
 
 [[package]]
 name = "reqwest"

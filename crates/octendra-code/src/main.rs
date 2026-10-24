@@ -148,6 +148,23 @@ async fn main() -> Result<()> {
     #[cfg(windows)]
     {
         let args: Vec<_> = std::env::args().collect();
+        if args.get(1).is_some_and(|v| v == "--approval") {
+            ensure!(args.len() == 3, "worker requires one private approval path");
+            return octendra_code::computer_use::windows_worker::run(std::path::Path::new(
+                &args[2],
+            ));
+        }
+        if args.get(1).is_some_and(|v| v == "desktop-window-authority") {
+            ensure!(
+                args.len() == 5,
+                "approved window preparation requires PID, HWND and private output file"
+            );
+            return octendra_code::computer_use::windows_target::prepare_authority(
+                args[2].parse()?,
+                args[3].parse()?,
+                std::path::Path::new(&args[4]),
+            );
+        }
         if args.get(1).is_some_and(|v| v == "desktop-window-target") {
             ensure!(args.len() == 4, "window target requires PID and window ID");
             let target = octendra_code::computer_use::windows_target::window_target(
