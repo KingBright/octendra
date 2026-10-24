@@ -1655,6 +1655,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "octendra-desktop-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "uuid",
+]
+
+[[package]]
+name = "octendra-desktop-worker"
+version = "0.1.2"
+dependencies = [
+ "anyhow",
+ "fs2",
+ "host",
+ "nix",
+ "octendra-desktop-protocol",
+ "protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1991,32 +2017,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
-name = "octendra-desktop-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "uuid",
-]
-
-[[package]]
-name = "octendra-desktop-worker"
-version = "0.1.2"
-dependencies = [
- "anyhow",
- "fs2",
- "host",
- "nix",
- "protocol",
- "octendra-desktop-protocol",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "remote_core"
 version = "2.0.0-alpha.6"
 dependencies = [
@@ -2037,7 +2037,9 @@ dependencies = [
  "sha2",
  "socket2",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

@@ -41,3 +41,21 @@ The current desktop_worker catalog retains its existing desktop consent
 metadata. This implementation does not rewrite account/device scopes or claim
 that a code-only connection can observe a screen. No production desktop approval
 or persistent Portal permission is installed by source verification or packaging.
+
+## Independent worker build
+
+`scripts/build-linux-desktop-worker.py` builds only the standalone worker and its
+unit executable from primary main, using the existing `~/rust-target`. It accepts
+an existing signed Debian trixie amd64 development SDK and its independently
+pinned manifest SHA-256. Its GNU target preserves the deployed worker ABI
+(`libpipewire-0.3.so.0`); the glibc floor is 2.41. The Agent/CLI musl release is a
+separate component and is not rebuilt by this entry.
+
+The command requires `--rp-root`, `--sdk-manifest`, `--sdk-sha256`, and a new
+`--report`. Observe that same report using `--status`; never start another request
+to check progress. The existing project lease and public current transaction own
+`dist/octendra-linux-desktop-worker-current` and its current bundle. No alternate
+source checkout or Cargo target directory is created. The bundle contains the
+worker, a disabled approval example, the uninstalled desktop-entry template,
+checksums and the source/build manifest. Linux tests are cross-compiled; target
+execution and actual Portal selection are reported separately.
