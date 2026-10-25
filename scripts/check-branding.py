@@ -34,6 +34,10 @@ LOCAL_EVIDENCE = (".integration-artifacts/", ".rust-storage/")
 # Exact reviewed lines only: the fresh installer's rejected namespace set and
 # an immutable-byte legacy fixture. No presentation, file or substring exemption.
 LEGACY_NAMESPACE_GUARDS = {
+    # Existing Android v1 decryption aliases are compatibility data, not UI.
+    # Exact line hashes preserve those bytes; any edited line still fails.
+    'android/app/src/main/java/fun/hackerlife/octendra/ConfigCipher.kt': {'118210fe8b14ce23c2c2ff6af7b02f9d9189c5a4391a3dbee1d8f7b98637bbb4'},
+    'android/app/src/test/java/fun/hackerlife/octendra/ConfigCipherTest.kt': {'3ae579875067a11e51b7a93eee85ea1cecfd20481e02b3410efc6dd59dfa59ce'},
     'crates/octendra-code/src/upgrade_identity.rs': {'9a02c6bd0f58d8e440126822f548fa6aac55b4a575f19944fc2c46d6b47490b2', '0c01784a44bb2561ab3db4a97d55cfed1e81aa672c1a4b4a6f152e3d113e6c84'},
     'scripts/upgrade_instance.py': {'9597b526a97a023f26171fce7c0c0c916da13c8f56fb625b453e2931bd375c50'},
     'scripts/parallel-install.py': {'78326bf9f9da3fb3988ac1d292423767ae981357aeb9761bb7414d2be9e3373a'},

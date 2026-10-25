@@ -9,11 +9,14 @@ import os
 from pathlib import Path, PureWindowsPath
 import plistlib
 import socket
+import stat
 import shlex
+import shutil
 import subprocess
 import tempfile
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 import xml.etree.ElementTree as ET
 
 SCRIPT = Path(__file__).resolve().parents[1]/'parallel-install.py'
@@ -52,6 +55,213 @@ class ParallelInstallTests(unittest.TestCase):
         self.check = mock.patch.object(install,'checked',return_value='');self.checked=self.check.start();self.addCleanup(self.check.stop)
         self.service = self.base/'units/octendra-agent.service';self.service.parent.mkdir()
         self.target = mock.patch.object(install,'service_target',return_value=self.service);self.target.start();self.addCleanup(self.target.stop)
+        self.boundary = mock.patch.object(install, 'linux_unit_parent',
+                                          return_value=contextlib.nullcontext(None))
+        self.boundary.start();self.addCleanup(self.boundary.stop)
+
+    def real_linux_boundary(self, alias=True):
+        """Real path derivation/FD writes; synthetic root ownership needs no sudo."""
+        import pwd
+        self.target.stop();self.boundary.stop()
+        system = self.base/'os'; system.mkdir()
+        alias_path = system/'home'; canonical = system/'var/home'
+        canonical.mkdir(parents=True)
+        if alias:
+            alias_path.symlink_to('var/home', target_is_directory=True)
+            home = canonical/'fixture'
+        else:
+            alias_path.mkdir();home = alias_path/'fixture'
+        home.mkdir(mode=0o700)
+        self.service = home/'.config/systemd/user/octendra-agent.service'
+        self.service.parent.mkdir(parents=True)
+        self.home = home;self.home_alias = alias_path;self.system_home = canonical
+        self.account_home = alias_path/'fixture'
+        self.metadata_overrides = {}
+        original_lstat = Path.lstat; original_fstat = os.fstat
+        prefixes = set(home.parents)
+        directories = prefixes | {home, home/'.config', home/'.config/systemd', self.service.parent}
+        inode_paths = {(original_lstat(p).st_dev, original_lstat(p).st_ino):p
+                       for p in directories}
+
+        def metadata(path, info):
+            values = {name:getattr(info,name) for name in dir(info) if name.startswith('st_')}
+            if path in prefixes:
+                values.update(st_uid=0, st_mode=stat.S_IFDIR | 0o755)
+            if path == alias_path and alias:
+                values.update(st_uid=0)
+            values.update(self.metadata_overrides.get(path, {}))
+            return SimpleNamespace(**values)
+
+        def lstat(path):
+            return metadata(path, original_lstat(path))
+
+        def fstat(fd):
+            info = original_fstat(fd)
+            return metadata(inode_paths.get((info.st_dev,info.st_ino)), info)
+
+        patches = [mock.patch.object(install,'LINUX_HOME_ALIAS',alias_path),
+                   mock.patch.object(install,'LINUX_CANONICAL_HOME',canonical),
+                   mock.patch.object(pwd,'getpwuid',return_value=SimpleNamespace(pw_dir=str(self.account_home))),
+                   mock.patch.dict(os.environ, {'HOME':str(self.account_home),'XDG_CONFIG_HOME':''}),
+                   mock.patch.object(Path,'lstat',lstat),mock.patch.object(os,'fstat',fstat)]
+        for patch in patches:
+            patch.start();self.addCleanup(patch.stop)
+
+    def test_bazzite_real_home_derivation_plan_stage_activate_and_binding(self):
+        self.real_linux_boundary()
+        before = self.snapshot(self.root);home_env = os.environ['HOME']
+        p = install.plan(self.args)
+        self.assertEqual(p['destination'],self.service)
+        self.assertEqual(before,self.snapshot(self.root))
+        install.stage(p)
+        identity = json.loads((self.root/'bin/upgrade-identity.json').read_text())
+        self.assertEqual(identity['definition'],str(self.service))
+        self.args.action='activate';p=install.plan(self.args);install.activate(p)
+        self.assertEqual(self.service.read_bytes(),p['definition'])
+        self.assertEqual(self.service.read_text().splitlines().count('NoNewPrivileges=true'),1)
+        self.assertEqual(os.environ['HOME'],home_env)
+        self.assertIn(mock.call(['systemctl','--user','start','octendra-agent.service']),self.checked.call_args_list)
+
+    def test_linux_physical_home_and_canonical_home_environment(self):
+        self.real_linux_boundary(alias=False)
+        self.assertEqual(install.plan(self.args)['destination'],self.service)
+        os.environ.pop('HOME')
+        self.assertEqual(install.service_target('linux','agent','octendra-agent.service'),self.service)
+
+    def test_linux_canonical_environment_and_same_xdg_directory_are_accepted(self):
+        self.real_linux_boundary()
+        os.environ['HOME']=str(self.home)
+        os.environ['XDG_CONFIG_HOME']=str(self.account_home/'.config')
+        self.assertEqual(install.plan(self.args)['destination'],self.service)
+
+    def test_linux_absolute_system_alias_target_is_verified(self):
+        self.real_linux_boundary()
+        self.home_alias.unlink();self.home_alias.symlink_to(self.system_home,target_is_directory=True)
+        self.assertEqual(install.plan(self.args)['destination'],self.service)
+
+    def test_linux_canonical_account_home_accepts_verified_alias_environment(self):
+        import pwd
+        self.real_linux_boundary()
+        with mock.patch.object(pwd,'getpwuid',return_value=SimpleNamespace(pw_dir=str(self.home))):
+            self.assertEqual(install.plan(self.args)['destination'],self.service)
+
+    def test_linux_alias_wrong_owner_target_or_reparse_refuses_before_writes(self):
+        self.real_linux_boundary()
+        for changes in ({'st_uid':os.getuid()},{'st_file_attributes':0x400}):
+            with self.subTest(changes=changes):
+                self.metadata_overrides[self.home_alias]=changes
+                with self.assertRaises(install.Refusal):install.plan(self.args)
+        self.metadata_overrides.clear()
+        self.home_alias.unlink();self.home_alias.symlink_to('var/other',target_is_directory=True)
+        with self.assertRaisesRegex(install.Refusal,'untrusted'):install.plan(self.args)
+        self.assertFalse((self.root/'bin').exists());self.assertFalse(self.state.exists())
+
+    def test_linux_full_chain_foreign_owner_write_bits_or_reparse_refuse(self):
+        self.real_linux_boundary()
+        for path in [self.system_home,self.home,self.home/'.config',self.service.parent]:
+            for change in ({'st_uid':os.getuid()+1000},{'st_mode':stat.S_IFDIR|0o775},
+                           {'st_mode':stat.S_IFDIR|0o757},{'st_file_attributes':0x400}):
+                with self.subTest(path=path,change=change):
+                    self.metadata_overrides[path]=change
+                    install.probe_service.reset_mock()
+                    with self.assertRaises(install.Refusal):install.plan(self.args)
+                    install.probe_service.assert_not_called()
+                    self.metadata_overrides.clear()
+        self.assertFalse((self.root/'bin').exists())
+
+    def test_linux_home_and_user_directory_symlinks_remain_rejected(self):
+        self.real_linux_boundary()
+        for path in [self.home,self.home/'.config',self.home/'.config/systemd',self.service.parent]:
+            with self.subTest(path=path):
+                moved=path.with_name(path.name+'-moved');path.rename(moved)
+                path.symlink_to(moved,target_is_directory=True)
+                try:
+                    with self.assertRaises((install.Refusal,OSError)):install.plan(self.args)
+                finally:
+                    path.unlink();moved.rename(path)
+        self.service.symlink_to(self.base/'missing-unit')
+        with self.assertRaisesRegex(install.Refusal,'symlink'):install.plan(self.args)
+
+    def test_linux_unsearchable_or_unwritable_user_directories_refuse_in_plan(self):
+        self.real_linux_boundary()
+        for path,mode in [(self.home,0o600),(self.home/'.config',0o600),
+                          (self.service.parent,0o500)]:
+            with self.subTest(path=path,mode=mode):
+                self.metadata_overrides[path]={'st_mode':stat.S_IFDIR|mode}
+                with self.assertRaises(install.Refusal):install.plan(self.args)
+                self.metadata_overrides.clear()
+        self.assertFalse((self.root/'bin').exists());self.assertFalse(self.state.exists())
+
+    def test_linux_missing_or_nondirectory_unit_parent_refuses_in_plan(self):
+        self.real_linux_boundary()
+        parent=self.service.parent;parent.rmdir()
+        with self.assertRaises(OSError):install.plan(self.args)
+        parent.write_bytes(b'not a directory')
+        with self.assertRaises(OSError):install.plan(self.args)
+        self.assertFalse((self.root/'bin').exists())
+
+    def test_linux_fake_home_xdg_and_ambiguous_account_home_refuse(self):
+        self.real_linux_boundary()
+        for name,value in [('HOME',str(self.base)),('XDG_CONFIG_HOME',str(self.base)),
+                           ('HOME','../home'),('HOME',str(self.home/'../fixture'))]:
+            with self.subTest(name=name,value=value),mock.patch.dict(os.environ,{name:value}):
+                with self.assertRaises(install.Refusal):install.plan(self.args)
+        with mock.patch.object(install.os,'geteuid',return_value=os.getuid()+1):
+            with self.assertRaisesRegex(install.Refusal,'identity'):install.plan(self.args)
+        self.assertFalse((self.root/'bin').exists())
+
+    def test_linux_parent_replaced_after_plan_refuses_before_activation_request(self):
+        self.real_linux_boundary()
+        p=install.plan(self.args);install.stage(p);self.args.action='activate';p=install.plan(self.args)
+        moved=self.service.parent.with_name('original-user');self.service.parent.rename(moved)
+        self.service.parent.symlink_to(moved,target_is_directory=True)
+        with self.assertRaises((install.Refusal,OSError)):install.activate(p)
+        self.assertFalse((self.root/'activation-request.json').exists())
+        self.assertFalse(self.state.exists())
+        self.assertFalse(any('enable' in c.args[0] for c in self.checked.call_args_list))
+
+    def test_linux_parent_swap_during_write_never_follows_link_or_starts_service(self):
+        self.real_linux_boundary()
+        p=install.plan(self.args);install.stage(p);self.args.action='activate';p=install.plan(self.args)
+        original=install.exclusive;foreign=self.base/'foreign-unit-dir';foreign.mkdir()
+        moved=self.service.parent.with_name('original-user')
+        def racing_write(path,data,mode,**kwargs):
+            if path==self.service:
+                self.service.parent.rename(moved);self.service.parent.symlink_to(foreign,target_is_directory=True)
+            return original(path,data,mode,**kwargs)
+        with mock.patch.object(install,'exclusive',side_effect=racing_write):
+            with self.assertRaises(install.Refusal):install.activate(p)
+        self.assertFalse((foreign/self.service.name).exists())
+        self.assertTrue((moved/self.service.name).exists())
+        self.assertTrue((self.root/'activation-request.json').exists())
+        self.assertFalse(any('enable' in c.args[0] for c in self.checked.call_args_list))
+        with self.assertRaises((install.Refusal,OSError)):install.plan(self.args)
+
+    def test_linux_alias_change_during_preparation_stops_service_commands(self):
+        self.real_linux_boundary()
+        p=install.plan(self.args);install.stage(p);self.args.action='activate';p=install.plan(self.args)
+        original=install.exclusive
+        def changed_alias(path,data,mode,**kwargs):
+            value=original(path,data,mode,**kwargs)
+            if path==self.service:
+                self.home_alias.unlink();self.home_alias.symlink_to('var/other',target_is_directory=True)
+            return value
+        with mock.patch.object(install,'exclusive',side_effect=changed_alias):
+            with self.assertRaises(install.Refusal):install.activate(p)
+        self.assertFalse(any('enable' in c.args[0] for c in self.checked.call_args_list))
+
+    def test_linux_existing_unit_race_still_exclusive_with_bound_parent(self):
+        self.real_linux_boundary()
+        p=install.plan(self.args);install.stage(p);self.args.action='activate';p=install.plan(self.args)
+        self.service.write_bytes(b'foreign service')
+        with self.assertRaises(FileExistsError):install.activate(p)
+        self.assertEqual(self.service.read_bytes(),b'foreign service')
+        self.assertFalse(any('enable' in c.args[0] for c in self.checked.call_args_list))
+
+    def test_linux_legitimate_mount_boundaries_are_checked_per_component(self):
+        self.real_linux_boundary()
+        self.metadata_overrides[self.system_home]={'st_dev':999999}
+        self.assertEqual(install.plan(self.args)['destination'],self.service)
 
     def save_config(self):
         self.config.write_text(json.dumps(self.cfg));self.config.chmod(0o600)
@@ -74,6 +284,34 @@ class ParallelInstallTests(unittest.TestCase):
         self.assertEqual(p['candidate'].read_text().splitlines().count('NoNewPrivileges=true'),1)
         self.assertNotIn('SYNTHETIC-TEST-ONLY',json.dumps(identity))
         self.assertFalse(self.state.exists())
+
+    def test_linux_private_umask_directive_and_macos_plist_key_remain_distinct(self):
+        for role in ('agent','gateway'):
+            self.args.service_user='fixture';self.args.service_group='fixture'
+            unit=install.definition('linux',role,'octendra-'+role+'.service',
+                                    Path('/usr/bin/true'),self.config,self.args).decode()
+            self.assertEqual(unit.splitlines().count('UMask=0077'),1)
+            self.assertNotIn('\nUmask=',unit)
+        plist=plistlib.loads(install.definition('macos','agent',install.MAC_ID,
+                                               Path('/usr/bin/true'),self.config,self.args))
+        self.assertEqual(plist['Umask'],0o077)
+
+    @unittest.skipUnless(shutil.which('systemd-analyze'), 'native systemd-analyze required')
+    def test_native_systemd_parser_accepts_umask_and_detects_the_old_unknown_key(self):
+        analyzer=shutil.which('systemd-analyze');binary=Path(shutil.which('true'))
+        valid=install.definition('linux','agent','umask-valid.service',binary,self.config,self.args)
+        invalid=valid.replace(b'\nUMask=0077\n',b'\nUmask=0077\n')
+        results=[]
+        for name,data in [('umask-valid.service',valid),('umask-invalid.service',invalid)]:
+            path=self.base/name;path.write_bytes(data)
+            result=subprocess.run([analyzer,'--user','--generators=no','--man=no','verify',str(path)],
+                                  env=dict(os.environ,LC_ALL='C',SYSTEMD_LOG_COLOR='0'),
+                                  capture_output=True,text=True,timeout=20)
+            results.append(result)
+        self.assertEqual(results[0].returncode,0,results[0].stderr)
+        self.assertNotRegex(results[0].stderr,r'Unknown (key|lvalue|section)')
+        # systemd may return zero for an unknown key: the warning must be checked.
+        self.assertRegex(results[1].stderr,r'Unknown (key|lvalue).*Umask')
 
     def test_activation_refuses_tampered_upgrade_binding(self):
         p=install.plan(self.args);install.stage(p)
@@ -419,6 +657,427 @@ class ParallelInstallTests(unittest.TestCase):
         self.assertEqual(verification, [['codesign', '--verify', '--strict', '-R',
             '=identifier "'+install.MAC_ID+'" and certificate leaf = H"'+'a'*40+'"', str(signed)]])
 
+    def repair_fixture(self):
+        self.real_linux_boundary()
+        self.root = self.home/'.local/share/octendra/agent'
+        (self.root/'config').mkdir(parents=True, mode=0o700)
+        self.state = self.root/'state'; self.config = self.root/'config/agent.json'
+        self.cfg['state_dir'] = str(self.state); self.save_config()
+        self.args.root=str(self.root);self.args.config=str(self.config);self.args.state_dir=str(self.state)
+        p=install.plan(self.args);install.stage(p)
+        self.args.action='activate';p=install.plan(self.args);install.activate(p)
+        old=p['definition'].replace(b'\nUMask=0077\n',b'\nUmask=0077\n')
+        self.service.write_bytes(old);(self.root/'service/octendra-agent.service').write_bytes(old)
+        identity_path=self.root/'bin/upgrade-identity.json'
+        identity=json.loads(identity_path.read_text());identity['definition_sha256']=install.sha_bytes(old)
+        identity_path.write_text(json.dumps(identity,indent=2)+'\n')
+        marker=self.root/'parallel-install.json';record=json.loads(marker.read_text())
+        record['definition_sha256']=install.sha_bytes(old);marker.write_text(json.dumps(record,indent=2)+'\n')
+        self.repair_history=marker.read_bytes()
+        self.repair_activation=(self.root/'activation-request.json').read_bytes()
+        helper=self.package/'parallel-install.py';helper.write_bytes(SCRIPT.read_bytes())
+        manifest=self.package/'manifest.json';data=json.loads(manifest.read_text())
+        data['artifacts']['parallel-install.py']={'sha256':install.digest(helper),'size':helper.stat().st_size}
+        manifest.write_text(json.dumps(data))
+        self.args.action='repair-umask';self.args.repair_mode='plan'
+        self.args.repair_request_id='873ea936-b6d8-45a3-bad2-958b6ba61f48'
+        self.args.expected_definition_sha256=install.sha_bytes(old)
+        self.args.expected_activation_sha256=install.sha_bytes(self.repair_activation)
+        self.args.expected_stage_sha256=install.sha_bytes(self.repair_history)
+        self.args.manifest_sha256=install.digest(manifest)
+        patch=mock.patch.object(install,'__file__',str(helper));patch.start();self.addCleanup(patch.stop)
+        producer=mock.patch.object(install,'repair_producer',return_value={'pid':4000000,'start_ticks':'1'})
+        producer.start();self.addCleanup(producer.stop)
+        self.real_producer_finished=install.repair_producer_finished
+        ended=mock.patch.object(install,'repair_producer_finished',return_value=True)
+        self.producer_finished=ended.start();self.addCleanup(ended.stop)
+        self.repair_service_fields=dict(LoadState='loaded',ActiveState='inactive',SubState='dead',
+            MainPID='0',ControlPID='0',Job='',FragmentPath=str(self.service),UMask='0022',NoNewPrivileges='yes')
+        def manager(argv):
+            if argv==['systemctl','--user','daemon-reload']:
+                self.repair_service_fields['UMask']='0077';return ''
+            if argv[:4]==['systemctl','--user','show','octendra-agent.service']:
+                return '\n'.join(k+'='+v for k,v in self.repair_service_fields.items())
+            raise AssertionError('unexpected manager action '+repr(argv))
+        self.checked.reset_mock();self.checked.side_effect=manager
+        return old,p['definition']
+
+    def repair_run(self,mode):
+        self.args.repair_mode=mode
+        return install.repair_umask(self.args)
+
+    def assert_repair_history(self):
+        self.assertEqual((self.root/'parallel-install.json').read_bytes(),self.repair_history)
+        self.assertEqual((self.root/'activation-request.json').read_bytes(),self.repair_activation)
+        self.assertEqual(self.repair_service_fields['MainPID'],'0')
+        actions=[c.args[0] for c in self.checked.call_args_list]
+        self.assertTrue(all(c[2] in ('show','daemon-reload') for c in actions))
+
+    def test_umask_repair_plan_observe_apply_and_readonly_repeat(self):
+        old,desired=self.repair_fixture();before=self.snapshot(self.root)
+        self.assertEqual(self.repair_run('plan')['state'],'repair_planned')
+        self.assertEqual(self.repair_run('observe')['state'],'repair_planned')
+        self.assertEqual(self.snapshot(self.root),before)
+        self.assertFalse(any(c.args[0][2]=='daemon-reload' for c in self.checked.call_args_list))
+        result=self.repair_run('apply');self.assertFalse(result['read_only'])
+        self.assertEqual(self.service.read_bytes(),desired)
+        self.assertEqual((self.root/'service/octendra-agent.service').read_bytes(),desired)
+        self.assertEqual(json.loads((self.root/'bin/upgrade-identity.json').read_text())['definition_sha256'],install.sha_bytes(desired))
+        after=self.snapshot(self.root)
+        for mode in ('plan','observe','apply','recover'):
+            self.assertTrue(self.repair_run(mode)['read_only'])
+        self.assertEqual(after,self.snapshot(self.root))
+        self.assertEqual([c.args[0][2] for c in self.checked.call_args_list].count('daemon-reload'),1)
+        self.assert_repair_history()
+
+    def test_umask_repair_completed_recognition_may_observe_later_active_service(self):
+        self.repair_fixture();self.repair_run('apply')
+        self.repair_service_fields.update(ActiveState='active',SubState='running',MainPID='12')
+        self.assertTrue(self.repair_run('apply')['read_only'])
+
+    def test_umask_repair_rejects_active_job_unknown_fragment_or_hardening(self):
+        self.repair_fixture();before=self.snapshot(self.root)
+        baseline=self.repair_service_fields.copy()
+        for changes in ({'ActiveState':'active'},{'SubState':'start-pre'},{'MainPID':'12'},
+                {'ControlPID':'12'},{'Job':'22'},{'LoadState':'not-found'},
+                {'FragmentPath':'/tmp/other.service'},{'UMask':'0000'},{'NoNewPrivileges':'no'}):
+            with self.subTest(changes=changes):
+                self.repair_service_fields=baseline|changes
+                with self.assertRaises(install.Refusal):self.repair_run('apply')
+                self.assertEqual(self.snapshot(self.root),before)
+
+    def test_umask_repair_rejects_wrong_external_anchors_or_request_id(self):
+        self.repair_fixture();before=self.snapshot(self.root)
+        for key,value in (('expected_definition_sha256','0'*64),('expected_activation_sha256','1'*64),
+                          ('expected_stage_sha256','3'*64),('manifest_sha256','2'*64),('repair_request_id','../other')):
+            with self.subTest(key=key):
+                with mock.patch.object(self.args,key,value):
+                    with self.assertRaises(install.Refusal):self.repair_run('apply')
+                self.assertEqual(self.snapshot(self.root),before)
+
+    def test_umask_repair_refuses_other_platform_role_root_and_paths(self):
+        self.repair_fixture()
+        for key,value in (('role','gateway'),('root',str(self.base/'octendra/other')),
+                          ('config',str(self.root/'config/other.json')),('state_dir',str(self.base/'octendra/state'))):
+            with mock.patch.object(self.args,key,value):
+                with self.assertRaises(install.Refusal):self.repair_run('apply')
+        with mock.patch.object(install,'host_platform',return_value='windows'):
+            with self.assertRaises(install.Refusal):self.repair_run('apply')
+
+    def test_umask_repair_refuses_unverified_or_changed_helper_and_package_binary(self):
+        self.repair_fixture();helper=Path(install.__file__);original=helper.read_bytes()
+        helper.write_bytes(original+b'\n# changed\n')
+        with self.assertRaises(install.Refusal):self.repair_run('apply')
+        helper.write_bytes(original)
+        with mock.patch.object(install,'__file__',str(SCRIPT)):
+            with self.assertRaises(install.Refusal):self.repair_run('apply')
+        manifest=self.package/'manifest.json';data=json.loads(manifest.read_text())
+        data['artifacts']['octendra-code-linux-amd64']['sha256']='a'*64
+        manifest.write_text(json.dumps(data));self.args.manifest_sha256=install.digest(manifest)
+        with self.assertRaises(install.Refusal):self.repair_run('apply')
+
+    def test_umask_repair_rejects_any_other_unit_edit_even_with_a_matching_external_hash(self):
+        old,_=self.repair_fixture()
+        changed=old.replace(b'NoNewPrivileges=true',b'NoNewPrivileges=false')
+        self.service.write_bytes(changed);self.args.expected_definition_sha256=install.sha_bytes(changed)
+        with self.assertRaisesRegex(install.Refusal,'only the exact'):self.repair_run('apply')
+
+    def test_umask_repair_rejects_modified_history_config_binary_identity_or_candidate(self):
+        self.repair_fixture()
+        paths=[self.root/'parallel-install.json',self.root/'activation-request.json',self.config,
+               self.root/'bin/octendra-code',self.root/'bin/upgrade-identity.json',
+               self.root/'service/octendra-agent.service',self.service]
+        for path in paths:
+            with self.subTest(path=path):
+                data=path.read_bytes();path.write_bytes(data+b' ')
+                with self.assertRaises((install.Refusal,ValueError)):self.repair_run('apply')
+                path.write_bytes(data)
+        self.assertFalse((self.root/install.REPAIR_FILES[0]).exists())
+
+    def test_umask_repair_rejects_symlink_hardlink_foreign_owner_and_unsafe_mode(self):
+        self.repair_fixture();unit=self.service;original=unit.read_bytes();mode=unit.stat().st_mode&0o777
+        foreign=self.base/'foreign-unit';foreign.write_bytes(original)
+        unit.unlink();unit.symlink_to(foreign)
+        with self.assertRaises(install.Refusal):self.repair_run('apply')
+        unit.unlink();os.link(foreign,unit)
+        with self.assertRaises(install.Refusal):self.repair_run('apply')
+        unit.unlink();unit.write_bytes(original);unit.chmod(mode)
+        for unsafe in (0o666,0o4644):
+            unit.chmod(unsafe)
+            with self.assertRaises(install.Refusal):self.repair_run('apply')
+        unit.chmod(mode)
+        self.metadata_overrides[unit]={'st_uid':os.getuid()+1}
+        # repair_read uses dir_fd stat, separately exercise owner rejection there.
+        real=os.stat
+        def other_owner(name,*a,**kw):
+            info=real(name,*a,**kw)
+            if name==unit.name:
+                values={n:getattr(info,n) for n in dir(info) if n.startswith('st_')}
+                return SimpleNamespace(**(values|{'st_uid':os.getuid()+1}))
+            return info
+        with mock.patch.object(os,'stat',side_effect=other_owner):
+            with self.assertRaises(install.Refusal):self.repair_run('apply')
+        self.assertEqual(foreign.read_bytes(),original)
+
+    def test_umask_repair_rejects_root_directory_replacement_and_user_symlink(self):
+        self.repair_fixture();directory=self.root/'service';moved=self.root/'service-original'
+        directory.rename(moved);directory.symlink_to(moved,target_is_directory=True)
+        with self.assertRaises((install.Refusal,OSError)):self.repair_run('apply')
+        self.assertFalse((self.root/install.REPAIR_FILES[0]).exists())
+
+    def test_umask_repair_existing_upgrade_directory_is_protected_even_empty_or_link(self):
+        self.repair_fixture();releases=self.root/'bin/releases';releases.mkdir()
+        with self.assertRaisesRegex(install.Refusal,'upgrade activity'):self.repair_run('apply')
+        releases.rmdir();releases.symlink_to(self.base,target_is_directory=True)
+        with self.assertRaisesRegex(install.Refusal,'upgrade activity'):self.repair_run('apply')
+
+    def test_umask_repair_concurrent_controller_lock_refuses_before_request(self):
+        import fcntl
+        self.repair_fixture()
+        with (self.root/'parallel-install.json').open('rb') as stream:
+            fcntl.flock(stream,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            with self.assertRaisesRegex(install.Refusal,'another.*active'):self.repair_run('apply')
+        self.assertFalse((self.root/install.REPAIR_FILES[0]).exists())
+
+    def interrupted_repair_case(self, interrupted):
+        _,desired=self.repair_fixture();real=install.repair_replace;calls=[]
+        def interrupted_replace(*a,**kw):
+            if len(calls)==interrupted:raise RuntimeError('simulated producer interruption')
+            calls.append(1);return real(*a,**kw)
+        if interrupted==3:
+            def before_reload(argv):
+                if argv[:3]==['systemctl','--user','show'] and self.service.read_bytes()==desired and len(calls)==3:
+                    raise RuntimeError('simulated producer interruption')
+                return '\n'.join(k+'='+v for k,v in self.repair_service_fields.items())
+            self.checked.side_effect=before_reload
+        with mock.patch.object(install,'repair_replace',side_effect=interrupted_replace):
+            with self.assertRaises(RuntimeError):self.repair_run('apply')
+        def manager(argv):
+            if argv==['systemctl','--user','daemon-reload']:
+                self.repair_service_fields['UMask']='0077';return ''
+            return '\n'.join(k+'='+v for k,v in self.repair_service_fields.items())
+        self.checked.side_effect=manager
+        pending=self.snapshot(self.root)
+        with self.assertRaisesRegex(install.Refusal,'never replay apply'):self.repair_run('apply')
+        self.assertEqual(pending,self.snapshot(self.root))
+        self.assertEqual(self.repair_run('observe')['state'],'repair_pending_recovery')
+        self.assertEqual(self.repair_run('recover')['state'],'repair_complete')
+        self.assertEqual(self.service.read_bytes(),desired);self.assert_repair_history()
+
+    def test_umask_repair_interrupt_before_first_replace(self):self.interrupted_repair_case(0)
+    def test_umask_repair_interrupt_after_unit_replace(self):self.interrupted_repair_case(1)
+    def test_umask_repair_interrupt_after_candidate_replace(self):self.interrupted_repair_case(2)
+    def test_umask_repair_interrupt_after_identity_replace(self):self.interrupted_repair_case(3)
+
+    def test_umask_repair_unknown_reload_not_replayed_then_observed_success(self):
+        self.repair_fixture()
+        def unknown(argv):
+            if argv==['systemctl','--user','daemon-reload']:raise subprocess.TimeoutExpired(argv,30)
+            return '\n'.join(k+'='+v for k,v in self.repair_service_fields.items())
+        self.checked.side_effect=unknown
+        with self.assertRaises(subprocess.TimeoutExpired):self.repair_run('apply')
+        self.checked.reset_mock()
+        with self.assertRaisesRegex(install.Refusal,'unknown or ineffective'):self.repair_run('recover')
+        self.assertFalse(any(c.args[0][2]=='daemon-reload' for c in self.checked.call_args_list))
+        self.repair_service_fields['UMask']='0077'
+        self.assertEqual(self.repair_run('recover')['state'],'repair_complete')
+        self.assertFalse(any(c.args[0][2]=='daemon-reload' for c in self.checked.call_args_list))
+        self.assert_repair_history()
+
+    def test_umask_repair_live_original_producer_cannot_recover(self):
+        self.repair_fixture()
+        with mock.patch.object(install,'repair_replace',side_effect=RuntimeError('interrupted')):
+            with self.assertRaises(RuntimeError):self.repair_run('apply')
+        self.producer_finished.return_value=False
+        with self.assertRaisesRegex(install.Refusal,'terminated original'):self.repair_run('recover')
+
+    def test_umask_repair_foreign_changes_after_interrupt_are_never_overwritten(self):
+        self.repair_fixture()
+        with mock.patch.object(install,'repair_replace',side_effect=RuntimeError('interrupted')):
+            with self.assertRaises(RuntimeError):self.repair_run('apply')
+        self.service.write_bytes(b'foreign change')
+        with self.assertRaises(install.Refusal):self.repair_run('recover')
+        self.assertEqual(self.service.read_bytes(),b'foreign change')
+        self.assertFalse((self.root/install.REPAIR_FILES[2]).exists())
+
+    def test_umask_repair_changed_config_during_write_refuses_before_next_file(self):
+        self.repair_fixture();real=install.repair_replace;calls=[]
+        def changed(*a,**kw):
+            real(*a,**kw);calls.append(1);self.config.write_bytes(self.config.read_bytes()+b' ')
+        with mock.patch.object(install,'repair_replace',side_effect=changed):
+            with self.assertRaisesRegex(install.Refusal,'immutable repair inputs changed'):self.repair_run('apply')
+        self.assertEqual(len(calls),1)
+        self.assertFalse(any(c.args[0][2]=='daemon-reload' for c in self.checked.call_args_list))
+
+    def test_umask_repair_same_bytes_temporary_can_be_recovered_but_foreign_temp_refuses(self):
+        _,desired=self.repair_fixture();real=install.os.replace
+        def interrupted(*a,**kw):raise RuntimeError('before atomic replace')
+        with mock.patch.object(install.os,'replace',side_effect=interrupted):
+            with self.assertRaises(RuntimeError):self.repair_run('apply')
+        temp=self.service.with_name('.'+self.service.name+'.umask-'+self.args.repair_request_id+'.tmp')
+        self.assertEqual(temp.read_bytes(),desired)
+        temp.write_bytes(b'foreign temp')
+        with self.assertRaisesRegex(install.Refusal,'temporary differs'):self.repair_run('recover')
+        self.assertEqual(temp.read_bytes(),b'foreign temp')
+        temp.write_bytes(desired)
+        self.assertEqual(self.repair_run('recover')['state'],'repair_complete')
+
+    def test_umask_repair_corrupt_request_reload_or_result_stops_without_replay(self):
+        self.repair_fixture()
+        for name in install.REPAIR_FILES:
+            path=self.root/name;path.write_bytes(b'{');path.chmod(0o600)
+            with self.assertRaises((ValueError,install.Refusal)):self.repair_run('apply')
+            path.unlink()
+        self.assertFalse(any(c.args[0][2]=='daemon-reload' for c in self.checked.call_args_list))
+
+    def test_umask_repair_foreign_request_uuid_refuses_own_partial_transaction(self):
+        self.repair_fixture()
+        with mock.patch.object(install,'repair_replace',side_effect=RuntimeError('interrupted')):
+            with self.assertRaises(RuntimeError):self.repair_run('apply')
+        self.args.repair_request_id='16bd34af-f708-41b2-9e67-6cf815cd8de5'
+        with self.assertRaisesRegex(install.Refusal,'original immutable transaction'):self.repair_run('recover')
+
+    def test_umask_repair_systemd_fragment_uses_only_the_verified_system_home_alias(self):
+        self.repair_fixture()
+        self.repair_service_fields['FragmentPath']=str(self.account_home/'.config/systemd/user/octendra-agent.service')
+        self.assertEqual(self.repair_run('apply')['state'],'repair_complete')
+
+    def test_umask_repair_systemd_fragment_user_symlink_is_refused(self):
+        self.repair_fixture();alias=self.home/'user-config'
+        alias.symlink_to(self.home/'.config',target_is_directory=True)
+        self.repair_service_fields['FragmentPath']=str(alias/'systemd/user/octendra-agent.service')
+        with self.assertRaises(install.Refusal):self.repair_run('apply')
+
+    def test_umask_repair_linux_opath_unit_descriptor_is_not_used_for_fsync(self):
+        self.repair_fixture();real_boundary=install.linux_unit_parent;real_fsync=os.fsync;bound=[]
+        @contextlib.contextmanager
+        def boundary(path):
+            with real_boundary(path) as fd:
+                bound.append(fd);yield fd
+        def fsync(fd):
+            if fd in bound:raise OSError('simulate Linux O_PATH descriptor fsync refusal')
+            return real_fsync(fd)
+        with mock.patch.object(install,'linux_unit_parent',boundary), mock.patch.object(os,'fsync',side_effect=fsync):
+            self.assertEqual(self.repair_run('apply')['state'],'repair_complete')
+
+    def test_umask_repair_cas_refuses_foreign_replacement_after_temp_write(self):
+        self.repair_fixture();real=install.exclusive;changed=b'foreign concurrent unit'
+        def replace_target(path,data,mode,**kw):
+            real(path,data,mode,**kw)
+            if path.name.startswith('.'+self.service.name+'.umask-'):
+                self.service.write_bytes(changed)
+        with mock.patch.object(install,'exclusive',side_effect=replace_target):
+            with self.assertRaisesRegex(install.Refusal,'changed before replacement'):self.repair_run('apply')
+        self.assertEqual(self.service.read_bytes(),changed)
+        self.assertFalse(any(c.args[0][2]=='daemon-reload' for c in self.checked.call_args_list))
+
+    def test_umask_repair_cas_refuses_same_bytes_new_inode_after_temp_write(self):
+        self.repair_fixture();real=install.exclusive
+        def replace_inode(path,data,mode,**kw):
+            real(path,data,mode,**kw)
+            if path.name.startswith('.'+self.service.name+'.umask-'):
+                previous=self.service.read_bytes();self.service.unlink();self.service.write_bytes(previous);self.service.chmod(0o644)
+        with mock.patch.object(install,'exclusive',side_effect=replace_inode):
+            with self.assertRaisesRegex(install.Refusal,'changed before replacement'):self.repair_run('apply')
+
+    def test_umask_repair_directory_changed_during_write_stops_before_next_write(self):
+        self.repair_fixture();real=install.repair_replace;old=self.root/'service'
+        def changed(*a,**kw):
+            real(*a,**kw);old.rename(self.root/'service-original');old.mkdir(mode=0o700)
+        with mock.patch.object(install,'repair_replace',side_effect=changed):
+            with self.assertRaisesRegex(install.Refusal,'directory changed'):self.repair_run('apply')
+        self.assertFalse(any(c.args[0][2]=='daemon-reload' for c in self.checked.call_args_list))
+
+    def test_umask_repair_service_start_during_transaction_stops_before_next_write(self):
+        self.repair_fixture();real=install.repair_replace;calls=[]
+        def changed(*a,**kw):
+            real(*a,**kw);calls.append(1)
+            self.repair_service_fields.update(ActiveState='active',SubState='running',MainPID='99')
+        with mock.patch.object(install,'repair_replace',side_effect=changed):
+            with self.assertRaisesRegex(install.Refusal,'requires.*inactive'):self.repair_run('apply')
+        self.assertEqual(len(calls),1)
+        self.assertFalse(any(c.args[0][2]=='daemon-reload' for c in self.checked.call_args_list))
+
+    def test_umask_repair_partial_json_request_is_preserved_and_never_replayed(self):
+        self.repair_fixture();path=self.root/install.REPAIR_FILES[0]
+        for data in (b'{',b'null',b'[]',b'{}'):
+            path.write_bytes(data);path.chmod(0o600)
+            for mode in ('plan','observe','apply','recover'):
+                with self.assertRaises((install.Refusal,ValueError)):self.repair_run(mode)
+                self.assertEqual(path.read_bytes(),data)
+            path.unlink()
+
+    def test_umask_repair_completed_binding_drift_refuses_readonly_repeat(self):
+        self.repair_fixture();self.repair_run('apply');self.checked.reset_mock()
+        self.service.write_bytes(b'foreign after completed')
+        with self.assertRaises(install.Refusal):self.repair_run('apply')
+        self.assertFalse(any(c.args[0][2]=='daemon-reload' for c in self.checked.call_args_list))
+
+    def test_umask_repair_process_identity_reuse_alive_absent_and_invalid(self):
+        self.repair_fixture()
+        # Test the real function rather than the interruption fixture override.
+        process_stat='123 (name with ) parentheses) '+' '.join(['S']+['0']*18+['44'])
+        with mock.patch.object(Path,'read_text',return_value=process_stat):
+            function=self.real_producer_finished
+            self.assertFalse(function({'pid':123,'start_ticks':'44'}))
+            self.assertTrue(function({'pid':123,'start_ticks':'43'}))
+        with mock.patch.object(Path,'read_text',side_effect=FileNotFoundError):
+            self.assertTrue(function({'pid':123,'start_ticks':'44'}))
+        for invalid in (None,{}, {'pid':True,'start_ticks':'1'},{'pid':1,'start_ticks':'1'},
+                        {'pid':123,'start_ticks':44},{'pid':123,'start_ticks':'bad'}):
+            with self.assertRaises(install.Refusal):function(invalid)
+
+    def test_umask_repair_corrupt_reload_on_partial_request_refuses_before_more_writes(self):
+        self.repair_fixture()
+        with mock.patch.object(install,'repair_replace',side_effect=RuntimeError('interrupted')):
+            with self.assertRaises(RuntimeError):self.repair_run('apply')
+        reload=self.root/install.REPAIR_FILES[1];reload.write_bytes(b'null');reload.chmod(0o600)
+        before=self.snapshot(self.root)
+        with self.assertRaises(install.Refusal):self.repair_run('recover')
+        self.assertEqual(before,self.snapshot(self.root))
+
+    def test_umask_repair_completed_reload_evidence_cannot_be_removed(self):
+        self.repair_fixture();self.repair_run('apply')
+        (self.root/install.REPAIR_FILES[1]).unlink()
+        with self.assertRaises(install.Refusal):self.repair_run('observe')
+
+    def test_umask_repair_restrictive_process_umask_preserves_exact_existing_file_modes(self):
+        self.repair_fixture();previous=os.umask(0o077)
+        try:self.assertEqual(self.repair_run('apply')['state'],'repair_complete')
+        finally:os.umask(previous)
+        self.assertEqual(stat.S_IMODE(self.service.stat().st_mode),0o644)
+        self.assertEqual(stat.S_IMODE((self.root/'bin/upgrade-identity.json').stat().st_mode),0o644)
+        for name in install.REPAIR_FILES:
+            self.assertEqual(stat.S_IMODE((self.root/name).stat().st_mode),0o600)
+
+    def test_umask_repair_preserves_real_installer_private_0700_0600_modes(self):
+        self.repair_fixture()
+        paths={self.root/'bin/octendra-code':0o700,self.root/'bin/upgrade-identity.json':0o600,
+               self.root/'service/octendra-agent.service':0o600,self.service:0o600}
+        for path,mode in paths.items():path.chmod(mode)
+        self.assertEqual(self.repair_run('plan')['state'],'repair_planned')
+        self.assertEqual(self.repair_run('apply')['state'],'repair_complete')
+        for path,mode in paths.items():self.assertEqual(stat.S_IMODE(path.stat().st_mode),mode)
+        self.assertTrue(self.repair_run('apply')['read_only']);self.assert_repair_history()
+
+    def test_umask_repair_private_modes_are_pinned_across_interruption(self):
+        self.repair_fixture();self.service.chmod(0o600);(self.root/'bin/octendra-code').chmod(0o700)
+        (self.root/'bin/upgrade-identity.json').chmod(0o600)
+        with mock.patch.object(install,'repair_replace',side_effect=RuntimeError('interrupted')):
+            with self.assertRaises(RuntimeError):self.repair_run('apply')
+        before=self.snapshot(self.root);self.service.chmod(0o644)
+        with self.assertRaisesRegex(install.Refusal,'original immutable transaction'):self.repair_run('recover')
+        self.service.chmod(0o600)
+        self.assertEqual(self.repair_run('recover')['state'],'repair_complete')
+        self.assertEqual(stat.S_IMODE(self.service.stat().st_mode),0o600)
+
+    def test_umask_repair_refuses_loss_of_binary_execute_or_other_mode_expansion(self):
+        self.repair_fixture();binary=self.root/'bin/octendra-code'
+        for mode in (0o600,0o777,0o775,0o4755):
+            binary.chmod(mode)
+            with self.assertRaises(install.Refusal):self.repair_run('apply')
+        self.assertFalse((self.root/install.REPAIR_FILES[0]).exists())
+
     def test_brand_guard_exempts_only_exact_rejected_namespace_line(self):
         s=importlib.util.spec_from_file_location('brand_guard_fixture',SCRIPT.with_name('check-branding.py'))
         guard=importlib.util.module_from_spec(s);s.loader.exec_module(guard)
@@ -429,6 +1088,20 @@ class ParallelInstallTests(unittest.TestCase):
             target.write_text(approved+' # modified\n');self.assertFalse(guard.inspect(self.base)['passed'])
             old_name=next(x for x in install.BLOCKED_COMPONENTS if x!='octendra-code')
             target.write_text('title = '+repr(old_name)+'\n');self.assertFalse(guard.inspect(self.base)['passed'])
+
+    def test_brand_guard_preserves_only_exact_android_v1_decryption_alias_lines(self):
+        spec=importlib.util.spec_from_file_location('android_cipher_brand_guard_fixture',SCRIPT.with_name('check-branding.py'))
+        guard=importlib.util.module_from_spec(spec);spec.loader.exec_module(guard)
+        for name,line in (('android/app/src/main/java/fun/hackerlife/octendra/ConfigCipher.kt',11),
+                          ('android/app/src/test/java/fun/hackerlife/octendra/ConfigCipherTest.kt',25)):
+            approved=(SCRIPT.parents[1]/name).read_text().splitlines()[line-1]
+            target=self.base/name;target.parent.mkdir(parents=True,exist_ok=True)
+            with mock.patch.object(guard,'inventory',return_value=[name]):
+                target.write_text(approved+'\n');self.assertTrue(guard.inspect(self.base)['passed'])
+                target.write_text(approved+' // changed\n');self.assertFalse(guard.inspect(self.base)['passed'])
+            other='android/Other.kt';other_target=self.base/other;other_target.write_text(approved+'\n')
+            with mock.patch.object(guard,'inventory',return_value=[other]):
+                self.assertFalse(guard.inspect(self.base)['passed'])
 
     def test_new_proxy_template_preserves_scope_and_routes_upgrade_apis(self):
         text=(SCRIPT.parents[1]/'docs/parallel-octendra/new-host.caddy.in').read_text()
