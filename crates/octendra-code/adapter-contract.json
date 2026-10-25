@@ -1,8 +1,8 @@
 {
-  "adapter_tools_sha256": "5cbe934502e807699202473d9a0336d40805eb5a9c56f170f2c1a88dba544139",
+  "adapter_tools_sha256": "b62cee961c69f4adba2d03398a45769c625aea7c1a13d428f3b73a9413b2e22b",
   "boundary": "Adapter-sent catalog is not proof of final host exposure. No final host report means unknown.",
   "protocol": 1,
-  "server_tools_sha256": "5cbe934502e807699202473d9a0336d40805eb5a9c56f170f2c1a88dba544139",
+  "server_tools_sha256": "b62cee961c69f4adba2d03398a45769c625aea7c1a13d428f3b73a9413b2e22b",
   "skill_revision": "bd407a4d18d62b072b8d72d0b72dc2c6e03d972c056b0c57dc5113e93c91b70f",
   "tools": [
     {
@@ -2184,6 +2184,156 @@
         "type": "object"
       },
       "name": "files_sync",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      }
+    },
+    {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "desktop:observe"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Observe one user-selected Linux Window using an explicitly approved read-only launch. Supports only Capabilities/Open/Observe/Close; never Act. Requires desktop:observe on the account and device, no desktop:input. The existing desktop_frame exports an owned Observe result. No desktop scope or Portal approval is granted by this call. Defaults unavailable.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "authorization_version": {
+            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "capability_version": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "device_id": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "request": {
+            "description": "Strict tagged desktop protocol. Task/owner/device/desktop/epoch are checked again at admission.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "identity": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "desktop_id": {
+                        "type": "string"
+                      },
+                      "device_id": {
+                        "format": "uuid",
+                        "type": "string"
+                      },
+                      "owner": {
+                        "type": "string"
+                      },
+                      "task_id": {
+                        "format": "uuid",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "owner",
+                      "task_id",
+                      "device_id",
+                      "desktop_id"
+                    ],
+                    "type": "object"
+                  },
+                  "lease_ms": {
+                    "maximum": 30000,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "operation": {
+                    "const": "open"
+                  }
+                },
+                "required": [
+                  "operation",
+                  "identity",
+                  "lease_ms"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "binding": {
+                    "type": "object"
+                  },
+                  "operation": {
+                    "enum": [
+                      "observe",
+                      "close"
+                    ]
+                  }
+                },
+                "required": [
+                  "operation",
+                  "binding"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "operation": {
+                    "const": "capabilities"
+                  }
+                },
+                "required": [
+                  "operation"
+                ],
+                "type": "object"
+              }
+            ],
+            "type": "object",
+            "x-desktop-observe-only": true,
+            "x-desktop-request": true
+          },
+          "response_mode": {
+            "default": "compact",
+            "description": "MCP envelope view; compact is the default. full restores diagnostic metadata.",
+            "enum": [
+              "full",
+              "compact"
+            ],
+            "type": "string"
+          },
+          "task_id": {
+            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "device_id",
+          "task_id",
+          "capability_version",
+          "request"
+        ],
+        "type": "object"
+      },
+      "name": "desktop_observer",
       "outputSchema": {
         "additionalProperties": true,
         "type": "object"

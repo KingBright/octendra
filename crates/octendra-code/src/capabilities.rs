@@ -198,6 +198,7 @@ impl RuntimeFeatures {
             protocol: 1,
             names: [
                 "terminal_wait_v1",
+                "desktop_observer_v1",
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 "local_sudo_v1",
                 "line_fragments_v1",

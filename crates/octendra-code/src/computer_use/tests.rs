@@ -1121,6 +1121,47 @@ fn desktop_job(id: &Identity, request: Request) -> crate::gateway::Job {
     job.arguments["idempotency_key"] = json!(job.id);
     job
 }
+
+#[tokio::test]
+async fn observer_agent_journal_exports_fixture_frame_and_rejects_act() {
+    let id = identity("offline");
+    let (_root, state, mut agent) = agent_fixture(id.device_id).await;
+    agent.desktop_workers = super::transport::tests::observer_fixture(
+        state.path(),
+        &state.path().join("desktop.lock"),
+        &id,
+    );
+    let observer_job = |request| {
+        let mut job = desktop_job(&id, request);
+        job.tool = "desktop_observer".into();
+        job
+    };
+    let open = observer_job(Request::Open {
+        identity: id.clone(),
+        lease_ms: 30000,
+    });
+    let opened = agent.execute(&open).await.unwrap();
+    assert_eq!(opened, agent.execute(&open).await.unwrap());
+    let binding: Binding = serde_json::from_value(opened["binding"].clone()).unwrap();
+    let observe = observer_job(Request::Observe {
+        binding: binding.clone(),
+    });
+    let observed = agent.execute(&observe).await.unwrap();
+    assert_eq!(agent.read_desktop_frame(&observe).await.unwrap(), b"abcdef");
+    let frame: FrameRef = serde_json::from_value(observed["frame"].clone()).unwrap();
+    let act = observer_job(Request::Act {
+        frame,
+        sequence: 1,
+        actions: vec![Action::PointerMove { x: 0., y: 0. }],
+    });
+    let rejected = agent.execute(&act).await.unwrap();
+    assert_eq!(rejected["error_code"], "invalid_arguments");
+    assert_eq!(rejected["outcome"], "not_executed");
+    assert_eq!(agent.read_desktop_frame(&observe).await.unwrap(), b"abcdef");
+    let close = observer_job(Request::Close { binding });
+    assert_eq!(agent.execute(&close).await.unwrap()["state"], "closed");
+    assert!(agent.read_desktop_frame(&observe).await.is_err());
+}
 #[tokio::test]
 async fn private_transport_through_agent_journal_delivers_real_bytes_and_never_replays() {
     let id = identity("offline");

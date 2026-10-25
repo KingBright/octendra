@@ -37,10 +37,19 @@ Agent's normal Linux cross-build does not build the standalone worker or prove
 PipeWire/compositor execution. A native worker build and real user-selected
 Open/Observe/Close acceptance remain separate requirements.
 
-The current desktop_worker catalog retains its existing desktop consent
-metadata. This implementation does not rewrite account/device scopes or claim
-that a code-only connection can observe a screen. No production desktop approval
-or persistent Portal permission is installed by source verification or packaging.
+The independent `desktop_observer` catalog entry uses the existing typed desktop
+protocol, limited to Capabilities/Open/Observe/Close. Both the account and device
+must explicitly have `desktop:observe`; `desktop:input` is not required. Admission,
+queue delivery, result observation and `desktop_frame` export recheck this read
+permission. Older Agents without `desktop_observer_v1` cannot receive the new
+entry. Catalog discovery describes the tool independently of authorization.
+
+The observer accepts only a locally approved Linux window launch with input
+false and zero desktop geometry. It refuses an input-capable or Weavelo launch.
+Act is excluded from its schema and rejected again before transport state can
+change. The original `desktop_worker` consent pair and control checks remain
+unchanged. These tests do not install a production approval, grant scopes or
+perform Portal capture. A code-only device remains unable to observe.
 
 ## Independent worker build
 

@@ -571,13 +571,21 @@ mod tests {
         assert_eq!(
             features.names.len(),
             if cfg!(any(target_os = "macos", target_os = "linux")) {
-                34
+                35
             } else {
-                33
+                34
             }
         );
+        assert!(
+            features
+                .names
+                .iter()
+                .any(|name| name == "desktop_observer_v1")
+        );
         assert!(features.valid());
-        assert_eq!(crate::tools::catalog().len(), 27);
+        let catalog = crate::tools::catalog();
+        assert_eq!(catalog.len(), 28);
+        assert!(catalog.iter().any(|tool| tool.name == "desktop_observer"));
         let hello: crate::gateway::DeviceHello = serde_json::from_value(
             json!({"session":"legacy","roots":[],"allow_write":false,"allow_exec":false}),
         )

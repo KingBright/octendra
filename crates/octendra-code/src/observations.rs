@@ -171,6 +171,15 @@ async fn view(g: &Gateway, p: &Principal, ids: &[String]) -> Result<View> {
                 && g.config.devices.iter().any(|d| d.id == device),
             "operation_unavailable: original operation access is required"
         );
+        if tools::requires_desktop_observe(&tool) {
+            let registered = g
+                .config
+                .devices
+                .iter()
+                .find(|d| d.id == device)
+                .context("unknown device")?;
+            tools::require_desktop_observe(p, registered)?;
+        }
         let state: String = row.try_get("state")?;
         let progress: Option<String> = row.try_get("progress")?;
         let mut stamp = json!({"id":id,"state":state});

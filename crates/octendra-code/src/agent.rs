@@ -163,7 +163,7 @@ impl Agent {
     #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
     pub async fn read_desktop_frame(&self, job: &Job) -> Result<Vec<u8>> {
         ensure!(
-            job.tool == "desktop_worker" && job.device_id == self.config.device_id,
+            crate::tools::desktop_session_tool(&job.tool) && job.device_id == self.config.device_id,
             "desktop job required"
         );
         uuid::Uuid::parse_str(&job.id)?;
@@ -329,7 +329,7 @@ impl Agent {
     async fn perform(&self, job: &Job, progress: &crate::progress::Progress) -> Result<Value> {
         let v = &job.arguments;
         #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
-        if job.tool == "desktop_worker" {
+        if crate::tools::desktop_session_tool(&job.tool) {
             // Typed catalog admission is independent of shell/code permissions.
             crate::tools::validate(&job.tool, v)?;
             let args: DesktopJob = serde_json::from_value(v.clone())?;
@@ -337,7 +337,11 @@ impl Agent {
                 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 return Ok(serde_json::to_value(
                     crate::computer_use::Response::Capabilities {
-                        capabilities: self.desktop_workers.capabilities().await,
+                        capabilities: if job.tool == "desktop_observer" {
+                            self.desktop_workers.observer_capabilities().await
+                        } else {
+                            self.desktop_workers.capabilities().await
+                        },
                     },
                 )?);
                 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
@@ -347,6 +351,17 @@ impl Agent {
                 )?);
             }
             let identity = args.identity(job)?;
+            if job.tool == "desktop_observer" {
+                return self
+                    .desktop_workers
+                    .dispatch_observer(
+                        uuid::Uuid::parse_str(&job.id)?,
+                        &identity,
+                        args.capability_version,
+                        args.request,
+                    )
+                    .await;
+            }
             return self
                 .desktop_workers
                 .dispatch(

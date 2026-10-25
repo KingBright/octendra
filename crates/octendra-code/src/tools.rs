@@ -15,7 +15,7 @@ pub fn scope(name: &str) -> Option<&'static str> {
         | "transfer_cancel" | "transfer_resume" | "outcome_resolve" => Some("code:write"),
         "terminal_exec" | "terminal_input" | "terminal_cancel" => Some("terminal:exec"),
         "desktop_worker" => Some("desktop:input"),
-        "desktop_frame" => Some("desktop:observe"),
+        "desktop_observer" | "desktop_frame" => Some("desktop:observe"),
         _ => None,
     }
 }
@@ -33,7 +33,7 @@ pub fn validate(name: &str, arguments: &Value) -> Result<()> {
         .find(|t| t.name == name)
         .context("unknown tool")?;
     validate_node(&tool.input_schema, arguments, "$")?;
-    if name == "desktop_worker" {
+    if desktop_session_tool(name) {
         let a: crate::agent::DesktopJob = serde_json::from_value(arguments.clone())
             .map_err(|_| anyhow::anyhow!("invalid_arguments: desktop request envelope"))?;
         ensure!(
@@ -95,6 +95,11 @@ fn validate_node(schema: &Map<String, Value>, value: &Value, path: &str) -> Resu
     if schema.get("x-desktop-request") == Some(&json!(true)) {
         let request: octendra_desktop_protocol::Request = serde_json::from_value(value.clone())
             .map_err(|_| anyhow::anyhow!("invalid_arguments: {path} desktop request"))?;
+        ensure!(
+            schema.get("x-desktop-observe-only") != Some(&json!(true))
+                || !matches!(request, octendra_desktop_protocol::Request::Act { .. }),
+            "invalid_arguments: desktop_observer never accepts Act"
+        );
         match request {
             octendra_desktop_protocol::Request::Open { lease_ms, .. } => ensure!(
                 lease_ms > 0 && lease_ms <= octendra_desktop_protocol::MAX_LEASE_MS,
@@ -211,8 +216,32 @@ pub fn required_scopes(name: &str) -> Vec<&'static str> {
     }
 }
 
-pub(crate) fn has_required_scopes(_p: &crate::auth::Principal, name: &str) -> bool {
+pub(crate) fn desktop_session_tool(name: &str) -> bool {
+    matches!(name, "desktop_worker" | "desktop_observer")
+}
+
+pub(crate) fn requires_desktop_observe(name: &str) -> bool {
+    matches!(name, "desktop_observer" | "desktop_frame")
+}
+
+pub(crate) fn require_desktop_observe(
+    p: &crate::auth::Principal,
+    device: &crate::DeviceRegistration,
+) -> Result<()> {
+    ensure!(
+        p.scopes.iter().any(|s| s == "desktop:observe"),
+        "insufficient_scope: desktop:observe required"
+    );
+    ensure!(
+        device.scopes.iter().any(|s| s == "desktop:observe"),
+        "device_scope_denied: desktop:observe required"
+    );
+    Ok(())
+}
+
+pub(crate) fn has_required_scopes(p: &crate::auth::Principal, name: &str) -> bool {
     scope(name).is_some()
+        && (!requires_desktop_observe(name) || p.scopes.iter().any(|s| s == "desktop:observe"))
 }
 
 fn build_catalog() -> Vec<Tool> {
@@ -419,12 +448,122 @@ fn build_catalog() -> Vec<Tool> {
             *tool = serde_json::from_value(value).expect("static transfer descriptor");
         }
     }
+    // Reuse the exact existing envelope/protocol. Only the admitted operation
+    // subset and consent metadata differ; the control tool remains unchanged.
+    let mut observer = serde_json::to_value(
+        tools
+            .iter()
+            .find(|t| t.name == "desktop_worker")
+            .expect("desktop tool"),
+    )
+    .expect("static desktop tool");
+    observer["name"] = json!("desktop_observer");
+    observer["description"] = json!(
+        "Observe one user-selected Linux Window using an explicitly approved read-only launch. Supports only Capabilities/Open/Observe/Close; never Act. Requires desktop:observe on the account and device, no desktop:input. The existing desktop_frame exports an owned Observe result. No desktop scope or Portal approval is granted by this call. Defaults unavailable."
+    );
+    observer["_meta"]["securitySchemes"] = json!([{"type":"oauth2","scopes":["desktop:observe"]}]);
+    observer["annotations"] = json!({"readOnlyHint":true,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false});
+    observer["inputSchema"]["properties"]["request"]["x-desktop-observe-only"] = json!(true);
+    observer["inputSchema"]["properties"]["request"]["oneOf"]
+        .as_array_mut()
+        .expect("request choices")
+        .retain(|v| v["properties"]["operation"]["const"] != "act");
+    tools.push(serde_json::from_value(observer).expect("static observer descriptor"));
     tools
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observer_catalog_has_only_observe_consent_and_no_act_variant() {
+        let values = serde_json::to_value(catalog()).unwrap();
+        let observer = values
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == "desktop_observer")
+            .unwrap();
+        assert_eq!(
+            observer["_meta"]["securitySchemes"][0]["scopes"],
+            json!(["desktop:observe"])
+        );
+        assert_eq!(observer["annotations"]["readOnlyHint"], true);
+        assert_eq!(observer["annotations"]["idempotentHint"], false);
+        assert!(
+            observer["inputSchema"]["properties"]["request"]["oneOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|v| v["properties"]["operation"]["const"] != "act")
+        );
+        assert_eq!(
+            required_scopes("desktop_worker"),
+            vec!["desktop:observe", "desktop:input"]
+        );
+        assert_eq!(scope("desktop_worker"), Some("desktop:input"));
+        let account = crate::auth::Principal {
+            owner: "fixture".into(),
+            scopes: vec!["desktop:observe".into()],
+        };
+        let mut device = crate::DeviceRegistration {
+            id: "fixture".into(),
+            name: "fixture".into(),
+            token_hash: "unused".into(),
+            scopes: vec!["desktop:observe".into()],
+        };
+        assert!(require_desktop_observe(&account, &device).is_ok());
+        assert!(
+            require_desktop_observe(
+                &crate::auth::Principal {
+                    scopes: vec!["desktop:input".into()],
+                    ..account.clone()
+                },
+                &device
+            )
+            .is_err()
+        );
+        device.scopes = vec!["desktop:input".into()];
+        assert!(require_desktop_observe(&account, &device).is_err());
+    }
+
+    #[test]
+    fn observer_rejects_act_even_though_it_uses_the_same_typed_protocol() {
+        let id = crate::computer_use::transport::tests::identity();
+        let request = octendra_desktop_protocol::Request::Act {
+            frame: octendra_desktop_protocol::FrameRef {
+                binding: octendra_desktop_protocol::Binding {
+                    identity: id.clone(),
+                    epoch: uuid::Uuid::new_v4(),
+                },
+                source_revision: 1,
+                frame_sequence: 1,
+                mapping: octendra_desktop_protocol::FrameMapping {
+                    frame_size: [2, 2],
+                    content: octendra_desktop_protocol::ContentRect {
+                        left: 0,
+                        top: 0,
+                        width: 2,
+                        height: 2,
+                    },
+                    logical_size: [2, 2],
+                    desktop_position: [0, 0],
+                    rotation: octendra_desktop_protocol::Rotation::R0,
+                },
+            },
+            sequence: 1,
+            actions: vec![octendra_desktop_protocol::Action::PointerMove { x: 0., y: 0. }],
+        };
+        let args = json!({"device_id":id.device_id,"task_id":id.task_id,"capability_version":7,"request":request});
+        assert!(validate("desktop_worker", &args).is_ok());
+        assert!(
+            validate("desktop_observer", &args)
+                .unwrap_err()
+                .to_string()
+                .contains("never accepts Act")
+        );
+    }
 
     #[test]
     fn sudo_is_explicit_and_terminal_observation_is_read_only() {

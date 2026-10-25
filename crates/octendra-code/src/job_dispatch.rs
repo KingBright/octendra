@@ -19,7 +19,8 @@ macro_rules! candidate_sql {
     SELECT id,device,request,updated,state FROM jobs WHERE device=? AND state='dispatched' AND updated<?
 ) jobs
 WHERE id NOT IN (SELECT value FROM json_each(?))
-AND (? IS NOT NULL)
+AND (json_extract(request,'$.tool') NOT IN ('desktop_observer','desktop_frame')
+    OR EXISTS (SELECT 1 FROM json_each(?) WHERE value='desktop:observe'))
 AND (jobs.state='dispatched' OR NOT EXISTS (
     SELECT 1 FROM kv b WHERE b.kind='operation_task_authorization' AND b.key=jobs.id
 ))
@@ -199,6 +200,36 @@ mod tests {
         assert!(claim(&s, &frame, crate::now()).await.unwrap().is_none());
         frame.lanes = r#"["transfer"]"#;
         assert!(claim(&s, &frame, crate::now()).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn observer_poll_requires_observe_without_requiring_input_and_rechecks_revocation() {
+        let (_d, s) = fixture().await;
+        let id = add(&s, "desktop_observer").await;
+        assert!(
+            claim(&s, &selection(), crate::now())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let mut allowed = selection();
+        allowed.scopes = r#"["desktop:observe"]"#;
+        assert_eq!(
+            claim(&s, &allowed, crate::now()).await.unwrap().unwrap().0,
+            id
+        );
+        sqlx::query("UPDATE jobs SET updated=? WHERE id=?")
+            .bind(crate::now() - 60)
+            .bind(&id)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        assert!(
+            claim(&s, &selection(), crate::now())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn selection() -> Selection<'static> {

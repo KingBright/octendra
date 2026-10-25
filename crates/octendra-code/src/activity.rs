@@ -42,6 +42,15 @@ fn operation(g: &Gateway, p: &Principal, row: &ActivityRow) -> Result<Value> {
             && g.config.devices.iter().any(|d| d.id == job.device_id),
         "operation_unavailable: original operation access is required"
     );
+    if tools::requires_desktop_observe(&job.tool) {
+        let registered = g
+            .config
+            .devices
+            .iter()
+            .find(|d| d.id == job.device_id)
+            .context("unknown device")?;
+        tools::require_desktop_observe(p, registered)?;
+    }
     // Do not decorate results with download URLs or refreshable credentials.
     // A status read must not mutate transfers or depend on an expired artifact.
     let mut value: Value = row

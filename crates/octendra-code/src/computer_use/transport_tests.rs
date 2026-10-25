@@ -72,6 +72,121 @@ async fn linux_window_capability_advertises_no_actions_and_never_spawns() {
     assert!(workers.state.lock().await.pipe.is_none());
 }
 
+pub(crate) fn observer_fixture(path: &Path, lock: &Path, id: &Identity) -> NativeWorkers {
+    let workers = fixture(path, lock, id, "normal");
+    {
+        let mut state = workers.state.try_lock().unwrap();
+        let approval = state.approval.as_mut().unwrap();
+        approval.input = false;
+        approval.logical_size = [0, 0];
+        approval.logical_position = [0, 0];
+    }
+    workers
+}
+
+#[tokio::test]
+async fn observer_never_uses_an_input_capable_or_desktop_geometry_launch() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = identity();
+    let workers = fixture(
+        &dir.path().join("state"),
+        &dir.path().join("lock"),
+        &id,
+        "normal",
+    );
+    let result = workers
+        .dispatch_observer(
+            Uuid::new_v4(),
+            &id,
+            7,
+            Request::Open {
+                identity: id.clone(),
+                lease_ms: 1000,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["reason"], "linux_readonly_window_launch_required");
+    assert!(workers.state.lock().await.pipe.is_none());
+    {
+        workers.state.lock().await.approval.as_mut().unwrap().input = false;
+    }
+    let result = workers
+        .dispatch_observer(
+            Uuid::new_v4(),
+            &id,
+            7,
+            Request::Open {
+                identity: id.clone(),
+                lease_ms: 1000,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["reason"], "linux_readonly_window_launch_required");
+    assert!(workers.state.lock().await.pipe.is_none());
+}
+
+#[tokio::test]
+async fn observer_open_observe_close_keeps_the_existing_frame_and_epoch_guards() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = identity();
+    let workers = observer_fixture(&dir.path().join("state"), &dir.path().join("lock"), &id);
+    let open = workers
+        .dispatch_observer(
+            Uuid::new_v4(),
+            &id,
+            7,
+            Request::Open {
+                identity: id.clone(),
+                lease_ms: 30000,
+            },
+        )
+        .await
+        .unwrap();
+    let binding: Binding = serde_json::from_value(open["binding"].clone()).unwrap();
+    let operation = Uuid::new_v4();
+    let observed = workers
+        .dispatch_observer(
+            operation,
+            &id,
+            7,
+            Request::Observe {
+                binding: binding.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(observed["state"], "observed");
+    let frame: FrameRef = serde_json::from_value(observed["frame"].clone()).unwrap();
+    let before = workers.state.lock().await.sequence;
+    let result = workers
+        .dispatch_observer(
+            Uuid::new_v4(),
+            &id,
+            7,
+            Request::Act {
+                frame,
+                sequence: 1,
+                actions: vec![Action::PointerMove { x: 0., y: 0. }],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["reason"], "observer_never_accepts_act");
+    assert_eq!(workers.state.lock().await.sequence, before);
+    let artifact = workers.artifact(operation).await.unwrap();
+    assert_eq!(
+        workers.read_frame(&artifact, &id, 7).await.unwrap(),
+        b"abcdef"
+    );
+    workers
+        .dispatch_observer(Uuid::new_v4(), &id, 7, Request::Close { binding })
+        .await
+        .unwrap();
+    assert!(workers.read_frame(&artifact, &id, 7).await.is_err());
+}
+
 #[test]
 fn weavelo_packed_rgba_declares_color_by_encoding_without_fabricating_spa_yuv() {
     let mut pixels = RawPixels {

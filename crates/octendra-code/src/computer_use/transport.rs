@@ -666,6 +666,19 @@ impl NativeWorkers {
             ..Capabilities::default()
         }
     }
+    pub async fn observer_capabilities(&self) -> Capabilities {
+        #[cfg(target_os = "linux")]
+        {
+            self.capabilities().await
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Capabilities {
+                backend: "linux_window_observer_unsupported".into(),
+                ..Capabilities::default()
+            }
+        }
+    }
     pub async fn dispatch(
         &self,
         id: Uuid,
@@ -673,7 +686,50 @@ impl NativeWorkers {
         version: u64,
         request: Request,
     ) -> Result<serde_json::Value> {
+        self.dispatch_mode(id, identity, version, request, false)
+            .await
+    }
+    pub async fn dispatch_observer(
+        &self,
+        id: Uuid,
+        identity: &Identity,
+        version: u64,
+        request: Request,
+    ) -> Result<serde_json::Value> {
+        // Defense independent of catalog/Gateway validation: no sequence, lease,
+        // source validation, child spawn or persistent state mutation for Act.
+        if matches!(&request, Request::Act { .. }) {
+            return Ok(
+                serde_json::json!({"error":"unavailable","reason":"observer_never_accepts_act","automatic_replay_safe":false}),
+            );
+        }
+        self.dispatch_mode(id, identity, version, request, true)
+            .await
+    }
+    async fn dispatch_mode(
+        &self,
+        id: Uuid,
+        identity: &Identity,
+        version: u64,
+        request: Request,
+        observe_only: bool,
+    ) -> Result<serde_json::Value> {
         let mut state = self.state.lock().await;
+        if observe_only
+            && (!(cfg!(target_os = "linux") || cfg!(test))
+                || !state.approval.as_ref().is_some_and(|a| {
+                    a.enabled
+                        && a.observe
+                        && !a.input
+                        && a.weavelo.is_none()
+                        && a.logical_size == [0, 0]
+                        && a.logical_position == [0, 0]
+                }))
+        {
+            return Ok(
+                serde_json::json!({"error":"unavailable","reason":"linux_readonly_window_launch_required","automatic_replay_safe":false}),
+            );
+        }
         let had_pipe = state.pipe.is_some();
         let result = self
             .dispatch_locked(&mut state, id, identity, version, request)

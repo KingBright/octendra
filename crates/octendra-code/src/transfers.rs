@@ -684,6 +684,15 @@ pub(crate) async fn desktop_artifact(
             && a.capability_version > 0,
         "desktop artifact owner/device"
     );
+    // Signed links and already-open streams also recheck the device's current
+    // observation permission; a link cannot outlive device scope revocation.
+    ensure!(
+        g.config
+            .devices
+            .iter()
+            .any(|d| d.id == job.device_id && d.scopes.iter().any(|s| s == "desktop:observe")),
+        "device_scope_denied: desktop:observe required"
+    );
     let (request, result): (String, Option<String>) =
         sqlx::query_as("SELECT request,result FROM jobs WHERE id=? AND device=?")
             .bind(a.observed_operation_id.to_string())
@@ -695,7 +704,7 @@ pub(crate) async fn desktop_artifact(
         serde_json::from_value(original.arguments.clone())?;
     let original_identity = original_args.identity(&original)?;
     ensure!(
-        original.tool == "desktop_worker"
+        crate::tools::desktop_session_tool(&original.tool)
             && original.owner == job.owner
             && matches!(
                 original_args.request,
@@ -720,7 +729,7 @@ pub(crate) async fn desktop_artifact(
         "desktop artifact expired/identity"
     );
     let blocked: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM jobs WHERE device=? AND json_extract(request,'$.owner')=? AND json_extract(request,'$.tool')='desktop_worker' AND COALESCE(json_extract(request,'$.arguments.request.binding.epoch'),json_extract(request,'$.arguments.request.frame.binding.epoch'))=? AND (json_extract(request,'$.arguments.request.operation')='close' OR json_extract(result,'$.error')='outcome_unknown'))")
+        "SELECT EXISTS(SELECT 1 FROM jobs WHERE device=? AND json_extract(request,'$.owner')=? AND json_extract(request,'$.tool') IN ('desktop_worker','desktop_observer') AND COALESCE(json_extract(request,'$.arguments.request.binding.epoch'),json_extract(request,'$.arguments.request.frame.binding.epoch'))=? AND (json_extract(request,'$.arguments.request.operation')='close' OR json_extract(result,'$.error')='outcome_unknown'))")
         .bind(&job.device_id).bind(&job.owner).bind(artifact.binding.epoch.to_string())
         .fetch_one(&g.store.pool).await?;
     ensure!(!blocked, "desktop artifact epoch closed or unknown");
@@ -747,7 +756,7 @@ pub(crate) async fn retire_desktop_epoch(
         return Ok(());
     };
     let job: Job = serde_json::from_str(&text)?;
-    if job.tool != "desktop_worker" {
+    if !crate::tools::desktop_session_tool(&job.tool) {
         return Ok(());
     }
     let a: crate::agent::DesktopJob = serde_json::from_value(job.arguments.clone())?;
@@ -1444,6 +1453,50 @@ mod tests {
             .await
             .unwrap();
         (dir, g, export, key)
+    }
+
+    #[tokio::test]
+    async fn observer_frame_export_keeps_original_identity_and_close_boundary() {
+        let (_dir, mut g, export, _key) = desktop_stream_fixture().await;
+        let observed = export.arguments["observed_operation_id"].as_str().unwrap();
+        let request: String = sqlx::query_scalar("SELECT request FROM jobs WHERE id=?")
+            .bind(observed)
+            .fetch_one(&g.store.pool)
+            .await
+            .unwrap();
+        let mut observer: Job = serde_json::from_str(&request).unwrap();
+        observer.tool = "desktop_observer".into();
+        sqlx::query("UPDATE jobs SET request=? WHERE id=?")
+            .bind(serde_json::to_string(&observer).unwrap())
+            .bind(observed)
+            .execute(&g.store.pool)
+            .await
+            .unwrap();
+        assert!(desktop_artifact(&g, &export).await.is_ok());
+        std::sync::Arc::make_mut(&mut g.config).devices[0].scopes = vec!["desktop:input".into()];
+        assert!(
+            desktop_artifact(&g, &export)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("device_scope_denied")
+        );
+        std::sync::Arc::make_mut(&mut g.config).devices[0].scopes = vec!["desktop:observe".into()];
+        let mut wrong = export.clone();
+        wrong.arguments["task_id"] = json!(uuid::Uuid::new_v4());
+        assert!(desktop_artifact(&g, &wrong).await.is_err());
+        observer.id = uuid::Uuid::new_v4().to_string();
+        observer.arguments["request"]["operation"] = json!("close");
+        sqlx::query("INSERT INTO jobs(id,device,idem,fingerprint,request,result,state,updated) VALUES(?,?,?,?,?,NULL,'queued',?)")
+            .bind(&observer.id).bind(&observer.device_id).bind(&observer.id).bind(hash(serde_json::to_vec(&observer).unwrap()))
+            .bind(serde_json::to_string(&observer).unwrap()).bind(now()).execute(&g.store.pool).await.unwrap();
+        assert!(
+            desktop_artifact(&g, &export)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("closed or unknown")
+        );
     }
 
     #[tokio::test]

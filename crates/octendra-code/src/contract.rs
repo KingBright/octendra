@@ -12,9 +12,9 @@ pub fn authorized_tools(p: &Principal) -> Vec<Tool> {
         .filter(|t| tools::has_required_scopes(p, &t.name))
         .collect()
 }
-/// All catalog tools are discoverable and authorized for an authenticated principal.
-pub fn discoverable_tools(p: &Principal) -> Vec<Tool> {
-    authorized_tools(p)
+/// Discovery advertises consent metadata; it does not grant desktop authority.
+pub fn discoverable_tools(_p: &Principal) -> Vec<Tool> {
+    tools::catalog()
 }
 pub fn bundle() -> Value {
     let catalog = tools::catalog();
@@ -243,7 +243,7 @@ mod tests {
             c["expected_authorized_tools_sha256"],
             hash(serde_json::to_vec(&authorized_tools(&p)).unwrap())
         );
-        assert_eq!(
+        assert_ne!(
             c["expected_discoverable_tools_sha256"],
             c["expected_authorized_tools_sha256"]
         );
@@ -258,6 +258,11 @@ mod tests {
                 .any(|t| t.name.starts_with("desktop_"))
         );
         assert!(tools::has_required_scopes(&p, "desktop_worker"));
+        assert!(
+            !authorized_tools(&p)
+                .iter()
+                .any(|t| t.name == "desktop_observer" || t.name == "desktop_frame")
+        );
         assert_eq!(before, p.scopes);
     }
     #[test]
@@ -275,8 +280,8 @@ mod tests {
             h.insert(key, HeaderValue::from_str(&sha).unwrap());
         }
         let e = exposure(&h, &p);
-        assert_eq!(e["connector_catalog"]["status"], "reported_match");
-        assert_eq!(e["current_session_exposure"]["status"], "reported_match");
+        assert_eq!(e["connector_catalog"]["status"], "reported_mismatch");
+        assert_eq!(e["current_session_exposure"]["status"], "reported_mismatch");
     }
     #[test]
     fn full_scope_hashes_keep_existing_catalog_headers_compatible() {

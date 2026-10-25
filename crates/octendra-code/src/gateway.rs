@@ -395,6 +395,7 @@ impl Gateway {
                 | "transfer_resume"
                 | "workspace_open"
                 | "desktop_worker"
+                | "desktop_observer"
                 | "desktop_frame"
         ) && let Some(object) = args.as_object_mut()
         {
@@ -436,6 +437,7 @@ impl Gateway {
                 | "transfer_resume"
                 | "files_sync"
                 | "desktop_worker"
+                | "desktop_observer"
                 | "desktop_frame"
         ) && let Some(object) = args.as_object_mut()
             && object.get("idempotency_key").is_none()
@@ -591,7 +593,10 @@ impl Gateway {
                 .find(|d| d.id == raw || d.name.eq_ignore_ascii_case(raw))
                 .context("unknown device")
         };
-        let device = if matches!(name, "workspace_open" | "desktop_worker" | "desktop_frame") {
+        let device = if matches!(
+            name,
+            "workspace_open" | "desktop_worker" | "desktop_observer" | "desktop_frame"
+        ) {
             let raw = files::text(&args, "device_id")?;
             let reg = resolve_device(raw)?;
             if raw != reg.id
@@ -630,8 +635,20 @@ impl Gateway {
             }
         };
         let device = device.as_str();
+        if tools::requires_desktop_observe(name) {
+            let registered = self
+                .config
+                .devices
+                .iter()
+                .find(|d| d.id == device)
+                .context("unknown device")?;
+            tools::require_desktop_observe(p, registered)?;
+        }
         if let Some(object) = args.as_object_mut() {
-            if !matches!(name, "desktop_worker" | "desktop_frame") {
+            if !matches!(
+                name,
+                "desktop_worker" | "desktop_observer" | "desktop_frame"
+            ) {
                 object.remove("task_id");
             }
             object.remove("authorization_version");
@@ -683,7 +700,7 @@ impl Gateway {
             tool: name.into(),
             arguments: args.clone(),
         };
-        if name == "desktop_worker" {
+        if tools::desktop_session_tool(name) {
             let a: crate::agent::DesktopJob = serde_json::from_value(job.arguments.clone())?;
             if !matches!(a.request, crate::computer_use::Request::Capabilities {}) {
                 a.identity(&job)?;
@@ -776,6 +793,7 @@ impl Gateway {
                 ("files_sync", "files_sync_v1"),
                 ("change_resume", "change_set_resume_v1"),
                 ("workspace_gc", "workspace_gc_v1"),
+                ("desktop_observer", "desktop_observer_v1"),
             ] {
                 if name == tool {
                     ensure!(
@@ -1121,6 +1139,15 @@ impl Gateway {
             self.config.devices.iter().any(|d| d.id == job.device_id),
             "device permission revoked for original operation"
         );
+        if tools::requires_desktop_observe(&job.tool) {
+            let registered = self
+                .config
+                .devices
+                .iter()
+                .find(|d| d.id == job.device_id)
+                .context("unknown device")?;
+            tools::require_desktop_observe(p, registered)?;
+        }
         if let Some(result) = result {
             let mut result: Value = serde_json::from_str(&result)?;
             crate::transfers::decorate(self, &job, &mut result).await?;
@@ -2226,3 +2253,7 @@ pub(crate) fn payload_poll_test_route(g: Gateway) -> Router {
         .with_state(g)
         .layer(DefaultBodyLimit::max(crate::payload_budget::POLL_BYTES))
 }
+
+#[cfg(test)]
+#[path = "observer_tests.rs"]
+mod observer_tests;
