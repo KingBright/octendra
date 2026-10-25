@@ -87,6 +87,15 @@ Other platforms need their own signed/ACL-verified adapter; this Linux package i
     return dict(output=str(output),manifest_sha256=identity,installed=False,**manifest)
 
 def publish_managed(args):
+    # The standalone cross-platform preparation mode does not load this POSIX gate.
+    import release_current as current
+    with current.admission():
+        return _publish_managed(args)
+
+
+def _publish_managed(args):
+    import lifecycle_preload_gate as preload_gate
+    preload_gate.require_admitted()
     import fcntl, os, subprocess, tarfile
     import release_current as current
     root=current.primary(Path(__file__).resolve().parents[1])

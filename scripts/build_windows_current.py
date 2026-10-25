@@ -182,6 +182,7 @@ def cancellation():
         for sig, handler in previous.items(): signal.signal(sig, handler)
 
 
+@shared.admission()
 def build(root=ROOT, env=None, runner=build_process.run):
     env = dict(os.environ if env is None else env)
     settings(root, env)

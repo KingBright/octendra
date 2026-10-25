@@ -1,4 +1,5 @@
 """Thin fixed-current release adapter; shared helper owns all output transactions."""
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -10,8 +11,23 @@ import tempfile
 
 import source_snapshot
 
+import lifecycle_preload_gate as preload_gate
+
 COMPONENT = 'octendra-three-platform'
 PLATFORMS = ('macos', 'linux', 'windows')
+
+
+@contextlib.contextmanager
+def admission():
+    """Keep caller exceptions intact while checking the approved gate on exit."""
+    body_error = None
+    with preload_gate.admission():
+        try:
+            yield
+        except BaseException as error:
+            body_error = error
+    if body_error is not None:
+        raise body_error.with_traceback(body_error.__traceback__)
 
 
 def selected_platforms(values=None):
@@ -74,6 +90,7 @@ def established_target(root, env=None):
 
 
 def public_api():
+    preload_gate.require_admitted()
     path = Path.home()/'.codex/skills/rust-project-lifecycle/scripts/rust_storage.py'
     if not path.is_file() or path.is_symlink():
         raise ValueError('shared fixed-current lifecycle helper is unavailable; no package started')
@@ -83,6 +100,16 @@ def public_api():
 
 
 def invoke(root, action, *args, required=True):
+    try:
+        with admission():
+            return _invoke(root, action, *args, required=required)
+    except preload_gate.Refusal as error:
+        if required: raise
+        return {'status': 'deferred', 'reason': str(error), 'artifacts_preserved': True}
+
+
+def _invoke(root, action, *args, required=True):
+    preload_gate.require_admitted()
     helper = Path.home()/'.codex/skills/rust-project-lifecycle/scripts/rust_storage.py'
     try:
         result = subprocess.run([sys.executable, '-B', str(helper), action, '--project', str(root), *args],
@@ -113,6 +140,7 @@ def invoke(root, action, *args, required=True):
         return {'status': 'deferred', 'reason': str(error), 'artifacts_preserved': True}
 
 
+@admission()
 def preflight(root):
     invoke(root, 'release-setup', '--authority', str(root/'.rust-storage/registry.json'))
     return invoke(root, 'release-preflight')
@@ -143,6 +171,7 @@ def arguments(root, producer_pid):
     return args
 
 
+@admission()
 def admit(root):
     require_current_names(invoke(root, 'release-preflight'))
     directory = root/'dist'
@@ -155,6 +184,7 @@ def admit(root):
     return report
 
 
+@admission()
 def validate_producer(root, producer_pid):
     helper = public_api()
     return helper.companion('rust_release').validate_producer(
@@ -168,6 +198,7 @@ def digest(path):
     return value.hexdigest()
 
 
+@admission()
 def publish(root):
     stage, bundle = stages(root)
     receipt = stage/'manifest.json'

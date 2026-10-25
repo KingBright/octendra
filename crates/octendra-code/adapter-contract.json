@@ -1,8 +1,8 @@
 {
-  "adapter_tools_sha256": "b62cee961c69f4adba2d03398a45769c625aea7c1a13d428f3b73a9413b2e22b",
+  "adapter_tools_sha256": "9a9188e1a97da8be7b0bc18b0544bf4a28f750ff0f1b036ab13f4f617889a430",
   "boundary": "Adapter-sent catalog is not proof of final host exposure. No final host report means unknown.",
   "protocol": 1,
-  "server_tools_sha256": "b62cee961c69f4adba2d03398a45769c625aea7c1a13d428f3b73a9413b2e22b",
+  "server_tools_sha256": "9a9188e1a97da8be7b0bc18b0544bf4a28f750ff0f1b036ab13f4f617889a430",
   "skill_revision": "bd407a4d18d62b072b8d72d0b72dc2c6e03d972c056b0c57dc5113e93c91b70f",
   "tools": [
     {
@@ -1285,7 +1285,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Execute using the connection's existing account/device and local-user permissions. This server adds no per-command business approval; host confirmations remain host-controlled. Default pty=false uses real pipes with stdin EOF and combined stdout/stderr; use pty=true only for interactive input. Shell has local-user authority outside code roots. Write-capable action. By default waits up to 2000 ms so short commands can return exit/output in one call; long commands return the same durable terminal_id. wait_ms may be 0..60000 and never stops the command.",
+      "description": "Execute using the connection's existing account/device and local-user permissions. This server adds no per-command business approval; host confirmations remain host-controlled. Default pty=false uses real pipes with stdin EOF and combined stdout/stderr; use pty=true only for interactive input. Shell has local-user authority outside code roots. Write-capable action. By default waits up to 10000 ms so short commands can return exit/output in one call; long commands return the same durable terminal_id. wait_ms may be 0..60000 and never stops the command.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1369,7 +1369,7 @@
             "type": "integer"
           },
           "wait_ms": {
-            "default": 2000,
+            "default": 10000,
             "maximum": 60000,
             "minimum": 0,
             "type": "integer"
@@ -2349,5 +2349,5 @@
     "host_tools": "x-octendra-host-tools",
     "request_id": "x-octendra-request-id"
   },
-  "version": "0.12.0"
+  "version": "0.12.1"
 }

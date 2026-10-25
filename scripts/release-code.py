@@ -132,6 +132,7 @@ def run_stage(name, argv, checkout, directory, report, state, env, timeout=1800,
         source_snapshot.check(checkout)
 
 
+@release_current.admission()
 def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=None, platforms=None):
     platforms = release_current.selected_platforms(platforms)
     snapshot = snapshot.resolve(strict=True) if snapshot is not None else None

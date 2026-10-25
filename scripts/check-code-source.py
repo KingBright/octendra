@@ -21,6 +21,8 @@ import uuid
 
 import build_process
 
+import release_current
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 REQUIRED = {'fmt', 'clippy', 'rust_tests', 'python_tests', 'workspace'}
 
@@ -147,16 +149,15 @@ def summarize(checks, logs):
 
 
 def snapshot_identity(root):
-    path = root/'source-snapshot.json'
-    if not path.exists():
-        return None
-    manifest = json.loads(path.read_text())
     current = inputs(root)
     executable = sorted(name for name in current if (root/name).stat().st_mode & 0o111)
     identity = hashlib.sha256(json.dumps({'files':current,'executable_files':executable},
                                sort_keys=True,separators=(',', ':')).encode()).hexdigest()
-    if manifest.get('state') != 'captured' or manifest.get('snapshot_id') != identity:
-        raise ValueError('snapshot input identity changed')
+    path = root/'source-snapshot.json'
+    if path.exists():
+        manifest = json.loads(path.read_text())
+        if manifest.get('state') != 'captured' or manifest.get('snapshot_id') != identity:
+            raise ValueError('snapshot input identity changed')
     return identity
 
 
@@ -171,6 +172,7 @@ def receipt_current(proof, root):
             and proof.get('snapshot_id') == snapshot_identity(root))
 
 
+@release_current.admission()
 def run_verification(root, report, gates=None, timeout=900):
     report = report.resolve()
     report.parent.mkdir(parents=True, exist_ok=True)

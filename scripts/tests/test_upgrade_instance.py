@@ -6,6 +6,7 @@ import re
 import contextlib
 import io
 import sqlite3
+import stat
 from pathlib import Path
 import sys
 import tempfile
@@ -115,6 +116,17 @@ class UpgradeInstanceTests(unittest.TestCase):
             call.assert_not_called()
         self.assertFalse(self.result.exists())
 
+    def test_atomic_cutover_preserves_existing_binary_owner_group_and_mode(self):
+        self.binary.chmod(0o700)
+        previous=self.binary.stat()
+        with mock.patch.object(updater.os,'fchown',wraps=updater.os.fchown) as chown:
+            updater.atomic_copy(self.candidate,self.binary)
+        chown.assert_called_once_with(mock.ANY,previous.st_uid,previous.st_gid)
+        current=self.binary.stat()
+        self.assertEqual((current.st_uid,current.st_gid,stat.S_IMODE(current.st_mode)),
+                         (previous.st_uid,previous.st_gid,stat.S_IMODE(previous.st_mode)))
+        self.assertEqual(self.binary.read_bytes(),self.candidate.read_bytes())
+
     def test_successful_cutover_and_failed_start_rollback_preserve_both_instances(self):
         database=self.state/'state.sqlite';database.unlink()
         with contextlib.closing(sqlite3.connect(database)) as db:
@@ -122,6 +134,10 @@ class UpgradeInstanceTests(unittest.TestCase):
             db.execute("INSERT INTO preserved VALUES('synthetic user data')")
             db.commit()
         self.db_bytes=database.read_bytes()
+        historical={}
+        for name in ('0.11.0','0.12.0','before-0.11.0-history','before-0.12.0-history'):
+            path=self.release.parent/name;path.mkdir();(path/'receipt').write_bytes(name.encode())
+            historical[path]=self.snapshot(path)
         previous=self.binary.read_bytes();candidate_sha=hashlib.sha256(self.candidate.read_bytes()).hexdigest()
         args=['upgrade-code-gateway.py','--candidate',str(self.candidate),'--sha256',candidate_sha,
               '--version','0.12.1','--result',str(self.result),'--binary-path',str(self.binary),
@@ -163,6 +179,8 @@ class UpgradeInstanceTests(unittest.TestCase):
                 self.assertTrue(service_calls)
                 self.assertTrue(all(c[2]=='octendra-gateway.service' for c in service_calls))
                 self.assertEqual(self.cfg_bytes,self.config.read_bytes());self.assertEqual(self.db_bytes,database.read_bytes())
+                for path,snapshot in historical.items():self.assertEqual(snapshot,self.snapshot(path))
+                if not fail_start:self.assertEqual(result['pruned_old_dirs'],0)
 
     def test_runner_can_unpack_new_helper_without_overwriting_current_controller(self):
         # The running controller is embedded under a distinct name. Future

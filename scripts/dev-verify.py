@@ -28,6 +28,9 @@ import tomllib
 import unittest
 import uuid
 
+import lifecycle_preload_gate as preload_gate
+import release_current
+
 ROOT = Path(__file__).resolve().parents[1]
 QUEUE_DIR = ROOT / ".local-deployment" / "dev-runner"
 ALLOWED_EXEC_PREFIXES = ("cargo", "rustc", "rustup", "python3", sys.executable)
@@ -420,40 +423,46 @@ def serve_worker(queue_dir: Path = QUEUE_DIR, once: bool = False):
             if Path(__file__).stat().st_mtime != startup_mtime:
                 os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve()), "--serve"])
             for req_file in sorted(req_dir.glob("*.json")):
-                job = json.loads(req_file.read_text())
-                job_id = job["id"]
-                argv = job["argv"]
-                req_file.unlink(missing_ok=True)
-                log_path = log_dir / f"{job_id}.log"
-                res_path = res_dir / f"{job_id}.json"
-                res_tmp = res_dir / f".{job_id}.json.tmp"
+                try:
+                    with release_current.admission():
+                        job = json.loads(req_file.read_text())
+                        job_id = job["id"]
+                        argv = job["argv"]
+                        req_file.unlink(missing_ok=True)
+                        log_path = log_dir / f"{job_id}.log"
+                        res_path = res_dir / f"{job_id}.json"
+                        res_tmp = res_dir / f".{job_id}.json.tmp"
 
-                if not argv or not any(
-                    argv[0] == prefix or argv[0].endswith("/" + prefix)
-                    for prefix in ALLOWED_EXEC_PREFIXES
-                ):
-                    result = {"id": job_id, "exit_code": 126, "error": f"disallowed command: {argv}"}
-                else:
-                    started = time.time()
-                    with log_path.open("wb") as log_stream:
-                        proc = subprocess.run(
-                            argv,
-                            cwd=ROOT,
-                            env=toolchain["env"],
-                            stdout=log_stream,
-                            stderr=subprocess.STDOUT,
-                            timeout=int(job.get("timeout", 1800)),
-                            check=False,
-                        )
-                    result = {
-                        "id": job_id,
-                        "argv": argv,
-                        "exit_code": proc.returncode,
-                        "elapsed_seconds": round(time.time() - started, 3),
-                        "log": str(log_path.relative_to(ROOT)),
-                    }
-                res_tmp.write_text(json.dumps(result, indent=2) + "\n")
-                res_tmp.replace(res_path)
+                        if not argv or not any(
+                            argv[0] == prefix or argv[0].endswith("/" + prefix)
+                            for prefix in ALLOWED_EXEC_PREFIXES
+                        ):
+                            result = {"id": job_id, "exit_code": 126, "error": f"disallowed command: {argv}"}
+                        else:
+                            started = time.time()
+                            with log_path.open("wb") as log_stream:
+                                proc = subprocess.run(
+                                    argv,
+                                    cwd=ROOT,
+                                    env=toolchain["env"],
+                                    stdout=log_stream,
+                                    stderr=subprocess.STDOUT,
+                                    timeout=int(job.get("timeout", 1800)),
+                                    check=False,
+                                )
+                            result = {
+                                "id": job_id,
+                                "argv": argv,
+                                "exit_code": proc.returncode,
+                                "elapsed_seconds": round(time.time() - started, 3),
+                                "log": str(log_path.relative_to(ROOT)),
+                            }
+                        res_tmp.write_text(json.dumps(result, indent=2) + "\n")
+                        res_tmp.replace(res_path)
+
+                except preload_gate.Refusal as error:
+                    print(json.dumps({"state": "admission_blocked", "reason": str(error), "request_preserved": req_file.exists()}), flush=True)
+                    return
 
             if once:
                 break
@@ -603,6 +612,7 @@ def run_binary_smoke(binary: Path, root: Path):
         }
 
 
+@release_current.admission()
 def execute_step(argv: list[str], root: Path, toolchain: dict):
     if toolchain["available"]:
         subprocess.run(argv, cwd=root, env=toolchain["env"], check=True)

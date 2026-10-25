@@ -58,6 +58,18 @@ class SourceEvidenceTests(unittest.TestCase):
             self.assertEqual(entry['working_directory'], str(self.root.resolve()))
             self.assertEqual(checker.digest(self.root/entry['log']), entry['sha256'])
 
+    def test_primary_main_receipt_binds_identity_and_modes_without_source_snapshot(self):
+        import source_snapshot
+        files = checker.inputs(self.root)
+        expected = source_snapshot.identity(files, source_snapshot.executable_files(self.root, files))
+        result = self.run_check()
+        self.assertEqual(result['snapshot_id'], expected)
+        self.assertTrue(checker.receipt_current(result, self.root))
+        self.assertFalse((self.root/'source-snapshot.json').exists())
+        mode = self.dependency.stat().st_mode & 0o7777
+        self.dependency.chmod(mode | 0o100)
+        self.assertFalse(checker.receipt_current(result, self.root))
+
     def test_checkout_rules_and_page_fixtures_invalidate_receipts(self):
         paths = ('.gitattributes', 'scripts/tests/page.rs', 'scripts/tests/page.mjs')
         for name in paths:

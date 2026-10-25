@@ -976,7 +976,8 @@ class ParallelInstallTests(unittest.TestCase):
         def replace_inode(path,data,mode,**kw):
             real(path,data,mode,**kw)
             if path.name.startswith('.'+self.service.name+'.umask-'):
-                previous=self.service.read_bytes();self.service.unlink();self.service.write_bytes(previous);self.service.chmod(0o644)
+                previous=self.service.read_bytes();mode=stat.S_IMODE(self.service.stat().st_mode)
+                self.service.unlink();self.service.write_bytes(previous);self.service.chmod(mode)
         with mock.patch.object(install,'exclusive',side_effect=replace_inode):
             with self.assertRaisesRegex(install.Refusal,'changed before replacement'):self.repair_run('apply')
 
@@ -1042,11 +1043,14 @@ class ParallelInstallTests(unittest.TestCase):
         with self.assertRaises(install.Refusal):self.repair_run('observe')
 
     def test_umask_repair_restrictive_process_umask_preserves_exact_existing_file_modes(self):
-        self.repair_fixture();previous=os.umask(0o077)
+        self.repair_fixture()
+        paths=(self.service,self.root/'bin/upgrade-identity.json')
+        modes={path:stat.S_IMODE(path.stat().st_mode) for path in paths}
+        previous=os.umask(0o077)
         try:self.assertEqual(self.repair_run('apply')['state'],'repair_complete')
         finally:os.umask(previous)
-        self.assertEqual(stat.S_IMODE(self.service.stat().st_mode),0o644)
-        self.assertEqual(stat.S_IMODE((self.root/'bin/upgrade-identity.json').stat().st_mode),0o644)
+        for path,mode in modes.items():
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode),mode)
         for name in install.REPAIR_FILES:
             self.assertEqual(stat.S_IMODE((self.root/name).stat().st_mode),0o600)
 

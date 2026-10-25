@@ -18,6 +18,13 @@ use std::{
     sync::{Arc, LazyLock, Mutex},
     time::Duration,
 };
+
+pub(crate) const DEFAULT_WAIT_MS: usize = 10_000;
+pub(crate) const MAX_WAIT_MS: usize = 60_000;
+
+pub(crate) fn inline_wait_ms(arguments: &Value) -> Result<usize> {
+    files::number(arguments, "wait_ms", DEFAULT_WAIT_MS, 0, MAX_WAIT_MS)
+}
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Status {
     pub id: String,
@@ -206,7 +213,7 @@ impl Terminals {
         // Default to a 10s bounded wait so most commands finish in the
         // initiating tool call even when an older host schema cannot send wait_ms.
         // Long commands still return the same durable terminal handle.
-        let wait_ms = files::number(v, "wait_ms", 10000, 0, 60000)?;
+        let wait_ms = inline_wait_ms(v)?;
         let interactive = v.get("pty").and_then(Value::as_bool).unwrap_or(false);
         ensure!(
             fixed.is_none() || !interactive,

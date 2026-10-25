@@ -89,9 +89,11 @@ fn capabilities(device: &Value, account: Option<&Vec<String>>) -> Value {
 }
 pub(crate) fn reason(code: &str) -> Option<&'static str> {
     Some(match code {
-        "available" => "当前连接、设备注册及 Agent 条件已允许；操作仍受本机用户权限约束。",
+        "available" => {
+            "已就绪，无需操作。当前连接、设备注册及 Agent 条件已允许；操作仍受本机用户权限约束。"
+        }
         "registered_connection_unknown" => {
-            "设备注册及 Agent 已允许；本页不是 MCP 客户端会话，连接 scope 需由该连接核验。"
+            "设备注册及 Agent 已允许；本页未核验当前 MCP 连接。这不表示需要重新授权；实际调用会核验该连接的既有权限。"
         }
         "account_scope_denied" => {
             "当前 MCP 连接未获此 scope。需核对连接授权；刷新工具目录不能补足权限。"
@@ -105,7 +107,7 @@ pub(crate) fn reason(code: &str) -> Option<&'static str> {
         "capability_unknown" => "Agent 未报告此能力，当前状态不可确认。",
         "device_offline" => "设备离线；目录和开关可能是上次报告，不能据此确认当前可执行。",
         "platform_authorization_required" => {
-            "需要本人在原系统或平台提示中完成认证；MCP 授权不能代替这一步。"
+            "需要系统确认：请本人在原系统或平台提示中完成认证；MCP 授权不能代替这一步。"
         }
         "access_denied" => {
             "原回执报告路径或系统权限拒绝。MCP scope 不赋予管理员权限；请核对原设备及路径。"
@@ -113,10 +115,15 @@ pub(crate) fn reason(code: &str) -> Option<&'static str> {
         "task_authorization_version_required" | "task_authorization_version_changed" => {
             "原任务已使用限时限制，须保持原任务并核对实际授权版本，不能换任务 ID 绕过。"
         }
-        "task_authorization_expired" | "task_authorization_expiry_required" => {
-            "原任务的限时授权已到期或缺少到期信息；原限制仍生效，不能通过新任务 ID 绕过。"
+        "task_authorization_expired" => {
+            "授权已失效：原任务的限时授权已到期；原限制仍生效，不能通过新任务 ID 绕过。"
         }
-        "task_authorization_revoked" => "原任务授权已撤销；停止该任务并保留原回执。",
+        "task_authorization_expiry_required" => {
+            "原任务授权缺少到期信息；保留原任务并核对原限制，原任务授权不会自动续期。"
+        }
+        "task_authorization_revoked" => {
+            "授权已撤销：停止该任务并保留原回执，原任务授权不会自动恢复。"
+        }
         "task_authorization_missing" | "task_scope_denied" | "task_device_denied" => {
             "原任务的设备或 scope 限制未满足；核对原任务限制，不能自动扩大权限。"
         }
@@ -150,7 +157,7 @@ pub(crate) fn render(view: &Value) -> String {
             let connected = match d["online"].as_bool() {
                 Some(true) => "已连接",
                 Some(false) => "已断开",
-                None => "连接待确认",
+                None => "连接状态未报告",
             };
             let caps = d["capabilities"].as_array();
             let full =
@@ -161,11 +168,11 @@ pub(crate) fn render(view: &Value) -> String {
                         .all(|c| c["state"] == "registered_connection_unknown")
             });
             let profile = if full {
-                "本机用户完全访问"
+                "已就绪，无需操作"
             } else if configured {
-                "设备已允许本机用户访问；连接权限待确认"
+                "设备访问已就绪；当前连接未核验，无需为此重新授权"
             } else {
-                "访问受限或待确认"
+                "访问受限或状态未核验"
             };
             html.push_str(&format!("<section class=card data-device='{}'><h3>{}</h3><p class=state>{connected} · {profile}</p>",
                 display(&d["device_id"]),display(&d["name"])));
@@ -177,7 +184,9 @@ pub(crate) fn render(view: &Value) -> String {
             {
                 html.push_str(&format!("<p>{reason}</p>"));
             }
-            html.push_str("<p class=muted>以本机用户权限执行，不授予 OS 管理员权限；需要系统认证的操作仍由本人完成。</p></section>");
+            html.push_str(
+                "<p class=muted>以本机用户权限执行，不授予 OS 管理员权限。</p></section>",
+            );
         }
     }
     html.push_str("</div><details id='access-disconnect'><summary>撤销或断开</summary><p>请在发起 MCP 连接的客户端中断开或撤销 Octendra。退出此管理页只结束网页会话，不撤销 MCP 连接；本页不会代你撤销权限。</p></details><details id='advanced-permissions'><summary>高级设置</summary>");
@@ -273,6 +282,56 @@ mod tests {
         assert!(render(&v).contains("不代表某个 MCP 连接"));
     }
     #[test]
+    fn permission_view_unverified_connection_does_not_prompt_for_authorization() {
+        let (f, r, p) = fixture();
+        let mut view = snapshot(&f, &r, &p);
+        owner_status(&mut view);
+        let html = render(&view);
+        let card = html
+            .split("data-device=")
+            .nth(1)
+            .unwrap()
+            .split("</section>")
+            .next()
+            .unwrap();
+        assert!(card.contains("当前连接未核验"));
+        assert!(card.contains("无需为此重新授权"));
+        assert!(!card.contains("待确认"));
+        assert!(!card.contains("需要系统确认"));
+        assert!(!card.contains("<button"));
+        assert!(!card.contains("<form"));
+        assert!(view["account_scopes"].is_null());
+    }
+    #[test]
+    fn permission_view_only_explicit_rejections_request_system_confirmation_or_stop() {
+        assert!(reason("available").unwrap().starts_with("已就绪，无需操作"));
+        assert!(
+            reason("registered_connection_unknown")
+                .unwrap()
+                .contains("不表示需要重新授权")
+        );
+        assert!(
+            rejection(&json!({"error_code":"platform_authorization_required"}))
+                .unwrap()
+                .starts_with("需要系统确认：")
+        );
+        assert!(
+            rejection(&json!({"error_code":"task_authorization_expired"}))
+                .unwrap()
+                .starts_with("授权已失效：")
+        );
+        assert!(
+            rejection(&json!({"error_code":"task_authorization_revoked"}))
+                .unwrap()
+                .starts_with("授权已撤销：")
+        );
+        assert!(
+            !reason("task_authorization_expiry_required")
+                .unwrap()
+                .contains("已失效")
+        );
+    }
+    #[test]
     fn permission_view_account_device_and_local_denials_are_distinct() {
         let (mut f, mut r, mut p) = fixture();
         p.scopes = vec!["code:read".into()];
@@ -352,7 +411,7 @@ mod tests {
             .split("<details id='advanced-permissions'>")
             .next()
             .unwrap();
-        assert!(default.contains("已连接 · 本机用户完全访问"));
+        assert!(default.contains("已连接 · 已就绪，无需操作"));
         assert!(default.contains("撤销或断开"));
         assert!(!default.contains("code:read"));
         assert!(!default.contains("/project"));
@@ -374,7 +433,7 @@ mod tests {
         };
         let mut owner = snapshot(&fleet, &registrations, &principal);
         owner_status(&mut owner);
-        assert!(!default(owner).contains("完全访问"));
+        assert!(!default(owner).contains("已就绪，无需操作"));
         for condition in [
             "unknown",
             "offline",
@@ -394,7 +453,7 @@ mod tests {
                 _ => unreachable!(),
             }
             assert!(
-                !default(snapshot(&f, &r, &p)).contains("完全访问"),
+                !default(snapshot(&f, &r, &p)).contains("已就绪，无需操作"),
                 "{condition}"
             );
         }

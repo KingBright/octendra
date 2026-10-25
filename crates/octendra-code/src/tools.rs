@@ -368,8 +368,12 @@ fn build_catalog() -> Vec<Tool> {
     );
     add(
         "terminal_exec",
-        "Execute using the connection's existing account/device and local-user permissions. This server adds no per-command business approval; host confirmations remain host-controlled. Default pty=false uses real pipes with stdin EOF and combined stdout/stderr; use pty=true only for interactive input. Shell has local-user authority outside code roots. Write-capable action. By default waits up to 2000 ms so short commands can return exit/output in one call; long commands return the same durable terminal_id. wait_ms may be 0..60000 and never stops the command.",
-        json!({"workspace_id":string(),"idempotency_key":string(),"action":{"type":"string","enum":["shell","maintenance_task"],"default":"shell"},"command":string(),"sudo":{"type":"boolean","default":false,"description":"Use device-local OS sudo credentials; noninteractive shell only. Never send a password."},"pty":{"type":"boolean"},"timeout_seconds":integer(1,86400),"cols":integer(20,500),"rows":integer(5,200),"wait_ms":{"type":"integer","minimum":0,"maximum":60000,"default":2000},"maintenance_step":{"type":"string","enum":["prepare","run","approve","cancel","verify"]},"maintenance_request_id":string(),"maintenance_action":{"type":"string","enum":["inspect_weavelo_mesh","repair_weavelo_mesh_ownership"]},"plan_sha256":string()}),
+        &format!(
+            "Execute using the connection's existing account/device and local-user permissions. This server adds no per-command business approval; host confirmations remain host-controlled. Default pty=false uses real pipes with stdin EOF and combined stdout/stderr; use pty=true only for interactive input. Shell has local-user authority outside code roots. Write-capable action. By default waits up to {} ms so short commands can return exit/output in one call; long commands return the same durable terminal_id. wait_ms may be 0..{} and never stops the command.",
+            crate::terminal::DEFAULT_WAIT_MS,
+            crate::terminal::MAX_WAIT_MS
+        ),
+        json!({"workspace_id":string(),"idempotency_key":string(),"action":{"type":"string","enum":["shell","maintenance_task"],"default":"shell"},"command":string(),"sudo":{"type":"boolean","default":false,"description":"Use device-local OS sudo credentials; noninteractive shell only. Never send a password."},"pty":{"type":"boolean"},"timeout_seconds":integer(1,86400),"cols":integer(20,500),"rows":integer(5,200),"wait_ms":{"type":"integer","minimum":0,"maximum":crate::terminal::MAX_WAIT_MS,"default":crate::terminal::DEFAULT_WAIT_MS},"maintenance_step":{"type":"string","enum":["prepare","run","approve","cancel","verify"]},"maintenance_request_id":string(),"maintenance_action":{"type":"string","enum":["inspect_weavelo_mesh","repair_weavelo_mesh_ownership"]},"plan_sha256":string()}),
         vec!["workspace_id"],
     );
     add(
@@ -475,6 +479,36 @@ fn build_catalog() -> Vec<Tool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_wait_catalog_matches_execution_defaults_and_bounds() {
+        let catalog = serde_json::to_value(catalog()).unwrap();
+        let tool = catalog
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "terminal_exec")
+            .unwrap();
+        let wait = &tool["inputSchema"]["properties"]["wait_ms"];
+        let default = crate::terminal::inline_wait_ms(&json!({})).unwrap();
+        assert_eq!(default, 10_000);
+        assert_eq!(wait["default"], default);
+        assert_eq!(wait["minimum"], 0);
+        assert_eq!(wait["maximum"], 60_000);
+        let description = tool["description"].as_str().unwrap();
+        assert!(description.contains(&format!("waits up to {default} ms")));
+        assert!(description.contains("wait_ms may be 0..60000"));
+        for value in [0, 1_000, 2_000, 10_000, 60_000] {
+            let arguments = json!({"workspace_id":"fixture", "idempotency_key":"fixture", "command":"true", "wait_ms":value});
+            validate("terminal_exec", &arguments).unwrap();
+            assert_eq!(crate::terminal::inline_wait_ms(&arguments).unwrap(), value);
+        }
+        for value in [json!(-1), json!(60_001), json!(1.5), json!("10000")] {
+            let arguments = json!({"workspace_id":"fixture", "idempotency_key":"fixture", "command":"true", "wait_ms":value});
+            assert!(validate("terminal_exec", &arguments).is_err());
+            assert!(crate::terminal::inline_wait_ms(&arguments).is_err());
+        }
+    }
 
     #[test]
     fn observer_catalog_has_only_observe_consent_and_no_act_variant() {

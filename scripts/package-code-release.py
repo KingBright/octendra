@@ -63,6 +63,7 @@ def machine_contract(binary, version):
         raise ValueError('release machine contract contains session-specific fields')
     return contract
 
+@release_current.admission()
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--version', required=True)

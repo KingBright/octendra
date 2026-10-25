@@ -11,6 +11,8 @@ import pathlib
 import tempfile
 import time
 
+import lifecycle_preload_gate as preload_gate
+import release_current as lifecycle
 
 
 def atomic_json(path, value):
@@ -68,6 +70,14 @@ def stale_owner_recoverable(previous):
 
 @contextlib.contextmanager
 def lease(directory, report, snapshot_id, execution_root=None):
+    with lifecycle.admission():
+        with _lease(directory, report, snapshot_id, execution_root) as checkout:
+            yield checkout
+
+
+@contextlib.contextmanager
+def _lease(directory, report, snapshot_id, execution_root=None):
+    preload_gate.require_admitted()
     if os.name != 'posix':
         raise RuntimeError('build slot locking currently requires POSIX')
     import fcntl

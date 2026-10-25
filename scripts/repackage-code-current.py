@@ -233,6 +233,7 @@ def stage(root, base, validation_path, delta, source_commit=None):
     return manifest
 
 
+@release_current.admission()
 def run(root, report, validation, base_hash, bundle_hash):
     root=release_current.primary(root)
     if report.exists():raise ValueError('report already exists; observe the original packaging operation')

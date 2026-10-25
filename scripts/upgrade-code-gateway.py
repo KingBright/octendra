@@ -12,6 +12,7 @@ import os
 import pathlib
 import shutil
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import time
@@ -28,6 +29,7 @@ def checksum(path):
 
 
 def atomic_copy(source, destination):
+    previous = destination.stat()
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=str(destination.parent), delete=False) as stream:
         temp = pathlib.Path(stream.name)
@@ -36,7 +38,9 @@ def atomic_copy(source, destination):
                 shutil.copyfileobj(src, stream)
             stream.flush()
             os.fsync(stream.fileno())
-            os.fchmod(stream.fileno(), 0o755)
+            os.fchown(stream.fileno(), previous.st_uid, previous.st_gid)
+            os.fchmod(stream.fileno(), stat.S_IMODE(previous.st_mode))
+            os.fsync(stream.fileno())
             os.replace(str(temp), str(destination))
         finally:
             temp.unlink(missing_ok=True)
@@ -213,29 +217,14 @@ def main():
             ptr_tmp.flush()
             os.fsync(ptr_tmp.fileno())
             os.replace(str(ptr_tmp_path), str(current_ptr))
-        reclaimed = 0
-        backups = sorted(
-            [p for p in backup_root.iterdir() if p.is_dir() and p.name.startswith('before-') and p != backup],
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        for old_b in backups:
-            shutil.rmtree(old_b, ignore_errors=True)
-            reclaimed += 1
-        version_dirs = sorted(
-            [p for p in backup_root.iterdir() if p.is_dir() and not p.name.startswith('before-') and p.name != args.version],
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        for old_v in version_dirs[1:]:
-            shutil.rmtree(old_v, ignore_errors=True)
-            reclaimed += 1
+        # Published releases and previous backups remain recovery evidence.
+        # Retention belongs to the shared lifecycle transaction, not cutover.
         record.update(
             state='upgraded',
             pid=int(pid_text),
             installed_sha256=checksum(binary),
             health=health,
-            pruned_old_dirs=reclaimed,
+            pruned_old_dirs=0,
         )
     except Exception as error:
         record.update(state='failed', error=str(error))

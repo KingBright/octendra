@@ -155,6 +155,7 @@ def can_reuse_format(previous, inputs):
             and digest(check['log']) == check.get('sha256'))
 
 
+@release_current.admission()
 def run(args):
     report = Path(args.report).absolute()
     previous = None
