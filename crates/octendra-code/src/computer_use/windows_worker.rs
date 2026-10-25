@@ -1,6 +1,9 @@
 //! Bounded private-pipe child. No network, shell, enrollment or authority creation.
 use super::{
-    transport::WorkerApproval, windows_authority, windows_native::Native, windows_session::Worker,
+    transport::WorkerApproval,
+    windows_authority,
+    windows_native::{Native, PhysicalDpi},
+    windows_session::Worker,
 };
 use anyhow::{Result, ensure};
 use octendra_desktop_protocol::*;
@@ -105,6 +108,7 @@ pub fn run(path: &Path) -> Result<()> {
             && a.worker_sha256 == a.agent_sha256,
         "worker binary changed"
     );
+    let _physical_dpi = PhysicalDpi::enter()?;
     unsafe {
         RoInitialize(RO_INIT_MULTITHREADED)?;
     }

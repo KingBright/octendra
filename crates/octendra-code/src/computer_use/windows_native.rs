@@ -4,7 +4,11 @@ use super::{
     windows_target::Target,
 };
 use octendra_desktop_protocol::{ErrorCode, MAX_WORKER_PIXELS, RawPixels, SourcePoint};
-use std::time::{Duration, Instant};
+use std::{
+    marker::PhantomData,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 use windows::{
     Graphics::{
         Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession},
@@ -25,10 +29,46 @@ use windows::{
                 Graphics::Capture::IGraphicsCaptureItemInterop,
             },
         },
-        UI::Accessibility::*,
+        UI::{Accessibility::*, HiDpi::*},
     },
     core::{Interface, factory},
 };
+
+/// UIA hit testing virtualizes coordinates for unaware clients. Set only this
+/// private worker's thread, before COM/UIA creation, and restore it on all exits.
+pub(super) struct PhysicalDpi {
+    previous: DPI_AWARENESS_CONTEXT,
+    same_thread: PhantomData<Rc<()>>,
+}
+impl PhysicalDpi {
+    pub fn enter() -> anyhow::Result<Self> {
+        let previous =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        anyhow::ensure!(!previous.0.is_null(), "physical DPI context unavailable");
+        let guard = Self {
+            previous,
+            same_thread: PhantomData,
+        };
+        anyhow::ensure!(Self::active(), "physical DPI context not established");
+        Ok(guard)
+    }
+    fn active() -> bool {
+        unsafe {
+            AreDpiAwarenessContextsEqual(
+                GetThreadDpiAwarenessContext(),
+                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            )
+            .as_bool()
+        }
+    }
+}
+impl Drop for PhysicalDpi {
+    fn drop(&mut self) {
+        unsafe {
+            SetThreadDpiAwarenessContext(self.previous);
+        }
+    }
+}
 
 fn qpc_100ns() -> windows::core::Result<i64> {
     let (mut ticks, mut frequency) = (0, 0);
@@ -244,6 +284,10 @@ impl Native {
         position: [i32; 2],
         maximum: usize,
     ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            PhysicalDpi::active(),
+            "UIA requires physical DPI coordinates"
+        );
         let target = Target::bind_expected(&authority)?;
         let automation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)? };
         Ok(Self {
@@ -257,8 +301,57 @@ impl Native {
         })
     }
     fn valid_input(&self, captured: Instant, deadline: Instant) -> bool {
-        let live = self.live();
+        let live = PhysicalDpi::active() && self.live();
         super::windows_session::valid_input(live, captured, deadline, Instant::now())
+    }
+    /// Inspect only ancestors below the pinned window. An occluding/foreign
+    /// process, disabled nearest control or unproven root has no fallback.
+    unsafe fn control_at(
+        &self,
+        point: [i32; 2],
+    ) -> windows::core::Result<(IUIAutomationElement, super::windows_session::Activation)> {
+        use super::windows_session::{HitNode, standard_control_ancestor};
+        let denied =
+            || windows::core::Error::from_hresult(windows::core::HRESULT(0x80070005u32 as i32));
+        if !PhysicalDpi::active() {
+            return Err(denied());
+        }
+        unsafe {
+            let root = self
+                .automation
+                .ElementFromHandle(HWND(self.authority.window_id as usize as *mut _))?;
+            let mut element = self.automation.ElementFromPoint(POINT {
+                x: point[0],
+                y: point[1],
+            })?;
+            let walker = self.automation.RawViewWalker()?;
+            let (mut elements, mut nodes) = (Vec::new(), Vec::new());
+            let mut root_reached = false;
+            for _ in 0..64 {
+                if self.automation.CompareElements(&root, &element)?.as_bool() {
+                    root_reached = true;
+                    break;
+                }
+                let pid = element.CurrentProcessId()?;
+                if pid != self.authority.process_id as i32 {
+                    return Err(denied());
+                }
+                let rect = element.CurrentBoundingRectangle()?;
+                nodes.push(HitNode {
+                    control_type: element.CurrentControlType()?.0,
+                    process_id: pid as u32,
+                    enabled: element.CurrentIsEnabled()?.as_bool(),
+                    offscreen: element.CurrentIsOffscreen()?.as_bool(),
+                    bounds: [rect.left, rect.top, rect.right, rect.bottom],
+                });
+                elements.push(element.clone());
+                element = walker.GetParentElement(&element)?;
+            }
+            let (index, operation) =
+                standard_control_ancestor(&nodes, root_reached, self.authority.process_id, point)
+                    .ok_or_else(denied)?;
+            Ok((elements[index].clone(), operation))
+        }
     }
 }
 enum Pattern {
@@ -271,7 +364,7 @@ impl Backend for Native {
         self.target.live_geometry() == Some((self.size, self.position))
     }
     fn open(&mut self) -> Result<(), ErrorCode> {
-        if !self.live() || self.capture.is_some() {
+        if !PhysicalDpi::active() || !self.live() || self.capture.is_some() {
             return Err(ErrorCode::Unavailable);
         }
         self.capture = Some(
@@ -281,7 +374,7 @@ impl Backend for Native {
         Ok(())
     }
     fn capture(&mut self, maximum: usize) -> Result<Pixels, ErrorCode> {
-        if !self.live() {
+        if !PhysicalDpi::active() || !self.live() {
             return Err(ErrorCode::StaleFrame);
         }
         let pixels = self
@@ -304,44 +397,14 @@ impl Backend for Native {
         if !self.valid_input(captured, deadline) {
             return Err(ErrorCode::StaleFrame);
         }
+        let point = super::windows_session::physical_point(self.position, self.size, point)
+            .ok_or(ErrorCode::InvalidCoordinates)?;
         // Point lookup cannot activate a window. An occluding or foreign control
         // is rejected instead of falling back to focus changes or global input.
         let prepared = (|| -> windows::core::Result<_> {
             unsafe {
-                let root = self
-                    .automation
-                    .ElementFromHandle(HWND(self.authority.window_id as usize as *mut _))?;
-                let element = self.automation.ElementFromPoint(POINT {
-                    x: self.position[0] + point.x.round() as i32,
-                    y: self.position[1] + point.y.round() as i32,
-                })?;
-                if element.CurrentProcessId()? != self.authority.process_id as i32
-                    || element.CurrentIsOffscreen()?.as_bool()
-                    || !element.CurrentIsEnabled()?.as_bool()
-                {
-                    return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
-                        0x80070005u32 as i32,
-                    )));
-                }
-                let walker = self.automation.RawViewWalker()?;
-                let mut ancestor = element.clone();
-                let mut belongs = false;
-                for _ in 0..64 {
-                    if self.automation.CompareElements(&root, &ancestor)?.as_bool() {
-                        belongs = true;
-                        break;
-                    }
-                    ancestor = walker.GetParentElement(&ancestor)?;
-                }
-                if !belongs {
-                    return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
-                        0x80070005u32 as i32,
-                    )));
-                }
-                use super::windows_session::{Activation, activation};
-                let operation = activation(element.CurrentControlType()?.0).ok_or_else(|| {
-                    windows::core::Error::from_hresult(windows::core::HRESULT(0x80070005u32 as i32))
-                })?;
+                let (element, operation) = self.control_at(point)?;
+                use super::windows_session::Activation;
                 let pattern = match operation {
                     Activation::Invoke => {
                         Pattern::Invoke(element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(
@@ -359,6 +422,19 @@ impl Backend for Native {
                         )?,
                     ),
                 };
+                // Re-hit after pattern preparation. Do not invoke a stale or
+                // substituted control even if it exposes the same pattern.
+                let (current, current_operation) = self.control_at(point)?;
+                if current_operation != operation
+                    || !self
+                        .automation
+                        .CompareElements(&element, &current)?
+                        .as_bool()
+                {
+                    return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+                        0x80070005u32 as i32,
+                    )));
+                }
                 Ok(pattern)
             }
         })();

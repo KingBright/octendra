@@ -51,6 +51,64 @@ pub(super) fn activation(control_type: i32) -> Option<Activation> {
         _ => None,
     }
 }
+/// WGC/DWM and UIA share physical pixels. Do not apply the monitor scale again.
+pub(super) fn physical_point(
+    position: [i32; 2],
+    size: [u32; 2],
+    point: SourcePoint,
+) -> Option<[i32; 2]> {
+    let mut result = [0; 2];
+    for (axis, coordinate) in [point.x, point.y].into_iter().enumerate() {
+        if size[axis] == 0
+            || !coordinate.is_finite()
+            || coordinate < 0.0
+            || coordinate > f64::from(size[axis] - 1)
+        {
+            return None;
+        }
+        let offset = i64::from(position[axis]);
+        let pixel = offset.checked_add(coordinate.round() as i64)?;
+        result[axis] = i32::try_from(pixel).ok()?;
+    }
+    Some(result)
+}
+
+pub(super) struct HitNode {
+    pub control_type: i32,
+    pub process_id: u32,
+    pub enabled: bool,
+    pub offscreen: bool,
+    pub bounds: [i32; 4],
+}
+/// The caller proves the raw ancestry ends at the pinned window. Text/content
+/// descendants may resolve to their nearest standard control, never past it.
+pub(super) fn standard_control_ancestor(
+    nodes: &[HitNode],
+    root_reached: bool,
+    process_id: u32,
+    point: [i32; 2],
+) -> Option<(usize, Activation)> {
+    if !root_reached
+        || nodes.is_empty()
+        || nodes.len() > 64
+        || nodes.iter().any(|node| node.process_id != process_id)
+    {
+        return None;
+    }
+    for (index, node) in nodes.iter().enumerate() {
+        if let Some(operation) = activation(node.control_type) {
+            let [left, top, right, bottom] = node.bounds;
+            return (node.enabled
+                && !node.offscreen
+                && left <= point[0]
+                && point[0] < right
+                && top <= point[1]
+                && point[1] < bottom)
+                .then_some((index, operation));
+        }
+    }
+    None
+}
 pub(super) fn approval_budget(expires: u64, now: u64) -> Option<Duration> {
     let remaining = expires.checked_sub(now)?;
     (remaining > 0 && remaining <= u64::from(MAX_LEASE_MS))
