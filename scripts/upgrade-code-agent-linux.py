@@ -17,6 +17,7 @@ import pathlib
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import time
@@ -36,6 +37,7 @@ def sha(path):
 
 def atomic_copy(source, target):
     target = pathlib.Path(target)
+    previous = target.stat()
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as out:
         temporary = pathlib.Path(out.name)
@@ -44,7 +46,9 @@ def atomic_copy(source, target):
                 shutil.copyfileobj(src, out)
             out.flush()
             os.fsync(out.fileno())
-            os.fchmod(out.fileno(), 0o755)
+            os.fchown(out.fileno(), previous.st_uid, previous.st_gid)
+            os.fchmod(out.fileno(), stat.S_IMODE(previous.st_mode))
+            os.fsync(out.fileno())
             os.replace(temporary, target)
         finally:
             temporary.unlink(missing_ok=True)

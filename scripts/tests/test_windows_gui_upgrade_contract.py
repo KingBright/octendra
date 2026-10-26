@@ -14,7 +14,7 @@ class WindowsGuiUpgradeContract(unittest.TestCase):
         self.assertNotIn('(& $Candidate --version).Trim()', source)
         probe = source.index('$candidateVersion =')
         acquire = source.index("Maintenance-Call 'acquire'")
-        swap = source.index('Copy-Item -LiteralPath $Candidate')
+        swap = source.index('Copy-AgentBinary -Source $Candidate')
         self.assertLess(probe, acquire)
         self.assertLess(acquire, swap)
 

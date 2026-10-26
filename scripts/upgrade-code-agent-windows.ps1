@@ -28,6 +28,20 @@ if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
 }
 $record.binary_path=$BinaryPath;$record.config_path=$ConfigPath
 function Save-Receipt { param($Value) $parent=Split-Path -Parent $Result;New-Item -ItemType Directory -Force $parent|Out-Null;$Value|ConvertTo-Json -Depth 8|Set-Content -Encoding UTF8 $Result }
+function Copy-AgentBinary {
+  param([string]$Source,[string]$Target)
+  $acl=Get-Acl -LiteralPath $Target
+  $temporary="$Target.new"
+  if (Test-Path -LiteralPath $temporary) { throw 'original replacement temporary exists; inspect before retry' }
+  try {
+    Copy-Item -LiteralPath $Source -Destination $temporary -ErrorAction Stop
+    Set-Acl -LiteralPath $temporary -AclObject $acl -ErrorAction Stop
+    if ((Get-Acl -LiteralPath $temporary).Sddl -ne $acl.Sddl) { throw 'replacement ACL differs from installed binary' }
+    Move-Item -LiteralPath $temporary -Destination $Target -Force -ErrorAction Stop
+  } finally {
+    if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -ErrorAction Stop }
+  }
+}
 function Maintenance-Call { param([string]$Action) $body=@{action=$Action;lease_id=$lease;ttl_seconds=300}|ConvertTo-Json -Compress;$headers=@{Authorization=('Bearer '+$config.device_token)};Invoke-RestMethod -Method Post -Uri ($config.gateway_url+'/device/maintenance') -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 10|Out-Null }
 function Gateway-Ready { param([string]$Expected,[long]$Baseline) $deadline=(Get-Date).AddSeconds(240);$samples=0;$session=$null;$last=$Baseline;$headers=@{Authorization=('Bearer '+$config.device_token);'Cache-Control'='no-cache'};while ((Get-Date) -lt $deadline) { try {$v=Invoke-RestMethod -Method Get -Uri ($config.gateway_url+'/device/readiness') -Headers $headers -TimeoutSec 10;if ($v.agent_version -eq $Expected -and $v.ready -eq $true -and [long]$v.last_seen -gt $last) {if ($session -ne $v.session) {$session=$v.session;$samples=1} else {$samples++};$last=[long]$v.last_seen;if ($samples -ge 3) {return @{gateway_verified=$true;session=$session;samples=$samples;last_seen=$last}}}} catch {};Start-Sleep -Seconds 2};throw 'gateway readiness did not converge' }
 try {
@@ -52,13 +66,13 @@ try {
   $backupRoot=Join-Path $env:LOCALAPPDATA ("octendra-code\releases\before-$Version-"+(Get-Date -Format yyyyMMddTHHmmss)+'-'+[guid]::NewGuid().ToString('N').Substring(0,8));New-Item -ItemType Directory -Force $backupRoot|Out-Null;$backup=Join-Path $backupRoot 'octendra-code.exe';Copy-Item -LiteralPath $BinaryPath -Destination $backup
   $record.backup=$backup;$record.previous_sha256=(Get-FileHash -Algorithm SHA256 $backup).Hash.ToLowerInvariant();$record.state='installing'
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue;Start-Sleep -Seconds 2
-  $temp="$BinaryPath.new";Copy-Item -LiteralPath $Candidate -Destination $temp -Force;Move-Item -LiteralPath $temp -Destination $BinaryPath -Force;$record.service_changed=$true
+  Copy-AgentBinary -Source $Candidate -Target $BinaryPath;$record.service_changed=$true
   if ((Get-FileHash -Algorithm SHA256 $BinaryPath).Hash.ToLowerInvariant() -ne $Sha256) {throw 'installed checksum mismatch'}
   Start-ScheduledTask -TaskName $TaskName
   $ready=Gateway-Ready $Version ([long]$before.last_seen);$record.state='upgraded';$record.installed_sha256=$Sha256;$record.gateway_verified=$true;$record.session=$ready.session;$record.samples=$ready.samples
 } catch {
   $record.state='failed';$record.error=$_.Exception.Message
-  if ($record.service_changed -and $backup) { try { Copy-Item -LiteralPath $backup -Destination $BinaryPath -Force;Start-ScheduledTask -TaskName $TaskName;$record.rollback='restored_previous_binary' } catch { $record.rollback='failed' } }
+  if ($record.service_changed -and $backup) { try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop;Start-Sleep -Seconds 2;Copy-AgentBinary -Source $backup -Target $BinaryPath;if ((Get-FileHash -Algorithm SHA256 -LiteralPath $BinaryPath).Hash.ToLowerInvariant() -ne $record.previous_sha256) { throw 'rollback checksum mismatch' };Start-ScheduledTask -TaskName $TaskName;$record.rollback='restored_previous_binary' } catch { $record.rollback='failed' } }
 }
 if ($maintenance) { try { Maintenance-Call 'release';$record.maintenance_released=$true } catch {$record.maintenance_released=$false} }
 Save-Receipt $record;$record|ConvertTo-Json -Compress
