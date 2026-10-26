@@ -13,6 +13,7 @@ import pathlib
 import re
 import tempfile
 import time
+import release_targets
 
 GATES = {'fmt', 'clippy', 'rust_tests', 'python_tests', 'workspace'}
 STAGES = {'verification', 'macos_release', 'linux_release', 'windows_release', 'package'}
@@ -55,10 +56,17 @@ def verified_build(report, expected_version):
     if not report.is_file():
         raise ReleaseError('needs_build', 'start or locate the original build producer; no publication started')
     p = json.loads(report.read_text())
+    try:
+        platforms = release_targets.selected_platforms(p.get('platforms'))
+    except (ValueError, TypeError) as error:
+        raise ReleaseError('build_not_verified', 'unknown build platform selection') from error
+    stages = {'verification', 'macos_release', 'package'} | {
+        {'linux': 'linux_release', 'windows': 'windows_release',
+         'linux-arm64': 'linux_arm64_release'}[name] for name in platforms if name != 'macos'}
     if (p.get('state') != 'passed' or p.get('version') != expected_version
             or p.get('source_inputs_unchanged') is not True or p.get('verify_only') is not False
-            or not STAGES.issubset(p.get('stages', {}))
-            or any(p['stages'][s].get('exit_code') != 0 or p['stages'][s].get('state') != 'finished' for s in STAGES)):
+            or not stages.issubset(p.get('stages', {}))
+            or any(p['stages'][s].get('exit_code') != 0 or p['stages'][s].get('state') != 'finished' for s in stages)):
         raise ReleaseError('build_not_verified', 'inspect the original build report; do not install or start an empty waiter')
     package = pathlib.Path(p['package']['path']).resolve(strict=True)
     manifest_file = package/'manifest.json'
@@ -83,10 +91,15 @@ def verified_build(report, expected_version):
             or v.get('functional_tests', {}).get('test_gates_completed_successfully') is not True):
         raise ReleaseError('verification_incomplete', 'complete the original fixed-input verification before publication')
     artifacts = m.get('artifacts', {})
-    required = {'octendra-code-macos-arm64','octendra-code-linux-amd64',
-                'octendra-code-windows-amd64.exe','upgrade-code-agent.py','agent_upgrade_support.py','launch-code-upgrade.py',
+    if 'included_platforms' in m and release_targets.selected_platforms(m['included_platforms']) != platforms:
+        raise ReleaseError('package_incomplete', 'package platform selection differs from build')
+    required = {name for name, platform in release_targets.BINARY_PLATFORMS.items()
+                if platform in platforms and name.startswith('octendra-code-')}
+    if 'linux-arm64' in platforms:
+        required.add('octendra-linux-arm64')
+    required.update({'upgrade-code-agent.py','agent_upgrade_support.py','launch-code-upgrade.py',
                 'code_upgrade_runner.py','macos_code_identity.py',
-                'upgrade-code-gateway.py','check-code-gateway.py'}
+                'upgrade-code-gateway.py','check-code-gateway.py'})
     if not required.issubset(artifacts):
         raise ReleaseError('package_incomplete', 'use the complete immutable release package')
     for name, entry in artifacts.items():

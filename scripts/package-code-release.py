@@ -18,6 +18,7 @@ import tomllib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import release_current
 import source_snapshot
+import release_targets
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -44,6 +45,21 @@ def digest(path):
         for data in iter(lambda: file.read(1024 * 1024), b''):
             h.update(data)
     return h.hexdigest()
+
+
+def binary_files(target, platforms=None):
+    selected = release_current.selected_platforms(platforms)
+    return {name: target / relative for name, (platform, relative) in release_targets.BINARY_PATHS.items()
+            if platform in selected}
+
+
+def verify_linux_architecture(path, architecture):
+    with path.open('rb') as stream:
+        header = stream.read(64)
+    machine = {'amd64': 62, 'arm64': 183}.get(architecture)
+    if (machine is None or len(header) < 20 or header[:6] != b'\x7fELF\x02\x01'
+            or int.from_bytes(header[18:20], 'little') != machine):
+        raise ValueError('Linux artifact ELF architecture mismatch: ' + path.name)
 
 def machine_contract(binary, version):
     try:
@@ -93,12 +109,6 @@ def main():
         raise SystemExit('verified source changed or evidence incomplete: ' + ', '.join(mismatches))
     target = release_current.established_target(ROOT)
     files = {
-        'octendra-code-macos-arm64': target/'release/octendra-code',
-        'octendra-code-linux-amd64': target/'x86_64-unknown-linux-musl/release/octendra-code',
-        'octendra-code-windows-amd64.exe': target/'x86_64-pc-windows-msvc/release/octendra-code.exe',
-        'octendra-macos-arm64': target/'release/octendra',
-        'octendra-linux-amd64': target/'x86_64-unknown-linux-musl/release/octendra',
-        'octendra-windows-amd64.exe': target/'x86_64-pc-windows-msvc/release/octendra.exe',
         'upgrade-code-agent.py': ROOT/'scripts/upgrade-code-agent.py',
         'agent_upgrade_support.py': ROOT/'scripts/agent_upgrade_support.py',
         'launch-code-upgrade.py': ROOT/'scripts/launch-code-upgrade.py',
@@ -123,17 +133,8 @@ def main():
         'gateway_self_upgrade_runner.py': ROOT/'scripts/gateway_self_upgrade_runner.py',
         'upgrade_instance.py': ROOT/'scripts/upgrade_instance.py',
     }
+    files.update(binary_files(target, platforms))
     files.update(parallel_files(ROOT))
-    binary_platforms = {
-        'octendra-code-macos-arm64': 'macos',
-        'octendra-code-linux-amd64': 'linux',
-        'octendra-code-windows-amd64.exe': 'windows',
-        'octendra-macos-arm64': 'macos',
-        'octendra-linux-amd64': 'linux',
-        'octendra-windows-amd64.exe': 'windows',
-    }
-    files = {name: path for name, path in files.items()
-             if name not in binary_platforms or binary_platforms[name] in platforms}
     for path in files.values():
         if not path.is_file():
             raise SystemExit('missing artifact: ' + str(path))
@@ -152,6 +153,9 @@ def main():
         for name in ('octendra-code-windows-amd64.exe', 'octendra-windows-amd64.exe'):
             if files[name].read_bytes()[:2] != b'MZ':
                 raise SystemExit('Windows artifact is not a PE executable: '+name)
+    for name, path in files.items():
+        if release_targets.BINARY_PLATFORMS.get(name) in ('linux', 'linux-arm64'):
+            verify_linux_architecture(path, 'arm64' if name.endswith('arm64') else 'amd64')
     # Compile helper source without importing it or running any deployment action.
     for path in files.values():
         if path.suffix == '.py':

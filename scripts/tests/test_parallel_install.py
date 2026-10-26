@@ -25,6 +25,22 @@ install = importlib.util.module_from_spec(spec); spec.loader.exec_module(install
 
 
 class ParallelInstallTests(unittest.TestCase):
+    def test_linux_arm64_first_install_selects_its_exact_artifact(self):
+        manifest = json.loads((self.package/'manifest.json').read_text())
+        name = 'octendra-code-linux-arm64'
+        (self.package/name).write_bytes(self.binary)
+        manifest['artifacts'][name] = {'sha256':install.digest(self.package/name),'size':len(self.binary)}
+        (self.package/'manifest.json').write_text(json.dumps(manifest))
+        self.args.manifest_sha256 = install.digest(self.package/'manifest.json')
+        with mock.patch.object(install.platform,'machine',return_value='aarch64'):
+            install.plan(self.args)
+        self.assertIn(str(self.package/name), self.checked.call_args.args[0])
+
+    def test_linux_unknown_architecture_is_not_inferred_as_amd64(self):
+        for arch in ('armv7l', 'mips64', ''):
+            with mock.patch.object(install.platform,'machine',return_value=arch):
+                with self.assertRaises(install.Refusal): install.host_artifact('linux')
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name).resolve()
@@ -51,6 +67,7 @@ class ParallelInstallTests(unittest.TestCase):
             '--public-origin','https://new.example.invalid','--legacy-origin','https://old.example.invalid',
             '--new-auth-provisioned'])
         self.host = mock.patch.object(install,'host_platform',return_value='linux');self.host.start();self.addCleanup(self.host.stop)
+        self.arch = mock.patch.object(install.platform,'machine',return_value='x86_64');self.arch.start();self.addCleanup(self.arch.stop)
         self.probe = mock.patch.object(install,'probe_service');self.probe.start();self.addCleanup(self.probe.stop)
         self.check = mock.patch.object(install,'checked',return_value='');self.checked=self.check.start();self.addCleanup(self.check.stop)
         self.service = self.base/'units/octendra-agent.service';self.service.parent.mkdir()
@@ -645,7 +662,7 @@ class ParallelInstallTests(unittest.TestCase):
             self.assertNotIn(forbidden,' '.join(command))
 
     def test_mac_refuses_unsigned_and_uses_existing_new_identity(self):
-        with mock.patch.object(install,'host_platform',return_value='macos'):
+        with mock.patch.object(install,'host_platform',return_value='macos'), mock.patch.object(install.platform,'machine',return_value='arm64'):
             with self.assertRaisesRegex(install.Refusal,'signing owner'):install.plan(self.args)
             signed=self.base/'signed';signed.write_bytes(b'signed fixture')
             receipt=self.base/'signing.json';receipt.write_text(json.dumps({'candidate_sha256':hashlib.sha256(self.binary).hexdigest(),

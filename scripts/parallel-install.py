@@ -112,12 +112,18 @@ def origin(value):
     return 'https://' + hostname.lower() + (':'+str(port) if port not in (None,443) else '')
 
 
+def host_artifact(name):
+    # This installer is also retained standalone beside installed-instance receipts.
+    # Keep selection local rather than introducing a new runtime helper dependency.
+    arch = {'aarch64':'arm64', 'arm64':'arm64', 'x86_64':'amd64', 'amd64':'amd64'}.get(platform.machine().lower())
+    if (name, arch) not in {('macos','arm64'), ('linux','arm64'), ('linux','amd64'), ('windows','amd64')}:
+        raise Refusal('supported targets are macOS arm64, Linux arm64/x86-64 and Windows x86-64')
+    return 'octendra-code-'+name+'-'+arch+('.exe' if name=='windows' else '')
+
+
 def host_platform():
     name = {'darwin': 'macos', 'linux': 'linux', 'win32': 'windows'}.get(sys.platform)
-    machine = platform.machine().lower()
-    if not name or (name == 'macos' and machine not in ('arm64', 'aarch64')) or (
-            name != 'macos' and machine not in ('amd64', 'x86_64')):
-        raise Refusal('supported targets are macOS arm64 and Linux/Windows x86-64')
+    host_artifact(name)
     return name
 
 
@@ -414,7 +420,9 @@ def plan(args):
     manifest = json.loads(manifest_path.read_text())
     if manifest.get('instance_upgrade_protocol')!=1:
         raise Refusal('bundle lacks verified instance-bound upgrade support; use the rebuilt delivery')
-    filename = 'octendra-code-'+{'linux':'linux-amd64','macos':'macos-arm64','windows':'windows-amd64.exe'}[target]
+    filename = host_artifact(target)
+    if filename not in manifest['artifacts']:
+        raise Refusal('verified package lacks this target architecture')
     source = clean_path(package/filename); expected = manifest['artifacts'][filename]['sha256']
     if digest(source) != expected:
         raise Refusal('release binary checksum mismatch')
@@ -758,7 +766,7 @@ def repair_umask(args):
             config_bytes, config_mode = repair_read(directories[root/'config'], 'agent.json', True)
             binary_bytes, binary_mode = repair_read(bin_fd, 'octendra-code', limit=268435456)
             if (binary_mode not in (0o700,0o755) or sha_bytes(config_bytes) != saved['config_sha256'] or sha_bytes(binary_bytes) != saved['binary_sha256']
-                    or manifest['artifacts']['octendra-code-linux-amd64']['sha256'] != saved['binary_sha256']):
+                    or manifest['artifacts'][host_artifact('linux')]['sha256'] != saved['binary_sha256']):
                 raise Refusal('installed binary/config or verified package binary changed')
             cfg = json.loads(config_bytes)
             if cfg.get('state_dir') != str(state) or cfg.get('gateway_url') != saved['plan']['origin']:

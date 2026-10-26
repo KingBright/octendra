@@ -50,6 +50,29 @@ class Receipts(unittest.TestCase):
         with self.assertRaises(r.ReleaseError) as e:r.verified_build(self.root/'missing','0.4.1')
         self.assertEqual(e.exception.code,'needs_build')
 
+    def test_arm64_package_requires_its_own_finished_build_stage(self):
+        path,pkg=self.build();report=json.loads(path.read_text())
+        report['platforms']=['linux-arm64']
+        manifest=json.loads((pkg/'manifest.json').read_text())
+        manifest['included_platforms']=['linux-arm64']
+        for name in ('octendra-code-linux-arm64','octendra-linux-arm64'):
+            candidate=pkg/name;candidate.write_bytes(b'artificial ARM artifact')
+            manifest['artifacts'][name]={'size':candidate.stat().st_size,'sha256':r.digest(candidate)}
+        (pkg/'manifest.json').write_text(json.dumps(manifest))
+        report['package']['manifest_sha256']=r.digest(pkg/'manifest.json')
+        path.write_text(json.dumps(report))
+        with self.assertRaises(r.ReleaseError):r.verified_build(path,'0.4.1')
+        report['stages']={'verification':{'state':'finished','exit_code':0},
+                          'macos_release':{'state':'finished','exit_code':0},
+                          'linux_arm64_release':{'state':'finished','exit_code':0},
+                          'package':{'state':'finished','exit_code':0}}
+        path.write_text(json.dumps(report))
+        result=r.verified_build(path,'0.4.1')
+        self.assertIn('octendra-code-linux-arm64',result['artifacts'])
+        report['stages']['linux_arm64_release']['exit_code']=1
+        path.write_text(json.dumps(report))
+        with self.assertRaises(r.ReleaseError):r.verified_build(path,'0.4.1')
+
     def test_running_producer_is_not_a_publishable_plan(self):
         path,_=self.build();v=json.loads(path.read_text());v['state']='running';path.write_text(json.dumps(v))
         with self.assertRaises(r.ReleaseError):r.verified_build(path,'0.4.1')

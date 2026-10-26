@@ -277,9 +277,15 @@ class CurrentTests(unittest.TestCase):
         binaries = ['release/octendra-code', 'x86_64-unknown-linux-musl/release/octendra-code',
                     'x86_64-pc-windows-msvc/release/octendra-code.exe',
                     'release/octendra', 'x86_64-unknown-linux-musl/release/octendra',
-                    'x86_64-pc-windows-msvc/release/octendra.exe']
+                    'x86_64-pc-windows-msvc/release/octendra.exe',
+                    'aarch64-unknown-linux-musl/release/octendra-code',
+                    'aarch64-unknown-linux-musl/release/octendra']
         for name in binaries:
-            path = self.target/name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'MZ fixture')
+            path = self.target/name; path.parent.mkdir(parents=True, exist_ok=True)
+            header = bytearray(64)
+            header[:6] = b'\x7fELF\x02\x01'
+            header[18:20] = (183 if name.startswith('aarch64-') else 62).to_bytes(2, 'little')
+            path.write_bytes(header if 'linux' in name else b'MZ fixture')
         verifier = source_snapshot.verifier(self.root)
         proof = {'version': '1.2.3', 'state': 'passed', 'source_inputs_unchanged': True,
                  'source_inputs': verifier.inputs(self.root), 'functional_tests': {'failed': 0},
@@ -351,7 +357,7 @@ class CurrentTests(unittest.TestCase):
         stage, bundle = lifecycle.stages(self.root)
         manifest = json.loads((stage/'manifest.json').read_text())
         self.assertEqual(manifest['included_platforms'], ['macos', 'linux'])
-        self.assertEqual(manifest['pending_platforms'], ['windows'])
+        self.assertEqual(manifest['pending_platforms'], ['windows', 'linux-arm64'])
         with tarfile.open(bundle) as archive:
             names = archive.getnames()
         self.assertNotIn('octendra-code-windows-amd64.exe', names)
@@ -369,7 +375,7 @@ class CurrentTests(unittest.TestCase):
         stage, bundle = lifecycle.stages(self.root)
         manifest = json.loads((stage/'manifest.json').read_text())
         self.assertEqual(manifest['included_platforms'], ['windows'])
-        self.assertEqual(manifest['pending_platforms'], ['macos', 'linux'])
+        self.assertEqual(manifest['pending_platforms'], ['macos', 'linux', 'linux-arm64'])
         with tarfile.open(bundle) as archive:
             names = archive.getnames()
         self.assertIn('octendra-code-windows-amd64.exe', names)
@@ -388,11 +394,39 @@ class CurrentTests(unittest.TestCase):
         self.assertEqual((current/'old').read_bytes(), b'old current')
         self.assertFalse(lifecycle.stages(self.root)[1].exists())
 
+    def test_arm64_can_be_packaged_without_amd64_or_windows(self):
+        proof, current, current_bundle = self.package_fixture()
+        for name in ('x86_64-unknown-linux-musl/release/octendra-code',
+                     'x86_64-pc-windows-msvc/release/octendra-code.exe'):
+            (self.target/name).unlink()
+        self.invoke_package(proof, platforms=['linux-arm64'])
+        stage, bundle = lifecycle.stages(self.root)
+        manifest = json.loads((stage/'manifest.json').read_text())
+        self.assertEqual(manifest['included_platforms'], ['linux-arm64'])
+        self.assertEqual(manifest['pending_platforms'], ['macos', 'linux', 'windows'])
+        with tarfile.open(bundle) as archive:
+            names = archive.getnames()
+        self.assertIn('octendra-code-linux-arm64', names)
+        self.assertIn('octendra-linux-arm64', names)
+        self.assertNotIn('octendra-code-linux-amd64', names)
+        self.assertNotIn('octendra-code-windows-amd64.exe', names)
+        self.assertEqual((current/'old').read_bytes(), b'old current')
+        self.assertEqual(current_bundle.read_bytes(), b'old bundle')
+
+    def test_renamed_amd64_is_not_packaged_as_arm64(self):
+        proof, current, _ = self.package_fixture()
+        (self.target/'aarch64-unknown-linux-musl/release/octendra-code').write_bytes(
+            (self.target/'x86_64-unknown-linux-musl/release/octendra-code').read_bytes())
+        with self.assertRaisesRegex(ValueError, 'ELF architecture'):
+            self.invoke_package(proof, platforms=['linux-arm64'])
+        self.assertEqual((current/'old').read_bytes(), b'old current')
+        self.assertFalse(lifecycle.stages(self.root)[1].exists())
+
     def test_platform_selection_rejects_empty_duplicate_and_unknown(self):
         for values in ([], ['macos', 'macos'], ['macos', 'other']):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 lifecycle.selected_platforms(values)
-        self.assertEqual(lifecycle.selected_platforms(), lifecycle.PLATFORMS)
+        self.assertEqual(lifecycle.selected_platforms(), lifecycle.DEFAULT_PLATFORMS)
         self.assertEqual(lifecycle.selected_platforms(['linux', 'macos']), ('macos', 'linux'))
         self.assertEqual(lifecycle.selected_platforms(['windows']), ('windows',))
         self.assertEqual(lifecycle.selected_platforms(['linux']), ('linux',))

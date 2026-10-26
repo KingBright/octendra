@@ -10,11 +10,13 @@ import sys
 import tempfile
 
 import source_snapshot
+import release_targets
 
 import lifecycle_preload_gate as preload_gate
 
 COMPONENT = 'octendra-three-platform'
-PLATFORMS = ('macos', 'linux', 'windows')
+PLATFORMS = release_targets.PLATFORMS
+DEFAULT_PLATFORMS = release_targets.DEFAULT_PLATFORMS
 
 
 @contextlib.contextmanager
@@ -31,11 +33,7 @@ def admission():
 
 
 def selected_platforms(values=None):
-    selected = PLATFORMS if values is None else tuple(values)
-    if (not selected or len(set(selected)) != len(selected)
-            or not set(selected).issubset(PLATFORMS)):
-        raise ValueError('invalid release platform selection')
-    return tuple(name for name in PLATFORMS if name in selected)
+    return release_targets.selected_platforms(values)
 
 
 def primary(root):

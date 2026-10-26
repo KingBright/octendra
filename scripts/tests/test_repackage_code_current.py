@@ -34,7 +34,8 @@ class RepackageTests(unittest.TestCase):
         self.current,self.bundle=repack.release_current.files(self.root)
         self.current.mkdir(parents=True)
         artifacts={}
-        for name in sorted(repack.BINARY_NAMES):
+        for name in sorted(n for n, platform in repack.BINARY_PLATFORMS.items()
+                           if platform in repack.release_current.DEFAULT_PLATFORMS):
             p=self.current/name;p.write_bytes(('verified-'+name).encode());p.chmod(0o755)
             artifacts[name]={'sha256':repack.digest(p),'size':p.stat().st_size}
         for name,source_name in repack.IMMUTABLE_PARALLEL.items():
@@ -70,6 +71,17 @@ class RepackageTests(unittest.TestCase):
         changed=dict(self.now);changed['crates/example.rs']='different'
         with self.assertRaisesRegex(ValueError,'non-packaging'):repack.source_delta(self.compiled,changed)
 
+    def test_legacy_partition_stays_legacy_and_arm64_is_explicit(self):
+        self.assertEqual(repack.base_platforms(self.manifest),('macos','linux','windows'))
+        manifest=copy.deepcopy(self.manifest)
+        manifest['included_platforms'].append('linux-arm64')
+        with self.assertRaisesRegex(ValueError,'binary set'):repack.base_platforms(manifest)
+        for name in ('octendra-code-linux-arm64','octendra-linux-arm64'):
+            manifest['artifacts'][name]={'sha256':'a'*64,'size':64}
+        self.assertEqual(repack.base_platforms(manifest),('macos','linux','windows','linux-arm64'))
+        manifest['included_platforms'].remove('linux-arm64')
+        with self.assertRaisesRegex(ValueError,'platform partition'):repack.base_platforms(manifest)
+
     def test_old_binary_contract_cannot_receive_new_parallel_installer(self):
         self.manifest.pop('instance_upgrade_protocol')
         manifest=self.current/'manifest.json';manifest.write_text(json.dumps(self.manifest))
@@ -87,7 +99,7 @@ class RepackageTests(unittest.TestCase):
 
     def test_changed_base_manifest_or_binary_refuses_before_admission(self):
         with self.assertRaisesRegex(ValueError,'explicit verified'):repack.verify_base(self.root,'0'*64,self.bundle_hash)
-        name=next(iter(repack.BINARY_NAMES));(self.current/name).write_bytes(b'modified')
+        name=next(iter(set(self.manifest['artifacts']) & repack.BINARY_NAMES));(self.current/name).write_bytes(b'modified')
         with self.assertRaisesRegex(ValueError,'artifact changed'):repack.verify_base(self.root,self.base_hash,self.bundle_hash)
 
     def test_unknown_package_file_is_never_read_or_copied(self):
@@ -104,7 +116,7 @@ class RepackageTests(unittest.TestCase):
         before={p.name:p.read_bytes() for p in self.current.iterdir()}
         m=repack.stage(self.root,self.manifest,self.validation,['scripts/parallel-install.py'])
         stage,bundle=repack.release_current.stages(self.root)
-        for name in repack.BINARY_NAMES:
+        for name in set(self.manifest['artifacts']) & repack.BINARY_NAMES:
             self.assertEqual(repack.digest(stage/name),self.manifest['artifacts'][name]['sha256'])
             self.assertTrue((stage/name).stat().st_mode & 0o111)
         self.assertEqual(before,{p.name:p.read_bytes() for p in self.current.iterdir()})
@@ -122,7 +134,7 @@ class RepackageTests(unittest.TestCase):
     def rewrite_base(self, included, pending):
         self.manifest['included_platforms']=included;self.manifest['pending_platforms']=pending
         required={name for name,platform in repack.BINARY_PLATFORMS.items() if platform in included}
-        for name in repack.BINARY_NAMES-required:
+        for name in (set(self.manifest['artifacts']) & repack.BINARY_NAMES)-required:
             (self.current/name).unlink(missing_ok=True);self.manifest['artifacts'].pop(name,None)
         self.reseal_base()
 

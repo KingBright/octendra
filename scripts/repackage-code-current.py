@@ -22,6 +22,7 @@ import tarfile
 import build_slot
 import release_current
 import source_snapshot
+import release_targets
 
 ROOT=Path(__file__).resolve().parents[1]
 ALLOWED={
@@ -37,17 +38,19 @@ IMMUTABLE_PARALLEL={
     'parallel-new-host.caddy.in':'docs/parallel-octendra/new-host.caddy.in',
 }
 DOCS=set(IMMUTABLE_PARALLEL.values())
-BINARY_PLATFORMS={
-    'octendra-code-macos-arm64':'macos','octendra-code-linux-amd64':'linux',
-    'octendra-code-windows-amd64.exe':'windows','octendra-macos-arm64':'macos',
-    'octendra-linux-amd64':'linux','octendra-windows-amd64.exe':'windows',
-}
+BINARY_PLATFORMS=release_targets.BINARY_PLATFORMS
 BINARY_NAMES=set(BINARY_PLATFORMS)
 
 
 def base_platforms(manifest):
     included,pending=manifest.get('included_platforms'),manifest.get('pending_platforms')
     known=set(release_current.PLATFORMS)
+    # Schema-1 packages published before ARM64 existed retain their original
+    # complete three-platform partition. Do not relabel them as ARM64 deliveries.
+    if (isinstance(included,list) and isinstance(pending,list)
+            and 'linux-arm64' not in included+pending
+            and not any(BINARY_PLATFORMS.get(name)=='linux-arm64' for name in manifest['artifacts'])):
+        known=set(release_current.DEFAULT_PLATFORMS)
     if (not isinstance(included,list) or not included or not isinstance(pending,list)
             or any(not isinstance(v,str) or v not in known for v in included+pending)
             or len(set(included))!=len(included) or len(set(pending))!=len(pending)

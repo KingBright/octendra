@@ -18,6 +18,7 @@ import tarfile
 import time
 
 import release_receipts as rr
+import release_targets
 from release_client import Client
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -29,6 +30,7 @@ def platform(device):
     if value == 'android':
         raise ValueError('android_requires_separate_apk_release: desktop fleet upgrade refused; never infer Linux from an Android path')
     if value in ('macos','linux','windows'): return value
+    if value: raise ValueError('unsupported target platform')
     roots=caps.get('roots') or []
     root=roots[0] if roots else ''
     if '\\' in root or (len(root)>2 and root[1:3]==':\\'): return 'windows'
@@ -313,15 +315,27 @@ def extract_command(device,remote_bundle,destination,bundle_sha):
     return 'python3 -c '+shlex.quote(code)
 
 
+def candidate_artifact(device, manifest):
+    filename = release_targets.code_artifact(platform(device), (device.get('capabilities') or {}).get('arch'))
+    if filename not in manifest['artifacts']:
+        raise ValueError('package missing target architecture artifact: ' + filename)
+    return filename, manifest['artifacts'][filename]['sha256']
+
+
+def preflight_agents(devices, manifest):
+    for device in devices:
+        if device['online']:
+            candidate_artifact(device, manifest)
+
+
 def launch_command(device,destination,manifest,version):
+    filename, sha = candidate_artifact(device, manifest)
     if platform(device)=='macos':
-        sha=manifest['artifacts']['octendra-code-macos-arm64']['sha256']
-        return shlex.join(['python3',destination+'/launch-code-upgrade.py','--candidate',destination+'/octendra-code-macos-arm64','--sha256',sha,'--version',version,'--start'])
+        return shlex.join(['python3',destination+'/launch-code-upgrade.py','--candidate',destination+'/'+filename,'--sha256',sha,'--version',version,'--start'])
     if platform(device)=='linux':
-        sha=manifest['artifacts']['octendra-code-linux-amd64']['sha256'];unit='octendra-code-upgrade-'+version.replace('.','-')
-        args=['systemd-run','--user','--unit',unit,'--collect','--working-directory',destination,'python3',destination+'/upgrade-code-agent-linux.py','--candidate',destination+'/octendra-code-linux-amd64','--sha256',sha,'--version',version,'--result',destination+'/upgrade-result.json']
+        unit='octendra-code-upgrade-'+version.replace('.','-')
+        args=['systemd-run','--user','--unit',unit,'--collect','--working-directory',destination,'python3',destination+'/upgrade-code-agent-linux.py','--candidate',destination+'/'+filename,'--sha256',sha,'--version',version,'--result',destination+'/upgrade-result.json']
         return shlex.join(args)
-    sha=manifest['artifacts']['octendra-code-windows-amd64.exe']['sha256']
     return ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File '+ps_quote(destination+'\\launch-code-upgrade-windows.ps1')+
             ' -Updater '+ps_quote(destination+'\\upgrade-code-agent-windows.ps1')+' -Candidate '+ps_quote(destination+'\\octendra-code-windows-amd64.exe')+
             ' -Sha256 '+sha+' -Version '+version+' -Result '+ps_quote(destination+'\\upgrade-result.json'))
@@ -440,6 +454,9 @@ def main():
                 raise RuntimeError('local gateway management configuration required')
         state['gateway']=gateway;save()
         fleet=desktop_scope(client.tool('fleet_status',{'desired_version':args.version}));devices=fleet['devices'];state['fleet']=fleet;save()
+        # Version convergence cannot substitute for a known matching architecture.
+        # Check before acceptance or any Agent bundle export/staging.
+        preflight_agents(devices, manifest)
         if finish_observed_fleet(config,package,directory,args.version,state,fleet):return
         controller_id=controller_device_id(config)
         local_candidates=[d for d in devices if d['online'] and platform(d) in ('macos','linux')

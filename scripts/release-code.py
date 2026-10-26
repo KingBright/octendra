@@ -132,6 +132,20 @@ def run_stage(name, argv, checkout, directory, report, state, env, timeout=1800,
         source_snapshot.check(checkout)
 
 
+def build_commands(platforms=None):
+    selected = release_current.selected_platforms(platforms)
+    native = ['cargo', 'build', '-p', 'octendra-code', '-p', 'octendra-cli', '--release', '--locked']
+    stages = [('macos_release', native)]  # Native release-manifest producer is always required.
+    for platform, label, target, driver in [
+        ('linux', 'linux_release', 'x86_64-unknown-linux-musl', ['cargo', 'zigbuild']),
+        ('windows', 'windows_release', 'x86_64-pc-windows-msvc', ['cargo', 'xwin', 'build']),
+        ('linux-arm64', 'linux_arm64_release', 'aarch64-unknown-linux-musl', ['cargo', 'zigbuild']),
+    ]:
+        if platform in selected:
+            stages.append((label, driver + native[2:] + ['--target', target]))
+    return stages
+
+
 @release_current.admission()
 def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=None, platforms=None):
     platforms = release_current.selected_platforms(platforms)
@@ -146,7 +160,7 @@ def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=N
         previous = load(report)
         if (previous.get('snapshot_id') != manifest['snapshot_id']
                 or previous.get('verify_only') != verify_only
-                or tuple(previous.get('platforms', release_current.PLATFORMS)) != platforms):
+                or tuple(previous.get('platforms', release_current.DEFAULT_PLATFORMS)) != platforms):
             raise ValueError('report belongs to different inputs or mode; never overwrite')
         print(json.dumps({'state': 'existing_attempt', 'original_state': previous['state'],
                           'report': str(report), 'action': 'observe_original; no build started'}), flush=True)
@@ -192,13 +206,7 @@ def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=N
             state['verification_gate'] = 'passed'
             build_slot.atomic_json(report, state)
             if not verify_only:
-                for name, args in [('macos_release', ['cargo', 'build', '-p', 'octendra-code', '-p', 'octendra-cli', '--release', '--locked']),
-                                   ('linux_release', ['cargo', 'zigbuild', '-p', 'octendra-code', '-p', 'octendra-cli', '--release', '--locked', '--target', 'x86_64-unknown-linux-musl']),
-                                   ('windows_release', ['cargo', 'xwin', 'build', '-p', 'octendra-code', '-p', 'octendra-cli', '--release', '--locked', '--target', 'x86_64-pc-windows-msvc'])]:
-                    # The native executable supplies the release machine contract,
-                    # including when only cross-platform binaries are packaged.
-                    if name != 'macos_release' and name.removesuffix('_release') not in platforms:
-                        continue
+                for name, args in build_commands(platforms):
                     run_stage(name, args, checkout, directory, report, state, env, manifest=manifest)
                 run_stage('package', [sys.executable, 'scripts/package-code-release.py', '--version', version,
                                      '--verification', str(directory/'verification.json'), '--producer-pid', str(os.getpid()),
@@ -271,7 +279,7 @@ def start_pipeline(snapshot, report, verify_only=False, platforms=None):
     try:
         argv = [sys.executable, str(pathlib.Path(__file__).resolve()), '--report', str(report)]
         argv.extend(['--expected-source-id', manifest['snapshot_id']])
-        if platforms != release_current.PLATFORMS:
+        if platforms != release_current.DEFAULT_PLATFORMS:
             argv.extend(['--platforms', *platforms])
         if snapshot is not None:
             argv.extend(['--snapshot', str(snapshot)])

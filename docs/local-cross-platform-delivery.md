@@ -29,6 +29,45 @@ A running operation is observed by its original handle. A completed step is reus
 
 The cloud workflow's historical results remain historical evidence. They are not an active gate and will not be polled or restarted by this delivery path. Local source and target checks replace them; tests are not removed to manufacture a successful release.
 
+## Linux ARM64 software preparation
+
+`linux` retains its existing Linux AMD64 meaning. The default selection remains
+`macos linux windows`; Linux ARM64 is the explicit `linux-arm64` selection for
+`scripts/release-code.py` and `scripts/package-code-release.py`. It builds both
+`octendra-code` and the native `octendra` CLI for `aarch64-unknown-linux-musl` and
+packages them as `octendra-code-linux-arm64` and `octendra-linux-arm64` in the
+same registered fixed current group. It does not create another component,
+output root or retained package generation. Omitted platforms remain pending.
+The native macOS machine-contract producer is still required by formal packaging.
+
+When the shared Cargo window is assigned, the minimal new-target build is:
+
+```sh
+cargo zigbuild -p octendra-code -p octendra-cli --release --locked --offline \
+  --target aarch64-unknown-linux-musl
+```
+
+Use primary main and the established `~/rust-target`. The pinned toolchain must
+first have the `aarch64-unknown-linux-musl` standard library installed; the local
+2026-10-26 inspection found only the ARM64 GNU standard library, and no reusable
+ARM64 Linux executable or ARM64 binary in the published current package.
+No build, standard-library installation, packaging or deployment is implied by
+the script fixtures. Current native binaries and runtime receipts remain intact.
+
+Linux package validation checks 64-bit little-endian ELF `e_machine` (62 for
+AMD64, 183 for ARM64). Fleet Agent selection requires an advertised architecture:
+`aarch64`/`arm64` selects ARM64 and `x86_64`/`amd64` selects AMD64. A missing,
+unsupported architecture or missing matching artifact fails before Agent bundle
+export/staging; it never falls back to another architecture. The standalone fresh
+installer also selects the host architecture without changing its permission,
+identity, signing or activation requirements. The existing NAS SSH gateway
+maintenance path remains the AMD64 gateway path; this change does not perform or
+authorize a gateway migration.
+
+Reachy Mini/RPi400 software transfer, enrollment, installation, network changes,
+media/motion actions and ARM target execution acceptance are separate gates and
+were not performed as part of this preparation.
+
 ## Current implementation boundary
 
 The runtime and cross-built artifacts are Rust. The existing coordinator/updater helpers include Python and PowerShell. Their replacement by the native Rust release executor is a separate, testable migration, not a prerequisite to removing cloud builds now.
