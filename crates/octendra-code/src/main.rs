@@ -2,6 +2,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 #[cfg(unix)]
 mod owner_password;
+#[cfg(unix)]
+mod owner_password_check;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
@@ -63,6 +65,13 @@ enum Command {
     ResetOwnerPassword {
         #[arg(long)]
         config: PathBuf,
+    },
+    /// Compare a private password file with an on-disk config, offline and read-only.
+    CheckOwnerPassword {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        password_file: PathBuf,
     },
     /// Add one independently revocable device and write its private agent config.
     Enroll {
@@ -145,6 +154,36 @@ fn lock(dir: &std::path::Path) -> Result<std::fs::File> {
 }
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Handle before any logger/service setup; never display parser diagnostics,
+    // paths, configuration, password bytes or verification errors for this command.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|a| a == "check-owner-password")
+    {
+        let result = match Cli::try_parse() {
+            Ok(Cli {
+                command:
+                    Command::CheckOwnerPassword {
+                        config,
+                        password_file,
+                    },
+            }) => {
+                #[cfg(unix)]
+                {
+                    owner_password_check::check(&config, &password_file)
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = (config, password_file);
+                    ("error", 2)
+                }
+            }
+            _ => ("error", 2),
+        };
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout().lock(), "{}", result.0);
+        std::process::exit(i32::from(result.1));
+    }
     #[cfg(windows)]
     {
         let args: Vec<_> = std::env::args().collect();
@@ -383,6 +422,7 @@ async fn main() -> Result<()> {
         Command::ResetOwnerPassword { .. } => {
             unreachable!("password reset handled before service logger initialization")
         }
+        Command::CheckOwnerPassword { .. } => unreachable!("offline check handled before logging"),
         Command::InitGateway {
             config,
             public_url,
