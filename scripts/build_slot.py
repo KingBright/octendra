@@ -1,7 +1,8 @@
-"""Existing long-lived producer lease; formal entries execute primary main.
+"""Existing long-lived producer lease; primary main owns publication.
 
 Source checkout synchronization is retired. Locks and historical metadata remain;
-callers provide primary main explicitly for execution.
+Callers provide primary main as authority; only pinned_source may own a bound
+temporary Git input inside this lease. General synchronization stays retired.
 """
 import contextlib
 import hashlib
@@ -126,6 +127,7 @@ def _lease(directory, report, snapshot_id, execution_root=None):
                     saved = json.loads(pathlib.Path(report).read_text())
                     stages = list(saved.get('stages', {}).values()) + [saved.get('build', {})]
                     unsettled = any(stage.get('cleanup', {}).get('state') == 'unconfirmed' for stage in stages)
+                    unsettled = unsettled or saved.get('source_cleanup', {}).get('state') == 'deferred'
                 except (OSError, ValueError, TypeError):
                     unsettled = True
             owner.update(state='recovery_required' if unsettled else 'released', released_at=int(time.time()))

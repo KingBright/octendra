@@ -285,6 +285,21 @@ octendra-code --version
 
 发布包有 manifest/SHA-256 时先校验 hash，再安装。
 
+正式发布器也支持构建一个明确的历史提交，同时保留当前主目录和 WIP：
+
+```bash
+python3 scripts/release-code.py --source-commit FULL_COMMIT_SHA --platforms macos \
+  --report .integration-artifacts/fixed-commit-release.json --start
+python3 scripts/release-code.py --report .integration-artifacts/fixed-commit-release.json --status
+```
+
+该模式只接受完整 Git commit SHA；原构建租约在固定受管临时目录展开该 Git 对象，
+验证、Cargo 和打包使用同一输入根，仍复用 `~/rust-target` 和原固定 current 发布事务。
+manifest 分别记录候选 `source_commit`、发布器 `producer_commit` 及其工具指纹。
+默认入口仍构建主目录，不接受任意 `--source-root`。临时源码结束后核验清理，
+原始源码身份、日志和结果回执保留；同一 report 只能观察，不能重复启动。
+只选择 macOS 时，其他平台明确记为 pending；构建和产包不会自行部署。
+
 ### 5.2 创建独立服务用户和目录
 
 ```bash

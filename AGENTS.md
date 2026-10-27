@@ -2,7 +2,7 @@
 
 ## Build and deployment authority
 
-- Build, test, package, and deploy on the owner's authorized development machines. Mac Studio is the primary release builder; build in the primary main directory and reuse the established `~/rust-target`; never create a source snapshot, slot checkout, or another Cargo target. Real build/test/acceptance/package runs only in that main tree; packaging may copy only verified final products.
+- Build, test, package, and deploy on the owner's authorized development machines. Mac Studio is the primary release builder; default builds use primary main and the established `~/rust-target`. The explicit `release-code.py --source-commit <full SHA>` entry alone may materialize that exact Git tree in the producer-owned fixed `target/release-slot/source` directory. Verification, compilation and packaging use that one bound input root; publication authority stays in primary main, source/producer identities are recorded separately, and the owned input is checked and removed when the original operation ends. Preserve primary worktree/index/WIP. Do not create other source snapshots, worktrees, arbitrary execution roots or Cargo targets; packaging may copy only verified final products.
 - Do not add or enable GitHub Actions workflows for builds, tests, release gates, or deployments. Do not wait for GitHub check-runs. Git hosting is source storage only; optional release mirroring must never block delivery.
 - Use the pinned local Rust toolchain and Cargo to produce macOS arm64, Linux x86_64 musl, and Windows x86_64 MSVC artifacts. Use the existing cargo-zigbuild/cargo-xwin linkers and SDKs. A successful cross-build is not target-platform execution evidence.
 - Verify one unchanged fingerprint of the primary main inputs (an existing snapshot may be checked as read-only evidence), preserve test and build receipts, then transfer its verified bundle directly through the authorized Octendra or configured management channel. Do not download deployment input from GitHub Releases.
@@ -16,8 +16,8 @@
 
 ## Existing entry points
 
-- Agents invoke `bash scripts/test.sh` for the existing `cargo test --workspace` command in primary main, reusing the configured cache.
-- `scripts/source_snapshot.py`: read-only input identity and legacy evidence checks; new source snapshots and checkout synchronization are retired.
+- Agents invoke `bash scripts/test.sh` for the existing `cargo test --workspace` command in primary main or the explicitly bound fixed-commit input above, reusing the configured cache.
+- `scripts/source_snapshot.py`: read-only input identity and legacy evidence checks; its general source-copy APIs and checkout synchronization remain retired. Explicit fixed-commit input ownership belongs only to `pinned_source.py` under the original producer lease.
 - `scripts/release-code.py`: local verification and three-platform Cargo cross-builds in primary main under the existing metadata-only lease; no cloud runner and no deployment.
 - `scripts/fleet-upgrade.py`: verified local bundle distribution and per-platform updaters. Use only a verified local package and explicit deployment configuration.
 - `scripts/launch-code-upgrade.py`: macOS immutable request preparation and explicit one-shot launch through the stable dispatcher; KeepAlive and automatic triggers are disabled.

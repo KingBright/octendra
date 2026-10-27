@@ -19,6 +19,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import release_current
 import source_snapshot
 import release_targets
+import pinned_source
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -86,9 +87,12 @@ def main():
     p.add_argument('--verification', required=True, type=pathlib.Path)
     p.add_argument('--producer-pid', required=True, type=int)
     p.add_argument('--platforms', nargs='+', choices=release_current.PLATFORMS)
+    p.add_argument('--source-binding', type=pathlib.Path)
     args = p.parse_args()
     platforms = release_current.selected_platforms(args.platforms)
     release_current.primary(ROOT)
+    binding = pinned_source.read(args.source_binding, ROOT) if args.source_binding else None
+    source_root = pathlib.Path(binding['source_root']) if binding else ROOT
     release_current.validate_producer(ROOT, args.producer_pid)
     proof_path = args.verification.resolve()
     proof = json.loads(proof_path.read_text())
@@ -99,42 +103,47 @@ def main():
             or not required.issubset(proof.get('checks', {}))
             or any(proof['checks'][name].get('exit_code') != 0 for name in required)):
         raise SystemExit('verification is incomplete, failed, stale or does not match release')
-    spec = importlib.util.spec_from_file_location('release_source_check', ROOT/'scripts/check-code-source.py')
+    if binding and proof.get('source_commit') != binding['source_commit']:
+        raise SystemExit('verification belongs to another source commit')
+    if binding and (proof.get('producer_commit') != binding['producer_commit'] or
+                    proof.get('producer_inputs', {}) != binding.get('producer_inputs', {})):
+        raise SystemExit('verification producer tooling differs from original binding')
+    spec = importlib.util.spec_from_file_location('release_source_check', source_root/'scripts/check-code-source.py')
     verifier = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(verifier)
-    current = verifier.inputs(ROOT)
+    current = verifier.inputs(source_root)
     mismatches = sorted(name for name in current.keys() | proof['source_inputs'].keys()
                         if current.get(name) != proof['source_inputs'].get(name))
-    if mismatches or not verifier.receipt_current(proof, ROOT):
+    if mismatches or not verifier.receipt_current(proof, source_root):
         raise SystemExit('verified source changed or evidence incomplete: ' + ', '.join(mismatches))
-    target = release_current.established_target(ROOT)
+    target = release_current.established_target(source_root)
     files = {
-        'upgrade-code-agent.py': ROOT/'scripts/upgrade-code-agent.py',
-        'agent_upgrade_support.py': ROOT/'scripts/agent_upgrade_support.py',
-        'launch-code-upgrade.py': ROOT/'scripts/launch-code-upgrade.py',
-        'code_upgrade_runner.py': ROOT/'scripts/code_upgrade_runner.py',
-        'macos_code_identity.py': ROOT/'scripts/macos_code_identity.py',
-        'upgrade-code-gateway.py': ROOT/'scripts/upgrade-code-gateway.py',
-        'check-code-gateway.py': ROOT/'scripts/check-code-gateway.py',
-        'check-terminal-delivery.py': ROOT/'scripts/check-terminal-delivery.py',
-        'release_receipts.py': ROOT/'scripts/release_receipts.py',
-        'maintenance_client.py': ROOT/'scripts/maintenance_client.py',
-        'release_targets.py': ROOT/'scripts/release_targets.py',
-        'sync_bundle.py': ROOT/'scripts/sync_bundle.py',
-        'release_client.py': ROOT/'scripts/release_client.py',
-        'native_release_client.py': ROOT/'scripts/native_release_client.py',
-        'publish-code.py': ROOT/'scripts/publish-code.py',
-        'check-collaboration.py': ROOT/'scripts/check-collaboration.py',
-        'install-code-agent.py': ROOT/'scripts/install-code-agent.py',
-        'upgrade-code-agent-linux.py': ROOT/'scripts/upgrade-code-agent-linux.py',
-        'upgrade-code-agent-windows.ps1': ROOT/'scripts/upgrade-code-agent-windows.ps1',
-        'launch-code-upgrade-windows.ps1': ROOT/'scripts/launch-code-upgrade-windows.ps1',
-        'fleet-upgrade.py': ROOT/'scripts/fleet-upgrade.py',
-        'gateway_self_upgrade_runner.py': ROOT/'scripts/gateway_self_upgrade_runner.py',
-        'upgrade_instance.py': ROOT/'scripts/upgrade_instance.py',
+        'upgrade-code-agent.py': source_root/'scripts/upgrade-code-agent.py',
+        'agent_upgrade_support.py': source_root/'scripts/agent_upgrade_support.py',
+        'launch-code-upgrade.py': source_root/'scripts/launch-code-upgrade.py',
+        'code_upgrade_runner.py': source_root/'scripts/code_upgrade_runner.py',
+        'macos_code_identity.py': source_root/'scripts/macos_code_identity.py',
+        'upgrade-code-gateway.py': source_root/'scripts/upgrade-code-gateway.py',
+        'check-code-gateway.py': source_root/'scripts/check-code-gateway.py',
+        'check-terminal-delivery.py': source_root/'scripts/check-terminal-delivery.py',
+        'release_receipts.py': source_root/'scripts/release_receipts.py',
+        'maintenance_client.py': source_root/'scripts/maintenance_client.py',
+        'release_targets.py': source_root/'scripts/release_targets.py',
+        'sync_bundle.py': source_root/'scripts/sync_bundle.py',
+        'release_client.py': source_root/'scripts/release_client.py',
+        'native_release_client.py': source_root/'scripts/native_release_client.py',
+        'publish-code.py': source_root/'scripts/publish-code.py',
+        'check-collaboration.py': source_root/'scripts/check-collaboration.py',
+        'install-code-agent.py': source_root/'scripts/install-code-agent.py',
+        'upgrade-code-agent-linux.py': source_root/'scripts/upgrade-code-agent-linux.py',
+        'upgrade-code-agent-windows.ps1': source_root/'scripts/upgrade-code-agent-windows.ps1',
+        'launch-code-upgrade-windows.ps1': source_root/'scripts/launch-code-upgrade-windows.ps1',
+        'fleet-upgrade.py': source_root/'scripts/fleet-upgrade.py',
+        'gateway_self_upgrade_runner.py': source_root/'scripts/gateway_self_upgrade_runner.py',
+        'upgrade_instance.py': source_root/'scripts/upgrade_instance.py',
     }
     files.update(binary_files(target, platforms))
-    files.update(parallel_files(ROOT))
+    files.update(parallel_files(source_root))
     for path in files.values():
         if not path.is_file():
             raise SystemExit('missing artifact: ' + str(path))
@@ -177,15 +186,15 @@ def main():
         'schema_version':1, **contract,
         'default_install_strategy':'parallel-fresh-only',
         'packaged_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        'snapshot_id':source_snapshot.identity(current, source_snapshot.executable_files(ROOT, current)),
-        'build_execution_root':str(ROOT),
+        'snapshot_id':source_snapshot.identity(current, source_snapshot.executable_files(source_root, current)),
+        'build_execution_root':str(source_root),
         'source_verification_sha256':digest(proof_path),
         'source_inputs':proof['source_inputs'], 'artifacts':artifacts,
         'included_platforms': list(platforms),
         'components': {
             'code': {'version': args.version, 'roles': ['agent', 'gateway']},
             'native_cli': {
-                'source_version': tomllib.loads((ROOT/'crates/octendra-cli/Cargo.toml').read_text())['package']['version'],
+                'source_version': tomllib.loads((source_root/'crates/octendra-cli/Cargo.toml').read_text())['package']['version'],
                 'roles': ['cli', 'mcp', 'api', 'connector'],
             },
         },
@@ -199,13 +208,16 @@ def main():
                         'workspace_context is scoped runtime state, not Git or chat-history reconstruction',
                         'native attachment and deployed-process acceptance are separate gates'],
     }
+    if binding:
+        manifest.update(source_commit=binding['source_commit'], producer_commit=binding['producer_commit'],
+                        producer_authority_root=str(ROOT), producer_inputs=binding.get('producer_inputs', {}))
     (stage/'manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')
     (stage/'SHA256SUMS').write_text(''.join(digest(stage/name)+'  '+name+'\n' for name in sorted([*files,'manifest.json','source-verification.json'])))
     (stage/'README.md').write_text(release_readme(args.version))
     with tarfile.open(bundle,'x:gz') as archive:
         for path in sorted(dest.iterdir(), key=lambda p:p.name):
             if path.is_file(): archive.add(path,arcname=path.name)
-    if verifier.inputs(ROOT) != current or not verifier.receipt_current(proof, ROOT):
+    if verifier.inputs(source_root) != current or not verifier.receipt_current(proof, source_root):
         raise ValueError('source changed during package; current was not replaced')
     print(json.dumps({'staged_current': True, 'release_dir':str(dest), 'manifest_sha256':digest(dest/'manifest.json'),
                       'bundle':str(bundle),'bundle_sha256':digest(bundle),'bundle_size':bundle.stat().st_size,

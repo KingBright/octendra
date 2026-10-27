@@ -11,6 +11,7 @@ import tempfile
 
 import source_snapshot
 import release_targets
+import pinned_source
 
 import lifecycle_preload_gate as preload_gate
 
@@ -47,9 +48,16 @@ def primary(root):
     return root
 
 
-def snapshot_evidence(snapshot, root):
+def snapshot_evidence(snapshot, root, source_binding=None, authority_root=None):
     """Read archived input bytes using the current verifier, never execute a copy."""
-    root = primary(root)
+    if source_binding:
+        authority_root = primary(authority_root)
+        binding = pinned_source.read(source_binding, authority_root)
+        root = Path(root).resolve(strict=True)
+        if root != Path(binding['source_root']) or snapshot is not None:
+            raise ValueError('pinned source binding/root mismatch')
+    else:
+        root = primary(root)
     provider = source_snapshot.verifier(root).inputs
     if snapshot is None:
         inputs = provider(root)
@@ -57,6 +65,10 @@ def snapshot_evidence(snapshot, root):
         manifest = {"source_inputs": inputs, "executable_files": executable,
                     "snapshot_id": source_snapshot.identity(inputs, executable),
                     "source_root": str(root), "scope": "primary main input fingerprint; no source copy"}
+        if source_binding:
+            manifest.update(source_binding=str(source_binding), authority_root=str(authority_root),
+                            source_commit=binding['source_commit'], producer_commit=binding['producer_commit'],
+                            scope='exact Git commit; producer-owned temporary input')
     else:
         try:
             manifest = source_snapshot.check(snapshot, input_provider=provider)
@@ -68,7 +80,14 @@ def snapshot_evidence(snapshot, root):
 
 
 def check_inputs(root, manifest):
-    root = primary(root)
+    if manifest.get('source_binding'):
+        authority = primary(manifest['authority_root'])
+        binding = pinned_source.read(manifest['source_binding'], authority)
+        root = Path(root).resolve(strict=True)
+        if root != Path(binding['source_root']) or binding['source_commit'] != manifest['source_commit']:
+            raise ValueError('pinned source identity changed')
+    else:
+        root = primary(root)
     inputs = source_snapshot.verifier(root).inputs(root)
     executable = source_snapshot.executable_files(root, inputs)
     if (inputs != manifest['source_inputs'] or executable != manifest['executable_files']

@@ -296,7 +296,7 @@ class CurrentTests(unittest.TestCase):
         current.mkdir(); (current/'old').write_bytes(b'old current'); current_bundle.write_bytes(b'old bundle')
         return proof_path, current, current_bundle
 
-    def invoke_package(self, proof, mutate=False, platforms=None):
+    def invoke_package(self, proof, mutate=False, platforms=None, binding=None):
         original_loader = package.importlib.util.module_from_spec
         def loader(spec):
             module = original_loader(spec)
@@ -316,6 +316,9 @@ class CurrentTests(unittest.TestCase):
             argv = ['package', '--version', '1.2.3', '--verification', str(proof), '--producer-pid', str(os.getpid())]
             if platforms is not None:
                 argv.extend(['--platforms', *platforms])
+            if binding:
+                argv.extend(['--source-binding', str(self.root/'target/release-slot/source-owner.json')])
+                stack.enter_context(mock.patch.object(package.pinned_source, 'read', return_value=binding))
             stack.enter_context(mock.patch.object(sys, 'argv', argv))
             stack.enter_context(mock.patch.object(lifecycle, 'validate_producer', return_value={}))
             stack.enter_context(mock.patch.object(lifecycle, 'established_target', return_value=self.target))
@@ -324,6 +327,37 @@ class CurrentTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(package.importlib.util, 'module_from_spec', side_effect=loader))
             stack.enter_context(mock.patch.object(package.shutil, 'copyfile', side_effect=copy))
             with contextlib.redirect_stdout(io.StringIO()): package.main()
+
+    def test_pinned_package_uses_candidate_helpers_and_records_both_commits(self):
+        proof, current, bundle = self.package_fixture()
+        source = self.root/'candidate-input'
+        source.mkdir()
+        for name in ('scripts', 'crates', 'docs'):
+            shutil.copytree(self.root/name, source/name)
+        (source/'Cargo.toml').write_bytes((self.root/'Cargo.toml').read_bytes())
+        (source/'scripts/upgrade-code-agent.py').write_text('# exact candidate helper\n')
+        (self.root/'scripts/upgrade-code-agent.py').write_text('# newer main helper / user WIP\n')
+        binding = {'source_root': str(source), 'source_commit': 'a'*40, 'producer_commit': 'b'*40}
+        evidence = json.loads(proof.read_text())
+        evidence.update(source_inputs=source_snapshot.verifier(source).inputs(source),
+                        source_commit='a'*40, producer_commit='b'*40)
+        proof.write_text(json.dumps(evidence))
+        self.invoke_package(proof, platforms=['macos'], binding=binding)
+        stage, _ = lifecycle.stages(self.root)
+        manifest = json.loads((stage/'manifest.json').read_text())
+        self.assertEqual(manifest['source_commit'], 'a'*40)
+        self.assertEqual(manifest['producer_commit'], 'b'*40)
+        self.assertEqual(manifest['build_execution_root'], str(source))
+        self.assertEqual((stage/'upgrade-code-agent.py').read_text(), '# exact candidate helper\n')
+        self.assertEqual((self.root/'scripts/upgrade-code-agent.py').read_text(), '# newer main helper / user WIP\n')
+        self.assertEqual((current/'old').read_bytes(), b'old current')
+
+    def test_pinned_package_rejects_receipt_for_another_commit_before_copy(self):
+        proof, current, bundle = self.package_fixture()
+        binding = {'source_root': str(self.root), 'source_commit': 'a'*40, 'producer_commit': 'b'*40}
+        with self.assertRaisesRegex(SystemExit, 'another source commit'):
+            self.invoke_package(proof, platforms=['macos'], binding=binding)
+        self.assertFalse(lifecycle.stages(self.root)[0].exists())
 
     def test_package_writes_exact_stage_group_and_preserves_current(self):
         proof, current, current_bundle = self.package_fixture()

@@ -22,6 +22,7 @@ import uuid
 import build_process
 
 import release_current
+import pinned_source
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 REQUIRED = {'fmt', 'clippy', 'rust_tests', 'python_tests', 'workspace'}
@@ -173,7 +174,7 @@ def receipt_current(proof, root):
 
 
 @release_current.admission()
-def run_verification(root, report, gates=None, timeout=900):
+def run_verification(root, report, gates=None, timeout=900, logs_root=None, source_binding=None):
     report = report.resolve()
     report.parent.mkdir(parents=True, exist_ok=True)
     # Claim destination before any expensive command; never discover a collision
@@ -182,12 +183,15 @@ def run_verification(root, report, gates=None, timeout=900):
         json.dump({'state': 'preparing', 'deployed': False}, f)
     result = {'state': 'preparing', 'checks': {}, 'source_inputs': {}, 'deployed': False}
     run = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')+'-'+uuid.uuid4().hex[:8]
-    logs = root/'target/source-verification'/run
+    logs = (logs_root if logs_root is not None else root/'target/source-verification')/run
     logs.mkdir(parents=True)
     try:
         result.update(version=tomllib.loads((root/'crates/octendra-code/Cargo.toml').read_text())['package']['version'],
                       run_id=run, scope='native source verification, not deployment', source_inputs=inputs(root), state='running',
                       execution_root=str(root.resolve()), snapshot_id=snapshot_identity(root))
+        if source_binding:
+            result.update(source_commit=source_binding['source_commit'], producer_commit=source_binding['producer_commit'],
+                          producer_inputs=source_binding.get('producer_inputs', {}))
         publish(report, result)
         # Budget only confirmed inactivity. CPU, output or process activity
         # keeps a cold compiler running regardless of its elapsed duration.
@@ -206,21 +210,22 @@ def run_verification(root, report, gates=None, timeout=900):
         env = dict(os.environ, CARGO_TERM_COLOR='never', PYTHONUNBUFFERED='1')
         for name, argv in gates:
             path = logs/(name+'.log')
+            label = str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
             started = time.monotonic()
             command_timeout = gate_timeouts.get(name, timeout)
             result['checks'][name] = {'state': 'running', 'exit_code': None,
                                       'command': list(argv), 'working_directory': str(root.resolve()),
-                                      'log': str(path.relative_to(root)), 'idle_timeout_seconds': command_timeout,
+                                      'log': label, 'idle_timeout_seconds': command_timeout,
                                       'wall_timeout_seconds': None}
             publish(report, result)
             def progress(value):
-                result['checks'][name].update(value, log=str(path.relative_to(root)))
+                result['checks'][name].update(value, log=label)
                 publish(report, result)
             try:
                 outcome = run_command(argv, root, path, env, command_timeout, on_update=progress)
             except Exception as error:
                 outcome = {'state': 'start_or_collection_failed', 'exit_code': None, 'failure_type': type(error).__name__}
-            result['checks'][name].update(outcome, log=str(path.relative_to(root)), elapsed_seconds=time.monotonic()-started,
+            result['checks'][name].update(outcome, log=label, elapsed_seconds=time.monotonic()-started,
                                          output_complete=outcome.get('output_complete', outcome['state'] == 'finished' and path.is_file()),
                                          output_truncated=False, step_index=len(result['checks'])-1,
                                          sha256=digest(path) if path.exists() else None)
@@ -257,6 +262,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--report', type=pathlib.Path, required=True)
     parser.add_argument('--check-receipt', action='store_true')
+    parser.add_argument('--source-binding', type=pathlib.Path,
+                        help='Original producer-owned fixed-commit record; no arbitrary source root')
     args = parser.parse_args()
     if args.check_receipt:
         try:
@@ -269,7 +276,11 @@ def main():
         def interrupted(_signal, _frame):
             raise KeyboardInterrupt
         signal.signal(signal.SIGTERM, interrupted)
-    result = run_verification(ROOT, args.report)
+    binding = pinned_source.read(args.source_binding, release_current.primary(ROOT)) if args.source_binding else None
+    root = pathlib.Path(binding['source_root']) if binding else ROOT
+    result = run_verification(root, args.report,
+                              logs_root=args.report.resolve().parent/'source-check-logs' if binding else None,
+                              source_binding=binding)
     if result['state'] != 'passed':
         raise SystemExit(1)
 
