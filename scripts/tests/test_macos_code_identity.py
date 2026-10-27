@@ -13,6 +13,42 @@ SPEC.loader.exec_module(IDENTITY)
 
 
 class MacOsCodeIdentityTests(unittest.TestCase):
+    def test_existing_identity_lookup_requires_exact_public_fingerprint(self):
+        fingerprint = 'a'*40
+        for listing, expected in [
+            (f'1) {fingerprint.upper()} "historical approved subject"\n', 'ready'),
+            (f'1) {fingerprint} "subject" (CSSMERR_TP_NOT_TRUSTED)\n', 'authorization_required'),
+            (f'1) {"b"*40} "subject containing {fingerprint}"\n', 'authorization_required')]:
+            with mock.patch.object(IDENTITY, '_security', return_value=subprocess.CompletedProcess([], 0, listing)) as security:
+                self.assertEqual(IDENTITY.existing_status(fingerprint)['state'], expected)
+            self.assertEqual(security.call_args.args, ('find-identity', '-v', '-p', 'codesigning'))
+
+    def test_existing_identity_signs_copy_without_unlock_create_or_trust(self):
+        fingerprint = 'a'*40
+        with tempfile.TemporaryDirectory() as tmp:
+            source = pathlib.Path(tmp)/'release'; source.write_bytes(b'artificial immutable release')
+            destination = pathlib.Path(tmp)/'signed'
+            with mock.patch.object(IDENTITY, '_security', return_value=subprocess.CompletedProcess([], 0, f'1) {fingerprint} "existing"\n')) as security, \
+                 mock.patch.object(IDENTITY.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run, \
+                 mock.patch.object(IDENTITY, 'create') as create, mock.patch.object(IDENTITY, 'authorize') as authorize:
+                result = IDENTITY.sign_existing_copy(source, destination, fingerprint)
+            self.assertEqual(source.read_bytes(), b'artificial immutable release')
+            self.assertEqual(result['installed_sha256'], IDENTITY.sha(destination))
+            self.assertEqual(security.call_count, 1)
+            create.assert_not_called(); authorize.assert_not_called()
+            self.assertEqual(run.call_count, 2)
+            for call in run.call_args_list:
+                self.assertEqual(call.args[0][0], '/usr/bin/codesign')
+                self.assertNotIn('--keychain', call.args[0])
+            self.assertIn('='+result['designated_requirement'], run.call_args.args[0])
+
+    def test_missing_existing_identity_never_signs_or_creates_replacement(self):
+        with mock.patch.object(IDENTITY, '_security', return_value=subprocess.CompletedProcess([], 0, '')), \
+             mock.patch.object(IDENTITY.subprocess, 'run') as run:
+            with self.assertRaisesRegex(RuntimeError, 'no replacement identity'):
+                IDENTITY.sign_existing_copy('/unused', '/unused', 'a'*40)
+        run.assert_not_called()
+
     def authorization_required(self, base):
         paths = IDENTITY._paths(base)
         return {

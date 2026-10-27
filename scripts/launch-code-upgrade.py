@@ -17,6 +17,7 @@ import sys
 import tempfile
 
 import macos_code_identity
+from agent_upgrade_support import validate_instance_binding, instance_dispatcher_label
 
 FILES = ('upgrade-code-agent.py', 'agent_upgrade_support.py', 'maintenance_client.py', 'macos_code_identity.py', 'job.plist')
 STABLE_LABEL = 'fun.hackerlife.octendra.upgrade'
@@ -68,9 +69,9 @@ def stable_paths(base):
     }
 
 
-def stable_plist(python, paths):
+def stable_plist(python, paths, label=STABLE_LABEL):
     return {
-        'Label': STABLE_LABEL,
+        'Label': label,
         'ProgramArguments': [str(python), str(paths['runner']), '--request', str(paths['request'])],
         'RunAtLoad': False, 'KeepAlive': False, 'ProcessType': 'Background', 'Umask': 0o077,
         'StandardOutPath': str(paths['directory'] / 'stdout.log'),
@@ -116,14 +117,14 @@ def cleanup_legacy_jobs(domain):
     return removed
 
 
-def install_stable_dispatcher(base):
+def install_stable_dispatcher(base, label=STABLE_LABEL):
     paths = stable_paths(base)
     paths['directory'].mkdir(parents=True, mode=0o700, exist_ok=True)
     os.chmod(paths['directory'], 0o700)
     source = pathlib.Path(__file__).resolve().parent / RUNNER_FILE
     runner = source.read_bytes()
     python = pathlib.Path(sys.executable).resolve(strict=True)
-    plist = plistlib.dumps(stable_plist(python, paths))
+    plist = plistlib.dumps(stable_plist(python, paths, label))
     changed = False
     if not paths['runner'].is_file() or paths['runner'].read_bytes() != runner:
         atomic_write(paths['runner'], runner)
@@ -134,9 +135,12 @@ def install_stable_dispatcher(base):
     return paths, changed
 
 
-def make_plist(label, python, script, candidate, checksum, version, result, directory):
-    return {'Label': label, 'ProgramArguments': [str(python), str(script), '--candidate', str(candidate),
-            '--sha256', checksum, '--version', version, '--result', str(result)],
+def make_plist(label, python, script, candidate, checksum, version, result, directory, binding=None):
+    argv = [str(python), str(script), '--candidate', str(candidate),
+            '--sha256', checksum, '--version', version, '--result', str(result)]
+    if binding:
+        argv += ['--instance-binding-json', json.dumps(binding, sort_keys=True)]
+    return {'Label': label, 'ProgramArguments': argv,
             'RunAtLoad': True, 'KeepAlive': False, 'ProcessType': 'Background', 'Umask': 0o077,
             'StandardOutPath': str(directory / 'stdout.log'), 'StandardErrorPath': str(directory / 'stderr.log'),
             'EnvironmentVariables': {'PATH': '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'}}
@@ -156,10 +160,23 @@ def validate_prepared(record):
         raise ValueError('prepared launch policy changed')
     if record.get('candidate') and sha(pathlib.Path(record['candidate'])) != record['candidate_sha256']:
         raise ValueError('prepared candidate changed')
+    if 'instance_binding' in record:
+        binding = validate_instance_binding(record['instance_binding'])
+        expected = make_plist(record['label'], *spec['ProgramArguments'][:2],
+                              record['candidate'], record['candidate_sha256'], record['version'],
+                              record['result'], directory, binding)['ProgramArguments']
+        if (spec['ProgramArguments'] != expected or record['base'] != binding['base'] or
+                record.get('dispatcher_label') != instance_dispatcher_label(binding)):
+            raise ValueError('prepared instance binding changed')
     return record
 
 
 def prepare(args, base, python=None):
+    binding = getattr(args, 'instance_binding', None)
+    if binding:
+        binding = validate_instance_binding(binding)
+        if pathlib.Path(base) != pathlib.Path(binding['base']):
+            raise ValueError('instance base differs from preparation base')
     candidate = args.candidate.resolve(strict=True)
     source = pathlib.Path(__file__).resolve().parent
     if sha(candidate) != args.sha256:
@@ -168,6 +185,8 @@ def prepare(args, base, python=None):
     sources = {name: (source/name).read_bytes() for name in FILES if name != 'job.plist'}
     identity_input = {'candidate': str(candidate), 'sha256': args.sha256, 'version': args.version,
                       'python': str(python), 'helpers': {n: hashlib.sha256(b).hexdigest() for n,b in sources.items()}}
+    if binding:
+        identity_input['instance_binding'] = binding
     identity = hashlib.sha256(json.dumps(identity_input, sort_keys=True).encode()).hexdigest()[:24]
     jobs = base/'releases'/'upgrade-jobs'
     jobs.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -179,18 +198,22 @@ def prepare(args, base, python=None):
         fcntl.flock(lock, fcntl.LOCK_EX)
         if directory.exists():
             return validate_prepared(json.loads((directory/'prepared.json').read_text()))
+        if binding:
+            validate_instance_binding(binding, installed=True)
         with tempfile.TemporaryDirectory(prefix='.prepare-', dir=jobs) as tmp:
             stage = pathlib.Path(tmp)
             for name, data in sources.items():
                 write_new(stage/name, data)
             result = directory/'result.json'
             spec = make_plist(label, python, directory/'upgrade-code-agent.py', candidate, args.sha256,
-                              args.version, result, directory)
+                              args.version, result, directory, binding)
             write_new(stage/'job.plist', plistlib.dumps(spec))
             record = {'state': 'prepared', 'label': label, 'base': str(pathlib.Path(base)),
                       'directory': str(directory), 'result': str(result),
                       'version': args.version, 'candidate': str(candidate), 'candidate_sha256': args.sha256,
                       'file_sha256': {name: sha(stage/name) for name in FILES}}
+            if binding:
+                record.update(instance_binding=binding, dispatcher_label=instance_dispatcher_label(binding))
             write_json(stage/'prepared.json', record)
             stage.rename(directory)
     return record
@@ -215,19 +238,23 @@ def start_once(record, require_identity=True):
 def _start_once_locked(record, require_identity=True):
     directory = pathlib.Path(record['directory'])
     base = pathlib.Path(record['base'])
+    binding = record.get('instance_binding')
+    dispatcher_label = record.get('dispatcher_label', STABLE_LABEL)
     marker = directory/'start-requested.json'
     validate_prepared(record)
     if marker.exists():
         return {'state': 'already_requested', 'result': record['result'], 'service_changed': False,
                 'recovery': 'inspect the stable updater and saved result; do not automatically resubmit'}
     if require_identity:
-        signing = macos_code_identity.status(base)
+        signing = (macos_code_identity.existing_status(binding['signing_certificate_sha1'])
+                   if binding and 'signing_certificate_sha1' in binding else
+                   macos_code_identity.status(pathlib.Path(binding['signing_base']) if binding else base))
         if signing.get('state') != 'ready':
             return {'state': 'authorization_required', 'result': record['result'],
                     'service_changed': False, 'signing': signing,
-                    'next_action': 'authorize the Octendra local signing identity once, then retry this same launch'}
+                    'next_action': 'resolve the existing signing identity with its owner; do not create or trust a replacement'}
     domain = 'gui/%d' % os.getuid()
-    current = service_state(domain)
+    current = service_state(domain, dispatcher_label)
     if current['running'] or (current['loaded'] and current.get('state') != 'not running'):
         return {'state': 'updater_busy', 'result': record['result'], 'service_changed': False,
                 'next_action': 'observe the running or scheduled stable updater; do not overwrite its request'}
@@ -238,24 +265,25 @@ def _start_once_locked(record, require_identity=True):
         if (previous_directory/'start-requested.json').exists() and not (previous_directory/'result.json').exists():
             return {'state': 'updater_busy', 'result': record['result'], 'service_changed': False,
                     'next_action': 'observe the original request outcome before replacing it'}
-    legacy_removed = cleanup_legacy_jobs(domain)
+    # An explicit instance must never clean up another installation's jobs.
+    legacy_removed = 0 if binding else cleanup_legacy_jobs(domain)
     if legacy_removed is None:
         return {'state': 'updater_busy', 'result': record['result'], 'service_changed': False,
                 'next_action': 'wait for or inspect the original legacy updater; do not start another candidate'}
-    paths, dispatcher_changed = install_stable_dispatcher(base)
-    current = service_state(domain)
+    paths, dispatcher_changed = install_stable_dispatcher(base, dispatcher_label)
+    current = service_state(domain, dispatcher_label)
     if dispatcher_changed and current['loaded']:
         subprocess.run(['launchctl', 'bootout', current['service']], check=True, timeout=10)
         current = {'loaded': False, 'running': False, 'service': current['service']}
     request = {'directory': record['directory'], 'prepared_sha256': sha(directory/'prepared.json')}
     atomic_write(paths['request'], (json.dumps(request, indent=2)+'\n').encode())
     try:
-        write_json(marker, {'state': 'kickstart_requested', 'label': STABLE_LABEL,
+        write_json(marker, {'state': 'kickstart_requested', 'label': dispatcher_label,
                             'prepared_sha256': request['prepared_sha256']})
     except FileExistsError:
         return {'state': 'already_requested', 'result': record['result'], 'service_changed': False,
                 'recovery': 'inspect the stable updater and saved result; do not automatically resubmit'}
-    outcome = {'label': STABLE_LABEL, 'result': record['result'],
+    outcome = {'label': dispatcher_label, 'result': record['result'],
                'legacy_jobs_removed': legacy_removed, 'dispatcher_changed': dispatcher_changed}
     try:
         bootstrapped = False
@@ -267,7 +295,7 @@ def _start_once_locked(record, require_identity=True):
                 write_json(directory/'bootstrap-result.json', outcome)
                 return outcome
             bootstrapped = True
-        result = subprocess.run(['launchctl', 'kickstart', f'{domain}/{STABLE_LABEL}'],
+        result = subprocess.run(['launchctl', 'kickstart', f'{domain}/{dispatcher_label}'],
                                 text=True, capture_output=True, timeout=10)
         outcome.update(state='started' if result.returncode == 0 else 'kickstart_failed',
                        exit_code=result.returncode, service_changed=result.returncode == 0,
@@ -288,13 +316,18 @@ def main():
     p.add_argument('--sha256', required=True)
     p.add_argument('--version', required=True)
     p.add_argument('--start', action='store_true')
+    p.add_argument('--instance-binding', type=pathlib.Path,
+                   help='Existing installation metadata JSON; no credentials or enrollment')
     args = p.parse_args()
     if not re.fullmatch(r'[0-9a-f]{64}', args.sha256) or not re.fullmatch(r'\d+\.\d+\.\d+', args.version):
         p.error('invalid checksum or version')
     if sys.platform != 'darwin':
         p.error('launchd upgrades require macOS')
     os.umask(0o077)
-    record = prepare(args, pathlib.Path.home()/'.local/share/octendra-code')
+    if args.instance_binding:
+        args.instance_binding = validate_instance_binding(json.loads(args.instance_binding.read_text()))
+    base = pathlib.Path(args.instance_binding['base']) if args.instance_binding else pathlib.Path.home()/'.local/share/octendra-code'
+    record = prepare(args, base)
     result = start_once(record) if args.start else record
     print(json.dumps(result))
     if result['state'] not in ('prepared', 'started', 'already_requested', 'authorization_required'):

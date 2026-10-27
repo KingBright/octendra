@@ -638,6 +638,27 @@ python3 scripts/install-code-agent.py \
 
 后续升级必须保持 release artifact 不变，只对本机安装副本做 host-local code signing。`scripts/macos_code_identity.py status` 只有在证书信任有效、专用 signing keychain 已进入当前用户 search list、且 identity 没有 `CSSMERR_*` 时才可视为 `ready`。需要授权时只使用 `scripts/macos_code_identity.py authorize`：这张 self-signed 证书使用 user-domain `trustRoot + codeSign`，不要用 `trustAsRoot`，也不要为了绕过 `codesign: no identity found` 而安装 unsigned/ad-hoc 候选。
 
+### 已有独立实例的升级
+
+已有实例不重新 enroll。布局不同于历史默认目录时，向同一个一次性入口显式提供非秘密的实例绑定：
+
+```bash
+python3 scripts/launch-code-upgrade.py --instance-binding /absolute/verified-instance.json \
+  --candidate /absolute/verified-release-binary --sha256 VERIFIED_SHA256 --version RELEASE_VERSION --start
+```
+
+绑定 JSON 的精确字段为 `schema: 1`、`base`、`binary`、`config`、`service_definition`、
+`service_label`、`device_id`、`binary_sha256`（升级前既有二进制）、`definition_sha256`，以及以下二选一：
+`signing_base`（已有专用签名目录的父目录），或 `signing_certificate_sha1`（系统中已有、已批准的精确证书指纹）。
+路径均来自该实例的已验证记录，必须为当前用户拥有、不可被其他用户写入的规范绝对路径；配置仍须私有。
+准备阶段只核配置文件元数据，不读取其内容。实际升级会核对原设备 ID、服务定义与二进制摘要，
+并验证旧安装和新副本均满足同一签名要求；不匹配即停止，不猜目录或回退到另一实例。
+
+证书指纹模式只查询公共签名身份并通过系统 `codesign` 使用已有身份，不创建 keychain、证书、信任或设备凭据。
+如果既有身份不可用或不受信任，交回原签名负责人处理；不能自动补信任或改用 ad-hoc 签名。
+省略绑定参数时保留历史布局行为，不会自动发现独立实例。实例绑定冻结在原升级请求中，
+运行和回滚都复用它；原请求已启动或结果未知时，继续读取原结果，不再次启动。
+
 ## 9. Windows 新设备
 
 Windows 仍遵守同一原则：

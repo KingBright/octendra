@@ -40,6 +40,16 @@ def validate_request(request_path):
     result = pathlib.Path(prepared["result"])
     if result.parent != directory:
         raise RuntimeError("prepared updater result escaped request directory")
+    if 'instance_binding' in prepared:
+        # The stable runner lives outside the immutable helper directory. Load
+        # only the helper whose bytes were verified above, not ambient sys.path.
+        helper = directory/'agent_upgrade_support.py'
+        namespace = {}
+        exec(compile(helper.read_bytes(), str(helper), 'exec'), namespace)
+        binding = namespace['validate_instance_binding'](prepared['instance_binding'])
+        if (prepared.get('base') != binding['base'] or
+                prepared.get('dispatcher_label') != namespace['instance_dispatcher_label'](binding)):
+            raise RuntimeError('prepared instance binding changed')
     return prepared
 
 
@@ -57,6 +67,8 @@ def main():
         "--version", prepared["version"],
         "--result", prepared["result"],
     ]
+    if 'instance_binding' in prepared:
+        argv += ['--instance-binding-json', json.dumps(prepared['instance_binding'], sort_keys=True)]
     os.execv(str(python), argv)
 
 

@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import secrets
 import shutil
 import subprocess
@@ -342,6 +343,45 @@ def sign_copy(source, destination, base):
     if value["designated_requirement"] not in requirement:
         raise RuntimeError("signed candidate designated requirement mismatch")
     return {**value, "installed_sha256": sha(destination)}
+
+
+def existing_status(certificate_sha1):
+    """Inspect an explicit approved identity using public keychain metadata only."""
+    if (not isinstance(certificate_sha1, str) or len(certificate_sha1) != 40 or
+            any(c not in '0123456789abcdefABCDEF' for c in certificate_sha1)):
+        raise ValueError('exact existing signing certificate fingerprint required')
+    fingerprint = certificate_sha1.lower()
+    listing = _security('find-identity', '-v', '-p', 'codesigning', capture=True)
+    valid = False
+    for line in listing.stdout.splitlines():
+        match = re.match(r'^\s*\d+\)\s+([0-9a-fA-F]{40})\s', line)
+        if match and match[1].lower() == fingerprint and 'CSSMERR_' not in line:
+            valid = True
+    return {'state': 'ready' if valid else 'authorization_required',
+            'certificate_name': 'Existing approved signing identity',
+            'certificate_sha1': fingerprint, 'code_identifier': CODE_IDENTIFIER,
+            'designated_requirement': f'identifier "{CODE_IDENTIFIER}" and certificate leaf = H"{fingerprint}"'}
+
+
+def sign_existing_copy(source, destination, certificate_sha1):
+    """Use an existing OS signing identity; never create/unlock/trust a keychain."""
+    value = existing_status(certificate_sha1)
+    if value['state'] != 'ready':
+        raise RuntimeError('existing signing identity unavailable; no replacement identity')
+    destination = pathlib.Path(destination)
+    shutil.copyfile(source, destination)
+    os.chmod(destination, 0o755)
+    with tempfile.NamedTemporaryFile(prefix='.octendra-requirement-', dir=destination.parent) as requirement_file:
+        requirement_file.write(('designated => '+value['designated_requirement']+'\n').encode())
+        requirement_file.flush()
+        subprocess.run(['/usr/bin/codesign', '--force', '--sign', value['certificate_sha1'],
+            '--identifier', CODE_IDENTIFIER, '--requirements', requirement_file.name,
+            '--timestamp=none', str(destination)], check=True, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, text=True, timeout=60)
+    subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '-R',
+        '='+value['designated_requirement'], str(destination)], check=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=30)
+    return {**value, 'installed_sha256': sha(destination)}
 
 
 def save_installed_metadata(base, value):

@@ -22,7 +22,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from agent_upgrade_support import GatewayObservationError, gateway_observation, wait_ready
+from agent_upgrade_support import GatewayObservationError, gateway_observation, wait_ready, validate_instance_binding
 from maintenance_client import MaintenanceLease
 import macos_code_identity
 
@@ -101,6 +101,7 @@ def main():
     parser.add_argument('--version', required=True)
     parser.add_argument('--result', required=True, type=pathlib.Path)
     parser.add_argument('--idle-timeout', type=int, default=180)
+    parser.add_argument('--instance-binding-json', help='Immutable existing-instance metadata from the one-shot launcher')
     args = parser.parse_args()
     if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?', args.version):
         parser.error('invalid release version')
@@ -109,15 +110,21 @@ def main():
     if args.idle_timeout < 0:
         parser.error('idle-timeout must not be negative')
     os.umask(0o077)
-    base = pathlib.Path.home() / '.local/share/octendra-code'
+    args.instance_binding = (validate_instance_binding(json.loads(args.instance_binding_json))
+                             if args.instance_binding_json else None)
+    base = pathlib.Path(args.instance_binding['base']) if args.instance_binding else pathlib.Path.home() / '.local/share/octendra-code'
     with upgrade_lock(base):
         perform_upgrade(args, base)
 
 
 def perform_upgrade(args, base):
-    binary = base / 'bin/octendra-code'
-    config_path = base / 'agent.json'
-    service = 'gui/%d/fun.hackerlife.octendra.agent' % os.getuid()
+    binding = getattr(args, 'instance_binding', None)
+    binary = pathlib.Path(binding['binary']) if binding else base / 'bin/octendra-code'
+    config_path = pathlib.Path(binding['config']) if binding else base / 'agent.json'
+    label = binding['service_label'] if binding else 'fun.hackerlife.octendra.agent'
+    service = 'gui/%d/%s' % (os.getuid(), label)
+    existing_certificate = binding.get('signing_certificate_sha1') if binding else None
+    signing_base = pathlib.Path(binding['signing_base']) if binding and 'signing_base' in binding else base
     record = {'version': args.version, 'candidate_sha256': args.sha256, 'state': 'preflight'}
     backup = None
     changed = False
@@ -127,12 +134,22 @@ def perform_upgrade(args, base):
     try:
         if sha(args.candidate) != args.sha256:
             raise RuntimeError('candidate checksum mismatch')
-        signing = macos_code_identity.status(base)
+        if binding:
+            validate_instance_binding(binding, installed=True)
+            config = json.loads(config_path.read_text())
+            if config.get('device_id') != binding['device_id']:
+                raise RuntimeError('instance device identity changed; no enrollment or fallback')
+        signing = (macos_code_identity.existing_status(existing_certificate) if existing_certificate
+                   else macos_code_identity.status(signing_base))
         if signing.get('state') != 'ready':
             raise RuntimeError('local signing identity is not ready')
         signing_receipt = {key: signing[key] for key in
                            ('state', 'certificate_name', 'certificate_sha1', 'code_identifier', 'designated_requirement')}
         record['signing'] = signing_receipt.copy()
+        if binding:
+            subprocess.run(['codesign', '--verify', '--strict', '-R',
+                            '='+signing['designated_requirement'], str(binary)], check=True, timeout=15)
+            record['instance_binding'] = binding
         installed = sha(binary)
         installed_meta = macos_code_identity.installed_metadata(base)
         if (installed_meta and installed_meta.get('version') == args.version
@@ -149,12 +166,14 @@ def perform_upgrade(args, base):
             return
         with tempfile.NamedTemporaryFile(prefix='.signed-candidate-', dir=binary.parent, delete=False) as file:
             signed_candidate = pathlib.Path(file.name)
-        signed = macos_code_identity.sign_copy(args.candidate, signed_candidate, base)
+        signed = (macos_code_identity.sign_existing_copy(args.candidate, signed_candidate, existing_certificate)
+                  if existing_certificate else macos_code_identity.sign_copy(args.candidate, signed_candidate, signing_base))
         record['signing'].update(installed_sha256=signed['installed_sha256'])
         version = subprocess.check_output([str(signed_candidate), '--version'], text=True, timeout=10).strip()
         if version != 'octendra-code ' + args.version:
             raise RuntimeError('signed candidate version mismatch')
-        config = json.loads(config_path.read_text())
+        if not binding:
+            config = json.loads(config_path.read_text())
         database = pathlib.Path(config['state_dir']) / 'state.sqlite'
         record['phase'] = 'gateway_preflight'
         remote_before = gateway_observation(config)
@@ -186,6 +205,8 @@ def perform_upgrade(args, base):
         record.update(backup=str(backup), previous_sha256=sha(backup))
         record['phase'] = 'installing'
         maintenance.report(record)
+        if binding:
+            validate_instance_binding(binding, installed=True)
         cutover_started = int(time.time())
         expected_installed_sha = record['signing']['installed_sha256']
         atomic_copy(signed_candidate, binary)
@@ -195,9 +216,10 @@ def perform_upgrade(args, base):
         subprocess.run(['launchctl', 'kickstart', '-k', service], check=True, timeout=10)
         requires_lanes = tuple(int(n) for n in args.version.split('-')[0].split('+')[0].split('.')) >= (0, 3, 1)
         record['phase'] = 'verifying_readiness'
+        readiness_binding = {'binding': binding} if binding else {}
         ready = wait_ready(base, config, args.version, cutover_started,
                            remote_before.get('last_seen', 0), require_lanes=requires_lanes,
-                           previous_session=remote_before.get('session'))
+                           previous_session=remote_before.get('session'), **readiness_binding)
         if sha(binary) != expected_installed_sha:
             raise RuntimeError('installed binary changed during readiness verification')
         installed_metadata = {'version': args.version, 'candidate_sha256': args.sha256,
@@ -222,7 +244,8 @@ def perform_upgrade(args, base):
                 record['rollback'] = 'binary_restored; readiness_pending'
                 record['rollback_readiness'] = wait_ready(base, config, old_version, rollback_started,
                     remote_before.get('last_seen', 0), require_lanes=False,
-                    previous_session=remote_before.get('session'))
+                    previous_session=remote_before.get('session'),
+                    **({'binding': binding} if binding else {}))
                 record['rollback'] = 'restored_previous_binary_and_verified_gateway'
             except Exception as rollback_error:
                 record['rollback'] = 'failed: ' + str(rollback_error)

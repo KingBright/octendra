@@ -2,20 +2,100 @@
 import contextlib
 import errno
 import http.client
+import hashlib
 import socket
 import ssl
 import urllib.error
 import json
 import os
 import pathlib
+import plistlib
 import re
 import sqlite3
+import stat
 import subprocess
 import time
 import urllib.parse
 import urllib.request
+import uuid
 
 LANES = {'read', 'write', 'transfer', 'terminal', 'control'}
+
+
+def validate_instance_binding(binding, *, installed=False):
+    """Bind an existing macOS installation using public metadata, never config bytes.
+
+    This is an explicit layout, not enrollment or discovery. The caller supplies
+    the already-known device ID, original binary/definition hashes and signing
+    home. There is no host list, path fallback or creation of signing material.
+    """
+    fields = {'schema', 'base', 'binary', 'config', 'service_definition',
+              'service_label', 'device_id', 'binary_sha256',
+              'definition_sha256'}
+    if (not isinstance(binding, dict) or binding.get('schema') != 1 or
+            set(binding) not in (fields | {'signing_base'}, fields | {'signing_certificate_sha1'})):
+        raise ValueError('invalid instance binding fields')
+    if 'signing_certificate_sha1' in binding and not re.fullmatch(r'[0-9a-fA-F]{40}', binding['signing_certificate_sha1']):
+        raise ValueError('invalid existing signing certificate fingerprint')
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', binding['service_label']):
+        raise ValueError('invalid instance service label')
+    if str(uuid.UUID(binding['device_id'])) != binding['device_id']:
+        raise ValueError('invalid instance device ID')
+    for key in ('binary_sha256', 'definition_sha256'):
+        if not re.fullmatch(r'[0-9a-f]{64}', binding[key]):
+            raise ValueError('invalid instance checksum')
+    paths = {}
+    path_fields = ['base', 'binary', 'config', 'service_definition']
+    if 'signing_base' in binding:
+        path_fields.append('signing_base')
+    for key in path_fields:
+        path = pathlib.Path(binding[key])
+        if not path.is_absolute() or path.resolve(strict=True) != path:
+            raise ValueError('instance paths must be explicit canonical existing paths')
+        info = path.lstat()
+        if info.st_uid != os.getuid() or info.st_mode & 0o022:
+            raise ValueError('instance path ownership or write permissions unsafe')
+        if key in ('base', 'signing_base'):
+            if not stat.S_ISDIR(info.st_mode):
+                raise ValueError('instance directory required')
+        elif not stat.S_ISREG(info.st_mode):
+            raise ValueError('instance regular file required')
+        if key == 'config' and (info.st_mode & 0o077 or info.st_size > 65536):
+            raise ValueError('instance private configuration mode or size unsafe')
+        paths[key] = path
+    for key in ('binary', 'config'):
+        if not paths[key].is_relative_to(paths['base']):
+            raise ValueError('instance binary/config must remain below explicit base')
+        parent = paths[key].parent
+        while parent != paths['base']:
+            info = parent.stat()
+            if info.st_uid != os.getuid() or info.st_mode & 0o022:
+                raise ValueError('instance ancestor ownership or write permissions unsafe')
+            parent = parent.parent
+    info = paths['service_definition'].parent.stat()
+    if info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise ValueError('instance service directory ownership or write permissions unsafe')
+    fd = os.open(paths['service_definition'], os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, 'rb') as file:
+        definition = file.read(65537)
+    if (len(definition) > 65536 or
+            hashlib.sha256(definition).hexdigest() != binding['definition_sha256']):
+        raise ValueError('instance service definition changed')
+    spec = plistlib.loads(definition)
+    if (spec.get('Label') != binding['service_label'] or
+            spec.get('ProgramArguments') != [binding['binary'], 'agent', '--config', binding['config']]):
+        raise ValueError('instance service does not bind the selected binary/config')
+    if installed:
+        with paths['binary'].open('rb') as file:
+            digest = hashlib.file_digest(file, 'sha256').hexdigest()
+        if digest != binding['binary_sha256']:
+            raise ValueError('instance installed binary changed')
+    return dict(binding)
+
+
+def instance_dispatcher_label(binding):
+    identity = json.dumps({key: binding[key] for key in ('base', 'service_label')}, sort_keys=True)
+    return 'fun.hackerlife.octendra.upgrade.' + hashlib.sha256(identity.encode()).hexdigest()[:16]
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -116,10 +196,12 @@ def gateway_observation(config, *, attempts=3, request_timeout=5):
         return value
 
 
-def local_observation(base):
-    config = json.loads((base / 'agent.json').read_text())
+def local_observation(base, binding=None):
+    config_path = pathlib.Path(binding['config']) if binding else base / 'agent.json'
+    config = json.loads(config_path.read_text())
     database = pathlib.Path(config['state_dir']) / 'state.sqlite'
-    service = 'gui/%d/fun.hackerlife.octendra.agent' % os.getuid()
+    label = binding['service_label'] if binding else 'fun.hackerlife.octendra.agent'
+    service = 'gui/%d/%s' % (os.getuid(), label)
     process = subprocess.run(['launchctl', 'print', service], text=True, capture_output=True, timeout=5)
     fields = dict(re.findall(r'^\t(state|pid|runs) = ([^\n]+)$', process.stdout, re.MULTILINE))
     pid = int(fields['pid']) if fields.get('pid', '').isdecimal() else None
@@ -172,7 +254,7 @@ def _same_local_candidate(local, identity, version, after):
 
 def wait_ready(base, config, version, after, gateway_baseline, timeout=240,
                stable_seconds=15, require_lanes=True, previous_session=None,
-               transient_grace_seconds=45, dead_process_grace_seconds=10):
+               transient_grace_seconds=45, dead_process_grace_seconds=10, binding=None):
     """Require stable identity and continued poll progress without flapping on brief outages.
 
     Cached samples never count as progress. Once a candidate identity has been
@@ -199,7 +281,7 @@ def wait_ready(base, config, version, after, gateway_baseline, timeout=240,
     while time.monotonic() < deadline:
         now_mono = time.monotonic()
         try:
-            local = local_observation(base)
+            local = local_observation(base, binding) if binding else local_observation(base)
             if previous is not None and local.get('running') is not True:
                 dead_since = dead_since or now_mono
                 last_error = 'candidate_process_not_running'
@@ -266,7 +348,7 @@ def wait_ready(base, config, version, after, gateway_baseline, timeout=240,
             last_transient_category = error.diagnostic['category']
             if previous is not None:
                 try:
-                    local = local_observation(base)
+                    local = local_observation(base, binding) if binding else local_observation(base)
                 except Exception:
                     local = {}
                 if _same_local_candidate(local, previous, version, after):
