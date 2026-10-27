@@ -202,6 +202,16 @@ impl Auth {
     pub(crate) fn allow_owner_password_attempt(&self) -> bool {
         self.limit("password", 10)
     }
+    fn owner_password_retry_after(&self) -> i64 {
+        self.rate
+            .lock()
+            .ok()
+            .and_then(|rate| {
+                rate.get("password")
+                    .map(|entry| (entry.0 + 60 - now()).clamp(1, 60))
+            })
+            .unwrap_or(60)
+    }
     pub(crate) async fn owner_password_valid(&self, password: String) -> bool {
         let encoded = self.config.password_hash.clone();
         tokio::task::spawn_blocking(move || {
@@ -404,7 +414,57 @@ struct Approval {
     nonce: String,
     password: String,
 }
-async fn approve(
+async fn approve(state: State<Auth>, headers: HeaderMap, form: Form<Approval>) -> Response {
+    let auth = state.0.clone();
+    let browser = headers.get_all(header::ACCEPT).iter().any(|value| {
+        value.to_str().is_ok_and(|value| {
+            value
+                .split(',')
+                .any(|mime| mime.trim().split(';').next() == Some("text/html"))
+        })
+    });
+    match approve_request(state, headers, form).await {
+        Ok(response) => response,
+        Err((status, body))
+            if status == StatusCode::TOO_MANY_REQUESTS && body.0["error"] == "rate_limited" =>
+        {
+            let wait = auth.owner_password_retry_after();
+            let mut response = if browser {
+                (status, Html(format!(
+                    "<!doctype html><html lang=zh-CN><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>请稍后重试 · Octendra</title>{}<body><main><h1>请求过于频繁，请稍后重试</h1><p>请等待至少 {wait} 秒，再返回发起连接的客户端重新开始授权。</p><p>请停止刷新或重复提交此页。此请求未完成授权，无需重置网关密码。</p></main></body></html>",
+                    crate::branding::HEAD
+                ))).into_response()
+            } else {
+                (status, body).into_response()
+            };
+            response.headers_mut().insert(header::RETRY_AFTER, wait.to_string().parse().expect("bounded retry delay"));
+            response.headers_mut().insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+            response.headers_mut().insert(header::VARY, "Accept".parse().unwrap());
+            response
+        }
+        Err((status, body))
+            if browser
+                && status == StatusCode::BAD_REQUEST
+                && body.0["error"] == "invalid_request" =>
+        {
+            (
+                status,
+                [
+                    (header::CACHE_CONTROL, "no-store"),
+                    (header::VARY, "Accept"),
+                ],
+                Html(format!(
+                    "<!doctype html><html lang=zh-CN><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>请重新发起授权 · Octendra</title>{}<body><main><h1>本次授权请求已失效或无效</h1><p>请返回发起连接的客户端，重新开始连接或授权，再在新打开的页面完成操作。</p><p>请勿刷新或重复提交此页。此请求未完成授权，无需因此重置网关密码。</p></main></body></html>",
+                    crate::branding::HEAD
+                )),
+            )
+                .into_response()
+        }
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn approve_request(
     State(a): State<Auth>,
     headers: HeaderMap,
     Form(f): Form<Approval>,

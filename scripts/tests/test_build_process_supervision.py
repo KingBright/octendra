@@ -166,7 +166,7 @@ class SupervisionTests(unittest.TestCase):
     def test_start_claim_never_spawns_twice(self):
         snapshot = self.root/'snapshot';snapshot.mkdir()
         report = self.root/'report.json'
-        with mock.patch.object(runner.source_snapshot, 'check', return_value={'snapshot_id':'fixture'}), \
+        with mock.patch.object(runner.release_current, 'snapshot_evidence', return_value={'snapshot_id':'fixture'}), \
              mock.patch.object(runner.os, 'posix_spawn', return_value=12345) as spawn, \
              contextlib.redirect_stdout(io.StringIO()):
             runner.start_pipeline(snapshot, report)
@@ -232,7 +232,7 @@ class SupervisionTests(unittest.TestCase):
                    'spec=importlib.util.spec_from_file_location("launch_fixture",'+repr(str(SCRIPTS/'release-code.py'))+')\n'
                    'module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)\n'
                    'module.__file__='+repr(str(worker))+'\n'
-                   'module.source_snapshot.check=lambda _: {"snapshot_id":"fixture"}\n'
+                   'module.release_current.snapshot_evidence=lambda *args: {"snapshot_id":"fixture"}\n'
                    'module.start_pipeline(pathlib.Path('+repr(str(snapshot))+'),pathlib.Path('+repr(str(report))+'))\n'
                    'time.sleep(30)\n')
         launch_path = self.root/'report-launch.json'
