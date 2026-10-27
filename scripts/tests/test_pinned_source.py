@@ -125,7 +125,19 @@ class PinnedSourceTests(unittest.TestCase):
 
     def test_pinned_pipeline_binds_all_stages_to_one_input_and_main_publication(self):
         stages = []; target = self.root/'existing-cache'; target.mkdir()
+        lock_held = False
+        @contextlib.contextmanager
+        def compilation_lock(enabled):
+            nonlocal lock_held
+            self.assertTrue(enabled)
+            lock_held = True
+            try: yield
+            finally: lock_held = False
+        def helper(**kwargs):
+            self.assertFalse(lock_held, 'current helper acquires the shared lock itself')
+            return {}
         def stage(name, argv, checkout, directory, report, state, env, **kwargs):
+            self.assertTrue(lock_held, 'all build children require the shared lock')
             self.assertEqual(checkout, pinned_source.source_path(self.root))
             self.assertEqual((checkout/'crates/example.rs').read_text(), 'selected old source\n')
             self.assertEqual(env['PYTHONDONTWRITEBYTECODE'], '1')
@@ -152,16 +164,17 @@ class PinnedSourceTests(unittest.TestCase):
                     'source_commit': self.commit, 'artifacts': {'binary': {'sha256': pinned_source.digest(dest/'binary')}}}))
                 bundle.write_bytes(b'fixture archive')
         def publish(root):
+            self.assertFalse(lock_held, 'publish must acquire its original transaction lock')
             self.assertEqual(root, self.root)
             for a,b in zip(release_current.stages(root), release_current.files(root)): a.rename(b)
             return {'current_committed': True}
         real = subprocess.check_output
         with mock.patch.object(runner, 'ROOT', self.root), \
-             mock.patch.object(runner, 'shared_build_lock', return_value=contextlib.nullcontext()), \
+             mock.patch.object(runner, 'shared_build_lock', side_effect=compilation_lock), \
              mock.patch.object(runner, 'run_stage', side_effect=stage), \
              mock.patch.object(runner, 'build_commands', return_value=[('macos_release', ['cargo', 'build'])]), \
-             mock.patch.object(release_current, 'preflight', return_value={}), \
-             mock.patch.object(release_current, 'admit', return_value={}), \
+             mock.patch.object(release_current, 'preflight', side_effect=lambda root: helper()), \
+             mock.patch.object(release_current, 'admit', side_effect=lambda root: helper()), \
              mock.patch.object(release_current, 'publish', side_effect=publish), \
              mock.patch.object(release_current, 'established_target', return_value=target), \
              mock.patch.object(runner.subprocess, 'check_output', wraps=subprocess.check_output) as command, \

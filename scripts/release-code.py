@@ -262,7 +262,7 @@ def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=N
     admitted = False
     committed = False
     try:
-        with shared_build_lock(bool(source_commit)), build_slot.lease(slot, report, manifest['snapshot_id'] if manifest else source_commit, execution_root=ROOT):
+        with build_slot.lease(slot, report, manifest['snapshot_id'] if manifest else source_commit, execution_root=ROOT), contextlib.ExitStack() as compilation:
             with execution_source(source_commit, report, state) as (checkout, source_binding):
                 if source_binding:
                     manifest = release_current.snapshot_evidence(None, checkout, source_binding, ROOT)
@@ -279,6 +279,10 @@ def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=N
                 if not verify_only:
                     state['current_admission'] = release_current.admit(ROOT)
                     admitted = True
+                # Current helper calls own the same global lock themselves.
+                # Hold it across compilation/package, then let publish acquire
+                # its original transaction lock after all children have ended.
+                compilation.enter_context(shared_build_lock(bool(source_commit)))
                 directory = report.parent/(report.stem+'-logs')
                 directory.mkdir(exist_ok=False)
                 state['execution_root'] = str(checkout)
@@ -326,6 +330,7 @@ def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=N
                     if not bundle.is_file():
                         raise ValueError('release bundle missing after package stage')
                     release_current.check_inputs(checkout, manifest)
+                    compilation.close()
                     state['current_publication'] = release_current.publish(ROOT)
                     committed = True
                     release, bundle = release_current.files(ROOT)
