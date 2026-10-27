@@ -8462,17 +8462,18 @@ mod tests {
             .await?
             .ok_or_else(|| io::Error::other("workspace exists"))?;
         assert_eq!(visible_workspace.state, WorkspaceState::Idle);
-        let premature_claim = tokio::time::timeout(
-            StdDuration::from_millis(100),
-            repos.operations.claim_next_for_connector(
-                connector.id,
-                "claim-before-commit",
-                now,
-                now + time::Duration::minutes(1),
-                3,
-            ),
-        )
-        .await;
+        let pending_claim = repos.operations.claim_next_for_connector(
+            connector.id,
+            "claim-across-commit",
+            now,
+            now + time::Duration::minutes(1),
+            3,
+        );
+        // Keep the original request alive: dropping a SQLx future does not
+        // cancel work already queued on its SQLite worker thread.
+        tokio::pin!(pending_claim);
+        let premature_claim =
+            tokio::time::timeout(StdDuration::from_millis(100), &mut pending_claim).await;
         assert!(
             premature_claim.is_err(),
             "a concurrent SQLite writer must not complete a claim before publish commits"
@@ -8481,15 +8482,7 @@ mod tests {
         allow_commit.wait().await;
         let published_workspace = publisher.await??;
         assert_eq!(published_workspace.state, WorkspaceState::Working);
-        let claimed = repos
-            .operations
-            .claim_next_for_connector(
-                connector.id,
-                "claim-after-commit",
-                now,
-                now + time::Duration::minutes(1),
-                3,
-            )
+        let claimed = pending_claim
             .await?
             .ok_or_else(|| io::Error::other("operation is claimable after commit"))?;
         assert_eq!(claimed.id, operation.id);
@@ -9392,12 +9385,12 @@ mod tests {
                     .is_none(),
                 "a live foreign lease must block writes even at a fractional prefix"
             );
-            assert!(
+            assert_eq!(
                 repos
                     .host_write_leases
                     .list_active(host.id, expires_at)
-                    .await?
-                    .is_empty()
+                    .await?,
+                Vec::<HostWriteLease>::new()
             );
             assert!(
                 repos
@@ -9441,12 +9434,9 @@ mod tests {
                     .shorten(host.id, "host", agent_session_b.id, after, expires_at)
                     .await?
             );
-            assert!(
-                repos
-                    .host_write_leases
-                    .list_active(host.id, after)
-                    .await?
-                    .is_empty()
+            assert_eq!(
+                repos.host_write_leases.list_active(host.id, after).await?,
+                Vec::<HostWriteLease>::new()
             );
             repos
                 .host_write_leases
@@ -10811,12 +10801,9 @@ mod tests {
                 )
                 .await?
         );
-        assert!(
-            repos
-                .host_write_leases
-                .list_active(host.id, now)
-                .await?
-                .is_empty()
+        assert_eq!(
+            repos.host_write_leases.list_active(host.id, now).await?,
+            Vec::<HostWriteLease>::new()
         );
 
         let post_reconciliation_operation = OperationRun {
