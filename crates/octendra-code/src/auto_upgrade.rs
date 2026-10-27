@@ -528,26 +528,14 @@ fn valid_version(value: &str) -> bool {
 }
 
 pub fn prune_gateway_releases_and_logs(g: &Gateway) -> Value {
-    let mut reclaimed = 0u64;
-    let active_version = load_active_release(g)
-        .map(|(_, m)| m.version)
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
-
-    for root in gateway_release_roots(g) {
-        reclaimed = reclaimed.saturating_add(prune_release_tree(
-            &root,
-            Some(&active_version),
-            MAX_GATEWAY_RELEASES,
-            MAX_GATEWAY_RELEASE_DIR_BYTES,
-        ));
-    }
-    reclaimed = reclaimed.saturating_add(prune_log_dir(
-        &g.config.state_dir.join("logs"),
-        MAX_LOG_DIR_BYTES,
-    ));
+    // Publication/recovery owns its exact current staging paths. Startup cannot
+    // prove ownership or inactivity of historical releases and rollback evidence.
+    let reclaimed = prune_log_dir(&g.config.state_dir.join("logs"), MAX_LOG_DIR_BYTES);
     json!({
         "reclaimed_bytes": reclaimed,
         "max_release_bytes": MAX_GATEWAY_RELEASE_DIR_BYTES,
+        "max_release_bytes_enforced": false,
+        "release_cleanup": "preserved_for_lifecycle_owner",
         "max_log_bytes": MAX_LOG_DIR_BYTES
     })
 }
@@ -1883,6 +1871,60 @@ async fn perform_automatic_rollback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn gateway_startup_preserves_historical_and_inflight_release_evidence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let config = tmp.path().join("config/gateway.json");
+        let roots = [
+            state.join("releases"),
+            config.parent().unwrap().join("releases"),
+        ];
+        for root in &roots {
+            for name in ["0.10.36", "before-0.12.1-fixture", "current"] {
+                fs::create_dir_all(root.join(name)).unwrap();
+                fs::write(
+                    root.join(name).join("bundle.tgz"),
+                    b"protected fixture bytes",
+                )
+                .unwrap();
+            }
+            fs::write(root.join(".upload.fixture.part"), b"unconfirmed transfer").unwrap();
+        }
+        let gateway = Gateway::new_with_config_path(
+            crate::GatewayConfig {
+                forge_browser: None,
+                public_url: "https://fixture.invalid".into(),
+                bind: "127.0.0.1:0".into(),
+                state_dir: state,
+                owner: "fixture".into(),
+                password_hash: "unused-fixture".into(),
+                devices: vec![],
+                redirect_uris: vec![],
+                allowed_origins: vec![],
+            },
+            config,
+        )
+        .await
+        .unwrap();
+        let result = prune_gateway_releases_and_logs(&gateway);
+        assert_eq!(result["reclaimed_bytes"], 0);
+        assert_eq!(result["max_release_bytes_enforced"], false);
+        assert_eq!(result["release_cleanup"], "preserved_for_lifecycle_owner");
+        for root in &roots {
+            for name in ["0.10.36", "before-0.12.1-fixture", "current"] {
+                assert_eq!(
+                    fs::read(root.join(name).join("bundle.tgz")).unwrap(),
+                    b"protected fixture bytes"
+                );
+            }
+            assert_eq!(
+                fs::read(root.join(".upload.fixture.part")).unwrap(),
+                b"unconfirmed transfer"
+            );
+        }
+    }
 
     #[test]
     fn release_and_log_pruning_enforces_strict_size_and_count_caps() {
