@@ -48,6 +48,8 @@ def execution_source(commit, report, state):
         raise ValueError('original pinned-source receipt exists; observe that operation')
     receipt = pinned_source.prepare(ROOT, commit, report)
     state['source_binding'] = str(receipt)
+    previous_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
     try:
         with durable.open('xb') as stream:
             stream.write(receipt.read_bytes())
@@ -67,6 +69,7 @@ def execution_source(commit, report, state):
         if state.get('source_record'):
             build_slot.atomic_json(durable, load(receipt))
         build_slot.atomic_json(report, state)
+        sys.dont_write_bytecode = previous_bytecode
 
 
 def load(path):
@@ -402,7 +405,7 @@ def start_pipeline(snapshot, report, verify_only=False, platforms=None, source_c
                        (os.POSIX_SPAWN_DUP2, output.fileno(), 1),
                        (os.POSIX_SPAWN_DUP2, output.fileno(), 2)]
             worker_pid = os.posix_spawn(sys.executable, argv,
-                                       dict(os.environ, PYTHONUNBUFFERED='1'),
+                                       dict(os.environ, PYTHONUNBUFFERED='1', PYTHONDONTWRITEBYTECODE='1'),
                                        file_actions=actions, setsid=True)
         intent.update(state='submitted', worker_pid=worker_pid, worker_process_group=worker_pid)
         build_slot.atomic_json(launch, intent)

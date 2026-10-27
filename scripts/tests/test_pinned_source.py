@@ -81,6 +81,18 @@ class PinnedSourceTests(unittest.TestCase):
                 pinned_source.resolve(self.root, value)
         self.assertFalse(pinned_source.source_path(self.root).exists())
 
+    def test_in_process_verifier_import_cannot_change_bound_source(self):
+        state = {'stages': {}}
+        with mock.patch.object(runner, 'ROOT', self.root), \
+             mock.patch.object(sys, 'dont_write_bytecode', False), \
+             build_slot.lease(self.slot, self.report, self.commit, execution_root=self.root):
+            with runner.execution_source(self.commit, self.report, state) as (source, receipt):
+                source_snapshot.verifier(source)
+                self.assertFalse(list(source.rglob('*.pyc')))
+                self.assertEqual(pinned_source.read(receipt, self.root)['source_commit'], self.commit)
+            self.assertFalse(sys.dont_write_bytecode)
+        self.assertEqual(state['source_cleanup']['state'], 'removed')
+
     def test_source_binding_rejects_other_root_and_modified_bytes(self):
         with build_slot.lease(self.slot, self.report, self.commit, execution_root=self.root):
             receipt = pinned_source.prepare(self.root, self.commit, self.report)
@@ -193,6 +205,7 @@ class PinnedSourceTests(unittest.TestCase):
             runner.start_pipeline(None, self.report, platforms=['macos'], source_commit=self.commit)
             runner.start_pipeline(None, self.report, platforms=['macos'], source_commit=self.commit)
         spawn.assert_called_once(); prepare.assert_not_called()
+        self.assertEqual(spawn.call_args.args[2]['PYTHONDONTWRITEBYTECODE'], '1')
         argv = spawn.call_args.args[1]
         self.assertEqual(argv[argv.index('--source-commit')+1], self.commit)
         self.assertNotIn('--snapshot', argv)
