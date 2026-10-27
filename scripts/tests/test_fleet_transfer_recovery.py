@@ -229,7 +229,7 @@ class TransferRecoveryTests(unittest.TestCase):
             config = root/'config.json'; config.write_text(json.dumps({'origin': 'https://fixture.example',
                 'password_file': str(root/'unused-password'), 'controller_device_id': 'device'}))
             device = {'device_id': 'device', 'name': 'fixture', 'online': True, 'converged': False,
-                      'capabilities': {'platform': 'macos', 'roots': [str(root)], 'home_dir': str(root)}}
+                      'capabilities': {'platform': 'macos', 'arch': 'aarch64', 'roots': [str(root)], 'home_dir': str(root)}}
             replies = {'file_download': [paused('export')], 'file_upload': [paused('import')],
                 'transfer_resume': [complete('export'), complete('import')],
                 'workspace_open': [{'workspace': {'id': 'device:controller'}}, {'workspace': {'id': 'device:worker'}}]}
