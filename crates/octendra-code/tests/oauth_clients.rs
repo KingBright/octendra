@@ -124,6 +124,213 @@ const GPT: &str = "https://chatgpt.com/connector_platform_oauth_redirect";
 const SPARK: &str =
     "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-fixture-gemini";
 
+#[tokio::test]
+async fn invalid_approval_browser_guides_reconnect_without_exposing_request_fields() {
+    for cause in ["format", "cookie", "expired", "missing", "callback"] {
+        let f = Fixture::new().await;
+        let nonce = if cause == "format" {
+            "fixture-invalid-nonce".into()
+        } else {
+            random()
+        };
+        let callback = "https://unapproved.example.invalid/callback";
+        if matches!(cause, "expired" | "callback") {
+            f.g.store
+                .put(
+                    "pending",
+                    &hash(&nonce),
+                    &json!({"grant":{
+                        "client_id":"fixture-client", "redirect_uri":callback,
+                        "code_challenge":"fixture-challenge", "resource":RESOURCE,
+                        "scope":"code:read"
+                    },"state":"fixture-private-state"}),
+                    octendra_code::now() + if cause == "expired" { -1 } else { 600 },
+                )
+                .await
+                .unwrap();
+        }
+        let mut headers = vec![("accept", "text/html".into()), ("origin", ORIGIN.into())];
+        if cause != "cookie" {
+            headers.push(("cookie", format!("octendra_oauth={nonce}")));
+        }
+        let (status, headers, page) = f
+            .request(
+                "POST",
+                "/oauth/approve",
+                json!({"nonce":nonce,"password":f.password}),
+                true,
+                &headers,
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{cause}");
+        assert!(
+            headers["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/html")
+        );
+        assert_eq!(headers["cache-control"], "no-store");
+        assert!(!headers.contains_key("location"));
+        assert!(!headers.contains_key("set-cookie"));
+        let html = page.as_str().unwrap();
+        assert!(html.contains("请返回发起连接的客户端"));
+        assert!(!html.contains("<form"));
+        for secret in [
+            nonce.as_str(),
+            f.password.as_str(),
+            "fixture-private-state",
+            callback,
+        ] {
+            assert!(!html.contains(secret), "{cause}");
+        }
+        let codes: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM kv WHERE kind IN ('code','oauth2_code')")
+                .fetch_one(&f.g.store.pool)
+                .await
+                .unwrap();
+        assert_eq!(codes.0, 0, "{cause}");
+    }
+}
+
+#[tokio::test]
+async fn invalid_approval_json_and_wrong_password_keep_existing_contract() {
+    let f = Fixture::new().await;
+    let (status, _, body) = f
+        .request(
+            "POST",
+            "/oauth/approve",
+            json!({"nonce":"invalid","password":f.password}),
+            true,
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body, json!({"error":"invalid_request"}));
+    let nonce = random();
+    let (status, _, body) = f
+        .request(
+            "POST",
+            "/oauth/approve",
+            json!({"nonce":nonce,"password":"fixture-wrong-password"}),
+            true,
+            &[
+                ("cookie", format!("octendra_oauth={nonce}")),
+                ("origin", ORIGIN.into()),
+                ("accept", "text/html".into()),
+            ],
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body, json!({"error":"invalid_login"}));
+}
+
+#[tokio::test]
+async fn approval_rate_limit_explains_wait_without_changing_current_budget() {
+    let f = Fixture::new().await;
+    for _ in 0..10 {
+        let (status, _, _) = f
+            .request(
+                "POST",
+                "/oauth/approve",
+                json!({"nonce":"invalid","password":"fixture"}),
+                true,
+                &[],
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    for browser in [true, false] {
+        let extra = if browser {
+            vec![("accept", "text/html".into())]
+        } else {
+            vec![]
+        };
+        let (status, headers, body) = f
+            .request(
+                "POST",
+                "/oauth/approve",
+                json!({"nonce":"invalid","password":"fixture"}),
+                true,
+                &extra,
+            )
+            .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        let wait: u64 = headers["retry-after"].to_str().unwrap().parse().unwrap();
+        assert!((1..=60).contains(&wait));
+        assert_eq!(headers["cache-control"], "no-store");
+        assert!(!headers.contains_key("location"));
+        assert!(!headers.contains_key("set-cookie"));
+        if browser {
+            let html = body.as_str().unwrap();
+            assert!(html.contains(&format!("请等待至少 {wait} 秒")));
+            assert!(html.contains("返回发起连接的客户端"));
+            assert!(!html.contains("<form"));
+        } else {
+            assert_eq!(body, json!({"error":"rate_limited"}));
+        }
+    }
+}
+
+#[tokio::test]
+async fn invalid_approval_can_reauthorize_same_client_without_registration_or_scope_change() {
+    let f = Fixture::new().await;
+    let client = f.register("none", GPT).await;
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(random().as_bytes()));
+    let (status, headers, _) = f
+        .request(
+            "GET",
+            &authorization_path(&client, &challenge, Some(RESOURCE)),
+            Value::Null,
+            false,
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        headers["set-cookie"]
+            .to_str()
+            .unwrap()
+            .contains("Max-Age=600")
+    );
+    let cookie = headers["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let nonce = cookie.strip_prefix("octendra_oauth=").unwrap();
+    sqlx::query("UPDATE kv SET expires=? WHERE kind='pending' AND key=?")
+        .bind(octendra_code::now() - 1)
+        .bind(hash(nonce))
+        .execute(&f.g.store.pool)
+        .await
+        .unwrap();
+    let (status, _, _) = f
+        .request(
+            "POST",
+            "/oauth/approve",
+            json!({"nonce":nonce,"password":f.password}),
+            true,
+            &[
+                ("cookie", cookie.into()),
+                ("origin", ORIGIN.into()),
+                ("accept", "text/html".into()),
+            ],
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let form = f.code(&client).await;
+    let (status, _, token) = f.request("POST", "/oauth/token", form, true, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(token["scope"], "code:read");
+    let clients: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM kv WHERE kind IN ('client','oauth2_client')")
+            .fetch_one(&f.g.store.pool)
+            .await
+            .unwrap();
+    assert_eq!(clients.0, 1);
+}
+
 fn authorization_path(client: &Value, challenge: &str, resource: Option<&str>) -> String {
     authorization_path_scoped(client, challenge, resource, "code:read")
 }
