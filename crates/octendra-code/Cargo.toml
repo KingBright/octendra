@@ -12,6 +12,7 @@ axum = { workspace = true, features = ["form", "query"] }
 base64.workspace = true
 clap.workspace = true
 cap-std = "3.4.5"
+cap-primitives = "=3.4.6"
 diffy = "0.4.2"
 fs2 = "0.4.3"
 ignore = "0.4.25"

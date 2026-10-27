@@ -171,15 +171,13 @@ async fn view(g: &Gateway, p: &Principal, ids: &[String]) -> Result<View> {
                 && g.config.devices.iter().any(|d| d.id == device),
             "operation_unavailable: original operation access is required"
         );
-        if tools::requires_desktop_observe(&tool) {
-            let registered = g
-                .config
-                .devices
-                .iter()
-                .find(|d| d.id == device)
-                .context("unknown device")?;
-            tools::require_desktop_observe(p, registered)?;
-        }
+        let registered = g
+            .config
+            .devices
+            .iter()
+            .find(|d| d.id == device)
+            .context("unknown device")?;
+        tools::require_observation(p, registered, &tool)?;
         let state: String = row.try_get("state")?;
         let progress: Option<String> = row.try_get("progress")?;
         let mut stamp = json!({"id":id,"state":state});
@@ -283,7 +281,18 @@ pub(crate) async fn observe(g: &Gateway, p: &Principal, args: &Value) -> Result<
             receipt["owner"].as_str() == Some(&p.owner) && p.owner == g.config.owner,
             "request_unavailable: request belongs to another owner"
         );
-        let _original_scope = receipt["tool"].as_str().and_then(tools::scope);
+        let original = receipt["tool"]
+            .as_str()
+            .context("unknown original request tool")?;
+        if tools::requires_desktop_observe(original) {
+            tools::require_account_scopes(p, "desktop_observer")?;
+        } else {
+            ensure!(
+                tools::has_required_scopes(p, "operation_get")
+                    || tools::has_required_scopes(p, original),
+                "insufficient_scope: request observation"
+            );
+        }
         let operation = receipt["operation_id"].as_str().map(str::to_owned);
         if let Some(object) = receipt.as_object_mut() {
             object.remove("owner");

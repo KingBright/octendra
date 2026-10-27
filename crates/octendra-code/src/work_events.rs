@@ -100,6 +100,7 @@ mod tests {
         let s = Store::open(d.path()).await.unwrap();
         s.install_agent_schema().await.unwrap();
         let ws = Workspace {
+            directory: None,
             id: "one".into(),
             device_id: "d".into(),
             root: d.path().to_path_buf(),
@@ -157,6 +158,7 @@ mod tests {
         let s = Store::open(d.path()).await.unwrap();
         s.install_agent_schema().await.unwrap();
         let ws = Workspace {
+            directory: None,
             id: "waiting".into(),
             device_id: "d".into(),
             root: d.path().to_path_buf(),
@@ -209,6 +211,7 @@ mod tests {
                 .unwrap();
         assert_eq!(count, 4096);
         let ws = Workspace {
+            directory: None,
             id: "bounded".into(),
             device_id: "d".into(),
             root: d.path().to_path_buf(),

@@ -28,6 +28,7 @@ async fn fixture() -> Fixture {
         .await
         .unwrap();
     let ws = Workspace {
+        directory: None,
         id: format!("{}:{}", config.device_id, uuid::Uuid::new_v4()),
         device_id: config.device_id.clone(),
         root: root.path().into(),

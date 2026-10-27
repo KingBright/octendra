@@ -13,6 +13,9 @@ use std::{
 const MAX_FILE: u64 = 64 * 1024 * 1024;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Workspace {
+    /// Held for one operation; serialized workspace records never grant a capability.
+    #[serde(skip)]
+    pub directory: Option<std::sync::Arc<Dir>>,
     pub id: String,
     pub device_id: String,
     pub root: PathBuf,
@@ -28,11 +31,46 @@ pub fn relative(path: &str) -> Result<&Path> {
     );
     Ok(p)
 }
+/// Resolve every directory component without following symlinks. Keeping the
+/// resulting handle, rather than reopening its absolute spelling, is essential.
+pub(crate) fn open_beneath(dir: &Dir, path: &Path) -> Result<Dir> {
+    let mut current = dir.try_clone()?.into_std_file();
+    for component in path.components() {
+        match component {
+            Component::CurDir => continue,
+            Component::Normal(name) => {
+                current = cap_primitives::fs::open_dir_nofollow(&current, Path::new(name))?;
+            }
+            _ => bail!("workspace_root_denied: invalid directory component"),
+        }
+    }
+    Ok(Dir::from_std_file(current))
+}
+pub(crate) fn open_absolute(root: &Path) -> Result<Dir> {
+    ensure!(
+        root.is_absolute(),
+        "workspace_root_denied: absolute root required"
+    );
+    let mut anchor = PathBuf::new();
+    let mut relative = PathBuf::new();
+    for component in root.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => anchor.push(component.as_os_str()),
+            Component::Normal(name) => relative.push(name),
+            _ => bail!("workspace_root_denied: noncanonical root"),
+        }
+    }
+    open_beneath(
+        &Dir::open_ambient_dir(anchor, cap_std::ambient_authority())?,
+        &relative,
+    )
+    .context("workspace_root_denied: cannot safely open directory")
+}
 pub(crate) fn directory(ws: &Workspace) -> Result<Dir> {
-    Ok(Dir::open_ambient_dir(
-        &ws.root,
-        cap_std::ambient_authority(),
-    )?)
+    match &ws.directory {
+        Some(dir) => Ok(dir.try_clone()?),
+        None => open_absolute(&ws.root.canonicalize()?),
+    }
 }
 pub(crate) fn read_text(dir: &Dir, path: &str) -> Result<String> {
     let mut file = dir.open(relative(path)?)?;
@@ -78,62 +116,112 @@ pub fn text<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
         .with_context(|| format!("missing string {key}"))
 }
 
+fn local_ignore_rules(dir: &Dir, prefix: &Path) -> Result<ignore::gitignore::Gitignore> {
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(prefix);
+    for name in [".gitignore", ".ignore"] {
+        if dir
+            .symlink_metadata(name)
+            .is_ok_and(|m| m.is_file() && !m.is_symlink())
+        {
+            for line in read_text(dir, name)?.lines() {
+                builder.add_line(Some(prefix.join(name)), line)?;
+            }
+        }
+    }
+    Ok(builder.build()?)
+}
 fn paths(ws: &Workspace, v: &Value) -> Result<Vec<String>> {
     let glob = v.get("glob").and_then(Value::as_str).unwrap_or("**/*");
     ensure!(glob.len() <= 1024, "glob too long");
     let matcher = globset::Glob::new(glob)?.compile_matcher();
     relative(glob)?;
-    // A path filter must also bound traversal, not merely filter a full-repository scan.
+    // Enumerate through the held capability. Ambient walkers can race an
+    // ancestor rename and also discover ignore configuration above the root.
+    let root = directory(ws)?;
+    let ignored = v
+        .get("include_ignored")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let components: Vec<_> = glob.split('/').collect();
-    let mut anchor = ws.root.clone();
+    let mut anchor = PathBuf::new();
     for component in components.iter().take(components.len().saturating_sub(1)) {
         if component.contains(['*', '?', '[', '{']) {
             break;
         }
         anchor.push(component);
     }
-    if !anchor.exists() {
-        return Ok(vec![]);
-    }
-    ensure!(
-        anchor.canonicalize()?.starts_with(&ws.root),
-        "glob anchor escapes workspace"
-    );
-    let ignored = v
-        .get("include_ignored")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let mut builder = ignore::WalkBuilder::new(&anchor);
-    builder
-        .hidden(false)
-        .follow_links(false)
-        .require_git(false)
-        .git_ignore(!ignored)
-        .git_global(!ignored)
-        .git_exclude(!ignored)
-        .ignore(!ignored)
-        .filter_entry(|e| e.file_name() != ".git");
+    let dir = match open_beneath(&root, &anchor) {
+        Ok(dir) => dir,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(vec![]);
+        }
+        Err(error) => return Err(error),
+    };
     let mut out = vec![];
     let start = std::time::Instant::now();
-    for entry in builder.build() {
+    let mut inherited = Vec::new();
+    if !ignored {
+        let mut parent = root.try_clone()?;
+        let mut prefix = PathBuf::new();
+        for component in anchor.components() {
+            inherited.push(local_ignore_rules(&parent, &prefix)?);
+            parent = open_beneath(&parent, Path::new(component.as_os_str()))?;
+            prefix.push(component);
+        }
+    }
+    let mut stack = vec![(dir, anchor, inherited)];
+    while let Some((dir, prefix, mut rules)) = stack.pop() {
         ensure!(
             start.elapsed().as_secs() < 120,
             "file enumeration exceeded 120 seconds; narrow the glob"
         );
-        let entry = entry?;
-        if entry.file_type().is_some_and(|t| t.is_file()) {
-            let p = entry
-                .path()
-                .strip_prefix(&ws.root)?
-                .to_string_lossy()
-                .replace('\\', "/");
-            if p.split('/').any(|s| s == ".git") {
+        if !ignored {
+            rules.push(local_ignore_rules(&dir, &prefix)?);
+        }
+        for entry in dir.entries()? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if name == ".git" {
                 continue;
             }
-            if matcher.is_match(&p) {
-                out.push(p);
+            let path = prefix.join(&name);
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                continue;
             }
-            ensure!(out.len() <= 1000000, "too many files; narrow the glob");
+            if !ignored
+                && rules
+                    .iter()
+                    .rev()
+                    .find_map(|rule| {
+                        let m = rule.matched(&path, kind.is_dir());
+                        if m.is_none() {
+                            None
+                        } else {
+                            Some(m.is_ignore())
+                        }
+                    })
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            if kind.is_dir() {
+                // no-follow at open time, not merely at directory enumeration.
+                stack.push((open_beneath(&dir, Path::new(&name))?, path, rules.clone()));
+            } else if kind.is_file() {
+                let path = path.to_string_lossy().replace('\\', "/");
+                if matcher.is_match(&path) {
+                    out.push(path);
+                }
+            }
+            ensure!(
+                out.len() + stack.len() <= 1000000,
+                "too many files; narrow the glob"
+            );
         }
     }
     out.sort();
@@ -801,6 +889,7 @@ mod tests {
     fn fixture() -> (tempfile::TempDir, Workspace) {
         let d = tempfile::tempdir().unwrap();
         let w = Workspace {
+            directory: None,
             id: "w".into(),
             device_id: "d".into(),
             root: d.path().into(),

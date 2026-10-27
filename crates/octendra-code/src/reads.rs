@@ -190,6 +190,7 @@ mod tests {
     fn fixture() -> (tempfile::TempDir, Workspace) {
         let d = tempfile::tempdir().unwrap();
         let ws = Workspace {
+            directory: None,
             id: "test".into(),
             device_id: "test".into(),
             root: d.path().canonicalize().unwrap(),

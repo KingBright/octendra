@@ -23,6 +23,7 @@ mod liveness;
 #[derive(Clone)]
 pub struct Agent {
     pub config: Arc<AgentConfig>,
+    state_only: bool,
     pub config_path: Option<PathBuf>,
     pub store: Store,
     pub(crate) terminals: Terminals,
@@ -35,6 +36,7 @@ pub struct Agent {
     liveness: Arc<liveness::Liveness>,
     poll_health_revision: Arc<std::sync::atomic::AtomicU64>,
     history_access: Arc<tokio::sync::RwLock<()>>,
+    configured_directories: Arc<Vec<cap_std::fs::Dir>>,
     legacy_feature_advertisement: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -109,20 +111,126 @@ struct LocalOperation {
     updated_at: i64,
 }
 impl Agent {
-    pub async fn new(mut config: AgentConfig) -> Result<Self> {
+    pub async fn new(config: AgentConfig) -> Result<Self> {
+        Self::new_with_policy(config, false).await
+    }
+    /// Explicit restricted startup; never inferred from an existing grant.
+    pub async fn new_state_only(config: AgentConfig) -> Result<Self> {
+        Self::new_with_policy(config, true).await
+    }
+    pub fn validate_state_only_config(config: &AgentConfig) -> Result<()> {
+        ensure!(
+            !config.allow_write && !config.allow_exec,
+            "state_only_config_denied: local write and exec must be disabled"
+        );
+        ensure!(
+            config.roots.len() == 1,
+            "state_only_config_denied: exactly one explicit state root required"
+        );
+        let root = config.roots[0].canonicalize()?;
+        ensure!(
+            root.is_dir(),
+            "state_only_config_denied: state root must be a directory"
+        );
+        let state = absolute(&config.state_dir)?;
+        let state = match state.symlink_metadata() {
+            Ok(meta) => {
+                ensure!(
+                    meta.is_dir() && !meta.file_type().is_symlink(),
+                    "state_only_config_denied: runtime state must be a regular directory"
+                );
+                state.canonicalize()?
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let parent = state
+                    .parent()
+                    .context("runtime state needs parent")?
+                    .canonicalize()?;
+                parent.join(
+                    state
+                        .file_name()
+                        .context("runtime state needs directory name")?,
+                )
+            }
+            Err(e) => return Err(e.into()),
+        };
+        ensure!(
+            !root.starts_with(&state) && !state.starts_with(&root),
+            "state_only_config_denied: exposed root and private runtime state must be disjoint"
+        );
+        Ok(())
+    }
+    pub fn validate_state_only_config_path(config: &AgentConfig, path: &Path) -> Result<()> {
+        Self::validate_state_only_config(config)?;
+        ensure!(
+            !path
+                .canonicalize()?
+                .starts_with(config.roots[0].canonicalize()?),
+            "state_only_config_denied: private config cannot be exposed by the state root"
+        );
+        Ok(())
+    }
+    pub async fn new_state_only_with_config_path(
+        config: AgentConfig,
+        path: PathBuf,
+    ) -> Result<Self> {
+        Self::validate_state_only_config_path(&config, &path)?;
+        let mut agent = Self::new_state_only(config).await?;
+        agent.config_path = Some(path);
+        Ok(agent)
+    }
+    async fn new_with_policy(mut config: AgentConfig, state_only: bool) -> Result<Self> {
+        if state_only {
+            Self::validate_state_only_config(&config)?;
+        }
         crate::validate_url(&config.gateway_url)?;
         uuid::Uuid::parse_str(&config.device_id)?;
         ensure!(config.device_token.len() >= 32, "device token too short");
-        if config.roots.is_empty() {
-            config.roots.push(PathBuf::from("/"));
-        }
+        ensure!(!config.roots.is_empty(), "no configured code roots");
         for root in &mut config.roots {
             *root = root.canonicalize()?;
             ensure!(root.is_dir(), "root is not a directory");
         }
+        let configured_directories = Arc::new(
+            config
+                .roots
+                .iter()
+                .map(|root| files::open_absolute(root))
+                .collect::<Result<Vec<_>>>()?,
+        );
         config.state_dir = absolute(&config.state_dir)?;
         let store = Store::open(&config.state_dir).await?;
         store.install_agent_schema().await?;
+        let saved_policy = store.get::<Value>("runtime", "local_access_policy").await?;
+        if state_only {
+            if let Some(policy) = saved_policy {
+                ensure!(
+                    policy["mode"] == "state_only" && policy["roots"] == json!(config.roots),
+                    "state_only_state_conflict: original policy/root must be preserved"
+                );
+            } else {
+                let count: i64 = sqlx::query_scalar("SELECT count(*) FROM kv")
+                    .fetch_one(&store.pool)
+                    .await?;
+                ensure!(
+                    count == 0,
+                    "state_only_state_conflict: dedicated runtime state required; existing evidence retained"
+                );
+                store
+                    .put(
+                        "runtime",
+                        "local_access_policy",
+                        &json!({"mode":"state_only","roots":config.roots}),
+                        i64::MAX,
+                    )
+                    .await?;
+            }
+        } else {
+            ensure!(
+                saved_policy.is_none_or(|p| p["mode"] != "state_only"),
+                "state_only_start_required: original restricted startup flag must be preserved"
+            );
+        }
         // An interrupted mutation has an unknown outcome; never blindly re-execute it.
         sqlx::query("UPDATE kv SET value=json_set(value,'$.state','unknown') WHERE kind='local_operation' AND json_extract(value,'$.state')='running' AND COALESCE(json_extract(value,'$.resumable'),0)=0").execute(&store.pool).await?;
         let terminals = Terminals::new(
@@ -133,14 +241,20 @@ impl Agent {
         .await?;
         store.put("runtime", "build", &json!({"version":env!("CARGO_PKG_VERSION"),"pid":std::process::id(),"started_at":crate::now()}), i64::MAX).await?;
         #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
-        let desktop_workers = crate::computer_use::transport::NativeWorkers::load(
-            &config.state_dir,
-            &config.device_id,
-        )
+        let desktop_workers = if state_only {
+            crate::computer_use::transport::NativeWorkers::disabled(&config.state_dir)
+        } else {
+            crate::computer_use::transport::NativeWorkers::load(
+                &config.state_dir,
+                &config.device_id,
+            )
+        }
         .with_store(store.clone());
         Ok(Self {
             #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
             desktop_workers,
+            configured_directories,
+            state_only,
             config: Arc::new(config),
             config_path: None,
             store,
@@ -162,6 +276,7 @@ impl Agent {
     }
     #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
     pub async fn read_desktop_frame(&self, job: &Job) -> Result<Vec<u8>> {
+        self.require_job_policy(job)?;
         ensure!(
             crate::tools::desktop_session_tool(&job.tool) && job.device_id == self.config.device_id,
             "desktop job required"
@@ -219,6 +334,18 @@ impl Agent {
     {
         uuid::Uuid::parse_str(&job.id).context("invalid operation id")?;
         ensure!(job.device_id == self.config.device_id, "wrong device");
+        if let Err(error) = self.require_job_policy(job) {
+            let result = crate::diagnostics::error(
+                &job.tool,
+                &error.to_string(),
+                Some(&job.id),
+                "agent_policy",
+            );
+            if let Some(delivery) = delivery {
+                delivery.enqueue(&job.id, &result).await?;
+            }
+            return Ok(result);
+        }
         let _guard = self.scheduler.operations.lock(&job.id).await?;
         let fingerprint = crate::hash(serde_json::to_vec(job)?);
         if let Some(op) = self
@@ -239,7 +366,13 @@ impl Agent {
             }
             if !(op.resumable && op.result.is_none() && crate::durable_transfer::is_file(&job.tool))
             {
-                let result = op.result.unwrap_or_else(||json!({"error":"outcome_unknown","operation_id":job.id,"recovery":"Inspect files, terminal status and local journal. This operation is never automatically repeated after runtime loss."}));
+                let mut result = op.result.unwrap_or_else(||json!({"error":"outcome_unknown","operation_id":job.id,"recovery":"Inspect files, terminal status and local journal. This operation is never automatically repeated after runtime loss."}));
+                if job.tool == "workspace_open" && result.is_object() {
+                    result["allow_write"] =
+                        json!(result["allow_write"] == true && self.config.allow_write);
+                    result["allow_exec"] =
+                        json!(result["allow_exec"] == true && self.config.allow_exec);
+                }
                 if let Some(delivery) = delivery {
                     delivery.enqueue(&job.id, &result).await?;
                 }
@@ -326,7 +459,49 @@ impl Agent {
         }
         Ok(result)
     }
+    fn require_job_policy(&self, job: &Job) -> Result<()> {
+        if self.state_only {
+            ensure!(
+                matches!(
+                    job.tool.as_str(),
+                    "workspace_open" | "code_list" | "code_read"
+                ) && job.arguments.get("code_payload").is_none(),
+                "state_only_tool_denied: only workspace_open, code_list and code_read are enabled"
+            );
+        }
+        Ok(())
+    }
+    fn require_configured_root(&self, root: &Path) -> Result<()> {
+        ensure!(
+            self.config
+                .roots
+                .iter()
+                .any(|allowed| root.starts_with(allowed)),
+            "workspace_root_denied: outside configured roots"
+        );
+        Ok(())
+    }
+
+    fn bind_workspace(&self, ws: &mut Workspace) -> Result<()> {
+        let (index, allowed) = self
+            .config
+            .roots
+            .iter()
+            .enumerate()
+            .filter(|(_, allowed)| ws.root.starts_with(allowed))
+            .max_by_key(|(_, allowed)| allowed.components().count())
+            .context("workspace_root_denied: outside configured roots")?;
+        let relative = ws.root.strip_prefix(allowed)?;
+        ws.directory = Some(Arc::new(
+            files::open_beneath(&self.configured_directories[index], relative)
+                .context("workspace_root_denied: directory changed or contains a symlink")?,
+        ));
+        Ok(())
+    }
+
     async fn perform(&self, job: &Job, progress: &crate::progress::Progress) -> Result<Value> {
+        self.require_job_policy(job)?;
+        crate::tools::require_local_permissions(&self.config, &job.tool)?;
         let v = &job.arguments;
         #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
         if crate::tools::desktop_session_tool(&job.tool) {
@@ -406,6 +581,7 @@ impl Agent {
             export.arguments = json!({"path":args.observed_operation_id.to_string(),
                 "max_bytes":artifact.bytes,"expected_version":artifact.sha256});
             let ws = Workspace {
+                directory: None,
                 id: format!("desktop:{}", args.observed_operation_id),
                 device_id: job.device_id.clone(),
                 root: self.config.state_dir.join("desktop-frames"),
@@ -489,19 +665,22 @@ impl Agent {
             );
             let root = PathBuf::from(files::text(v, "root")?).canonicalize()?;
             ensure!(root.is_dir(), "root is not a directory");
+            self.require_configured_root(&root)?;
             let id = format!("{}:{}", self.config.device_id, uuid::Uuid::new_v4());
-            let ws = Workspace {
+            let mut ws = Workspace {
+                directory: None,
                 id: id.clone(),
                 device_id: self.config.device_id.clone(),
                 root,
             };
+            self.bind_workspace(&mut ws)?;
             self.store.put("workspace", &id, &ws, i64::MAX).await?;
             return Ok(
-                json!({"workspace":ws,"allow_write":true,"allow_exec":true,"agent_version":env!("CARGO_PKG_VERSION"),"file_transfer":true,"terminal_authority":"local_user; not confined by code roots"}),
+                json!({"workspace":ws,"access_policy":if self.state_only {"state_only"} else {"general"},"allow_write":self.config.allow_write,"allow_exec":self.config.allow_exec,"agent_version":env!("CARGO_PKG_VERSION"),"file_transfer":!self.state_only,"terminal_authority":if self.state_only {"disabled"} else {"local_user; not confined by code roots"}}),
             );
         }
         let id = files::text(v, "workspace_id")?;
-        let ws: Workspace = match self.store.get("workspace", id).await? {
+        let mut ws: Workspace = match self.store.get("workspace", id).await? {
             Some(ws) => ws,
             None => {
                 let candidate = id
@@ -509,14 +688,16 @@ impl Agent {
                     .unwrap_or(id);
                 let target_dir = if candidate == "default" && !self.config.roots.is_empty() {
                     Some(self.config.roots[0].clone())
-                } else if Path::new(candidate).is_dir() {
+                } else if Path::new(candidate).is_absolute() && Path::new(candidate).is_dir() {
                     Some(PathBuf::from(candidate))
                 } else {
                     None
                 };
                 if let Some(dir) = target_dir {
                     let root = dir.canonicalize()?;
+                    self.require_configured_root(&root)?;
                     let ws = Workspace {
+                        directory: None,
                         id: id.to_owned(),
                         device_id: self.config.device_id.clone(),
                         root,
@@ -535,14 +716,17 @@ impl Agent {
         let canonical = ws.root.canonicalize()?;
         ensure!(
             canonical == ws.root && canonical.is_dir(),
-            "workspace root moved"
+            "workspace_root_denied: workspace root moved"
         );
+        self.require_configured_root(&canonical)?;
+        // Capture the trusted-root-relative capability before any resource wait.
+        self.bind_workspace(&mut ws)?;
         crate::maintenance_tasks::require_capability(
             &job.tool,
             v,
             Some(std::env::consts::OS),
-            crate::maintenance_tasks::current(true).as_ref(),
-            true,
+            crate::maintenance_tasks::current(self.config.allow_exec).as_ref(),
+            self.config.allow_exec,
         )?;
         progress.phase("waiting_resource");
         let _write = if matches!(
@@ -702,9 +886,12 @@ impl Agent {
         result?;
         Ok(())
     }
-    async fn run_loop(&self, skill_home: Option<&std::path::Path>) -> Result<()> {
-        let client = liveness::network_client()?;
-        let delivery = Delivery::new(self.store.clone(), self.config.clone()).await?;
+    fn startup_skill_status(&self, skill_home: Option<&Path>) -> (Option<String>, Option<bool>) {
+        // This worker only reads the explicitly published state directory.
+        // Do not install, inspect or claim convergence of global client Skills.
+        if self.state_only {
+            return (None, None);
+        }
         let skill_sync = match skill_home {
             Some(home) => crate::capabilities::sync_embedded_skill_at(home),
             None => crate::capabilities::sync_embedded_skill(),
@@ -715,10 +902,15 @@ impl Agent {
                 "failed to synchronize embedded Agent Skill; fleet convergence will remain false"
             );
         }
-        let (skill_revision, skill_consistent) = match skill_home {
+        match skill_home {
             Some(home) => crate::capabilities::installed_skill_revision_at(home),
             None => crate::capabilities::installed_skill_revision(),
-        };
+        }
+    }
+    async fn run_loop(&self, skill_home: Option<&std::path::Path>) -> Result<()> {
+        let client = liveness::network_client()?;
+        let delivery = Delivery::new(self.store.clone(), self.config.clone()).await?;
+        let (skill_revision, skill_consistent) = self.startup_skill_status(skill_home);
         let hello = DeviceHello {
             version: env!("CARGO_PKG_VERSION").into(),
             wire_protocol: Some(crate::capabilities::WIRE_PROTOCOL),
@@ -739,7 +931,7 @@ impl Agent {
                 .collect(),
             allow_write: self.config.allow_write,
             allow_exec: self.config.allow_exec,
-            transfer_limits: Some(crate::capabilities::TransferLimits::current()),
+            transfer_limits: (!self.state_only).then(crate::capabilities::TransferLimits::current),
             maintenance_tasks: crate::maintenance_tasks::current(self.config.allow_exec),
         };
         // A launchd process marker is not readiness. Only successful authenticated
@@ -1036,7 +1228,13 @@ impl Agent {
             if let Ok(resp) = response
                 && resp.status().is_success()
             {
-                crate::auto_upgrade::check_and_spawn_agent_upgrade(self, client, resp.headers());
+                if !self.state_only {
+                    crate::auto_upgrade::check_and_spawn_agent_upgrade(
+                        self,
+                        client,
+                        resp.headers(),
+                    );
+                }
                 acknowledged_terminal_fingerprint = fingerprint;
                 last_acknowledged = tokio::time::Instant::now();
                 self.liveness.observed(contact_started);
@@ -1173,7 +1371,9 @@ impl Agent {
             )
             .into());
         }
-        crate::auto_upgrade::check_and_spawn_agent_upgrade(self, client, response.headers());
+        if !self.state_only {
+            crate::auto_upgrade::check_and_spawn_agent_upgrade(self, client, response.headers());
+        }
         let mut bytes = Vec::new();
         while let Some(chunk) = response
             .chunk()
@@ -1225,6 +1425,10 @@ impl Agent {
         Ok(job)
     }
     async fn execute_report(&self, delivery: &Delivery, wire: Job) -> Result<()> {
+        if self.require_job_policy(&wire).is_err() {
+            self.execute_with_delivery(&wire, Some(delivery)).await?;
+            return Ok(());
+        }
         if wire.arguments.get("code_payload").is_none() {
             self.execute_with_delivery(&wire, Some(delivery)).await?;
             return Ok(());
@@ -1406,6 +1610,151 @@ mod terminal_completion_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    async fn startup_skill_fixture(state_only: bool) -> (tempfile::TempDir, Agent) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("published-state");
+        std::fs::create_dir(&root).unwrap();
+        let config = AgentConfig {
+            gateway_url: "https://fixture.invalid".into(),
+            device_id: uuid::Uuid::new_v4().to_string(),
+            device_token: crate::random(),
+            state_dir: directory.path().join("private-agent"),
+            roots: vec![root],
+            allow_write: false,
+            allow_exec: false,
+            shell: "/bin/sh".into(),
+        };
+        let agent = if state_only {
+            Agent::new_state_only(config).await
+        } else {
+            Agent::new(config).await
+        }
+        .unwrap();
+        (directory, agent)
+    }
+    #[tokio::test]
+    async fn state_only_startup_skill_never_creates_global_skill_directories() {
+        let (directory, agent) = startup_skill_fixture(true).await;
+        let home = directory.path().join("artificial-home");
+        std::fs::create_dir(&home).unwrap();
+        // Explicit fake home ensures a failed regression cannot write real HOME.
+        assert_eq!(agent.startup_skill_status(Some(&home)), (None, None));
+        assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
+    }
+    #[tokio::test]
+    async fn state_only_startup_skill_preserves_existing_user_skill_bytes() {
+        let (directory, agent) = startup_skill_fixture(true).await;
+        let home = directory.path().join("artificial-home");
+        let paths = [
+            home.join(".codex/skills/octendra-agent/SKILL.md"),
+            home.join(".gemini/config/skills/octendra-agent/SKILL.md"),
+        ];
+        for path in &paths {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"user fixture contents\0").unwrap();
+        }
+        assert_eq!(agent.startup_skill_status(Some(&home)), (None, None));
+        for path in &paths {
+            assert_eq!(std::fs::read(path).unwrap(), b"user fixture contents\0");
+        }
+        assert_eq!(
+            std::fs::read_dir(paths[0].parent().unwrap())
+                .unwrap()
+                .count(),
+            1
+        );
+        assert_eq!(
+            std::fs::read_dir(paths[1].parent().unwrap())
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+    #[tokio::test]
+    async fn state_only_startup_skill_preserves_general_mode_sync_contract() {
+        let (directory, agent) = startup_skill_fixture(false).await;
+        let home = directory.path().join("artificial-home");
+        let (revision, consistent) = agent.startup_skill_status(Some(&home));
+        assert_eq!(
+            revision.as_deref(),
+            Some(crate::capabilities::embedded_skill_revision())
+        );
+        assert_eq!(consistent, Some(true));
+        assert!(home.join(".codex/skills/octendra-agent/SKILL.md").is_file());
+        assert!(
+            home.join(".gemini/config/skills/octendra-agent/SKILL.md")
+                .is_file()
+        );
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn authorization_pinned_roots_survive_replacement_after_validation_before_file_open() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(allowed.join("file"), "INSIDE").unwrap();
+        std::fs::write(outside.join("file"), "OUTSIDE").unwrap();
+        let a = Agent::new(AgentConfig {
+            gateway_url: "https://fixture.invalid".into(),
+            device_id: uuid::Uuid::new_v4().to_string(),
+            device_token: crate::random(),
+            state_dir: fixture.path().join("state"),
+            roots: vec![allowed.clone()],
+            allow_write: false,
+            allow_exec: false,
+            shell: "/bin/sh".into(),
+        })
+        .await
+        .unwrap();
+        let validated = allowed.canonicalize().unwrap();
+        a.require_configured_root(&validated).unwrap();
+        // Deterministically exchange the configured directory after canonical
+        // validation, before acquiring the workspace handle. No sleeps/race luck.
+        let original = fixture.path().join("original");
+        std::fs::rename(&allowed, &original).unwrap();
+        std::os::unix::fs::symlink(&outside, &allowed).unwrap();
+        let mut ws = Workspace {
+            directory: None,
+            id: "fixture".into(),
+            device_id: a.config.device_id.clone(),
+            root: validated,
+        };
+        a.bind_workspace(&mut ws).unwrap();
+        assert_eq!(
+            files::read_text(&files::directory(&ws).unwrap(), "file").unwrap(),
+            "INSIDE"
+        );
+        // Exchange an ancestor after binding, as if capacity/lock waiting ran
+        // between Agent validation and the subsequent file open/list/transfer.
+        let pinned = ws.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let read = tokio::spawn(async move {
+            ready_rx.await.unwrap();
+            let text = files::read_text(&files::directory(&pinned).unwrap(), "file").unwrap();
+            let list = files::list(&pinned, &json!({})).unwrap();
+            let transfer = crate::transfers::root(&pinned)
+                .unwrap()
+                .read_to_string("file")
+                .unwrap();
+            (text, list, transfer)
+        });
+        std::fs::write(outside.join("escape-only"), "OUTSIDE").unwrap();
+        ready_tx.send(()).unwrap();
+        let (text, list, transfer) = read.await.unwrap();
+        assert_eq!(text, "INSIDE");
+        assert_eq!(transfer, "INSIDE");
+        assert_eq!(list["files"], json!(["file"]));
+        assert!(
+            !serde_json::to_value(&ws)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("directory")
+        );
+    }
+
     #[tokio::test]
     async fn change_resume_routes_only_to_original_workspace_change_set() {
         let root = tempfile::tempdir().unwrap();
@@ -1424,6 +1773,7 @@ mod tests {
         .await
         .unwrap();
         let ws = Workspace {
+            directory: None,
             id: format!("{}:{}", device, uuid::Uuid::new_v4()),
             device_id: device.clone(),
             root: root.path().canonicalize().unwrap(),

@@ -221,7 +221,10 @@ pub(crate) fn desktop_session_tool(name: &str) -> bool {
 }
 
 pub(crate) fn requires_desktop_observe(name: &str) -> bool {
-    matches!(name, "desktop_observer" | "desktop_frame")
+    matches!(
+        name,
+        "desktop_worker" | "desktop_observer" | "desktop_frame"
+    )
 }
 
 pub(crate) fn require_desktop_observe(
@@ -240,8 +243,64 @@ pub(crate) fn require_desktop_observe(
 }
 
 pub(crate) fn has_required_scopes(p: &crate::auth::Principal, name: &str) -> bool {
+    scopes_allow(&p.scopes, name)
+}
+
+pub(crate) fn scopes_allow(scopes: &[String], name: &str) -> bool {
     scope(name).is_some()
-        && (!requires_desktop_observe(name) || p.scopes.iter().any(|s| s == "desktop:observe"))
+        && required_scopes(name)
+            .iter()
+            .all(|required| scopes.iter().any(|s| s == required))
+}
+
+pub(crate) fn require_account_scopes(p: &crate::auth::Principal, name: &str) -> Result<()> {
+    ensure!(
+        has_required_scopes(p, name),
+        "insufficient_scope: required tool scopes"
+    );
+    Ok(())
+}
+
+pub(crate) fn require_device_scopes(device: &crate::DeviceRegistration, name: &str) -> Result<()> {
+    ensure!(
+        scopes_allow(&device.scopes, name),
+        "device_scope_denied: required tool scopes"
+    );
+    Ok(())
+}
+
+/// Original tool authority can receive its own result; read authority can observe
+/// ordinary history without renewing execution authority. Desktop history always
+/// needs observation consent, including results originally made by the input API.
+pub(crate) fn require_observation(
+    p: &crate::auth::Principal,
+    device: &crate::DeviceRegistration,
+    original: &str,
+) -> Result<()> {
+    ensure!(scope(original).is_some(), "unknown original operation tool");
+    if requires_desktop_observe(original) {
+        return require_desktop_observe(p, device);
+    }
+    ensure!(
+        has_required_scopes(p, "operation_get") || has_required_scopes(p, original),
+        "insufficient_scope: operation observation"
+    );
+    ensure!(
+        scopes_allow(&device.scopes, "operation_get") || scopes_allow(&device.scopes, original),
+        "device_scope_denied: operation observation"
+    );
+    Ok(())
+}
+
+pub(crate) fn require_local_permissions(config: &crate::AgentConfig, name: &str) -> Result<()> {
+    match scope(name).context("unsupported tool")? {
+        "code:write" => ensure!(config.allow_write, "device file writes disabled"),
+        "terminal:exec" => ensure!(config.allow_exec, "device terminal execution disabled"),
+        // Typed desktop access has its own local approval/provider boundary.
+        "code:read" | "desktop:observe" | "desktop:input" => {}
+        _ => bail!("unsupported local permission"),
+    }
+    Ok(())
 }
 
 fn build_catalog() -> Vec<Tool> {

@@ -310,10 +310,7 @@ pub(crate) async fn source_client(u: &reqwest::Url) -> Result<reqwest::Client> {
     source_client_with_addresses(u, &addresses)
 }
 pub(crate) fn root(ws: &Workspace) -> Result<Dir> {
-    Ok(Dir::open_ambient_dir(
-        &ws.root,
-        cap_std::ambient_authority(),
-    )?)
+    files::directory(ws)
 }
 pub(crate) fn digest_reader(
     mut file: impl Read,
@@ -849,11 +846,13 @@ async fn authorized_job(g: &Gateway, h: &HeaderMap, id: &str, tool: &str) -> Res
             && (state == "dispatched" || state == "done"),
         "transfer operation is not authorized"
     );
-    let _scope = crate::tools::scope(&job.tool).context("unknown transfer scope")?;
-    ensure!(
-        g.config.devices.iter().any(|d| d.id == device),
-        "transfer scope revoked"
-    );
+    let registered = g
+        .config
+        .devices
+        .iter()
+        .find(|d| d.id == device)
+        .context("transfer scope revoked")?;
+    crate::tools::require_device_scopes(registered, &job.tool)?;
     desktop_export_job(g, job).await
 }
 async fn get_source(
@@ -1245,12 +1244,18 @@ async fn serve_file(
     } else {
         None
     };
-    let _required_scope = if desktop.is_some() {
+    let required_scope = if desktop.is_some() {
         "desktop:observe"
     } else {
         "code:read"
     };
-    if link.owner != g.config.owner || !g.config.devices.iter().any(|d| d.id == link.device) {
+    if link.owner != g.config.owner
+        || !g
+            .config
+            .devices
+            .iter()
+            .any(|d| d.id == link.device && d.scopes.iter().any(|scope| scope == required_scope))
+    {
         return StatusCode::NOT_FOUND.into_response();
     }
     let blob = match g.store.get::<Blob>("file_blob", &link.operation).await {
@@ -1728,6 +1733,7 @@ mod tests {
     fn binary_publish_default_no_clobber_and_hash_conflicts() {
         let d = tempfile::tempdir().unwrap();
         let ws = Workspace {
+            directory: None,
             id: random(),
             device_id: random(),
             root: d.path().canonicalize().unwrap(),
@@ -1794,6 +1800,7 @@ mod tests {
         assert!(digest_reader(&b"0123456789"[..], 3, None).is_err());
         let d = tempfile::tempdir().unwrap();
         let ws = Workspace {
+            directory: None,
             id: random(),
             device_id: random(),
             root: d.path().canonicalize().unwrap(),
@@ -1809,6 +1816,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let ws = Workspace {
+            directory: None,
             id: random(),
             device_id: random(),
             root: d.path().canonicalize().unwrap(),

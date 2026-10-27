@@ -637,6 +637,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let device = uuid::Uuid::new_v4().to_string();
         let ws = crate::files::Workspace {
+            directory: None,
             id: format!("{device}:{}", uuid::Uuid::new_v4()),
             device_id: device.clone(),
             root: temp.path().to_owned(),

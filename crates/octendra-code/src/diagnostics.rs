@@ -54,6 +54,24 @@ pub(crate) fn error(tool: &str, message: &str, operation: Option<&str>, stage: &
             "check_selected_device_scopes",
             "not_executed",
         )
+    } else if message.starts_with("state_only_tool_denied") {
+        (
+            "state_only_tool_denied",
+            "use_explicit_state_directory_read",
+            "not_executed",
+        )
+    } else if message.starts_with("workspace_review_denied") {
+        (
+            "workspace_review_denied",
+            "use_in_root_repository_or_bounded_file_reads",
+            "not_executed",
+        )
+    } else if message.starts_with("workspace_root_denied") {
+        (
+            "workspace_root_denied",
+            "select_configured_workspace_root",
+            "not_executed",
+        )
     } else if message == "device file writes disabled" {
         (
             "local_write_disabled",
@@ -229,6 +247,9 @@ pub(crate) fn error(tool: &str, message: &str, operation: Option<&str>, stage: &
         | "device_scope_denied"
         | "local_write_disabled"
         | "local_exec_disabled"
+        | "workspace_review_denied"
+        | "workspace_root_denied"
+        | "state_only_tool_denied"
         | "platform_authorization_required"
         | "source_address_policy_rejected" => "do_not_replay_or_expand_authority",
         "invalid_arguments" => "retry_only_after_correcting_arguments",

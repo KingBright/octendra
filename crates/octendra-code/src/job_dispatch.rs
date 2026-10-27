@@ -19,8 +19,18 @@ macro_rules! candidate_sql {
     SELECT id,device,request,updated,state FROM jobs WHERE device=? AND state='dispatched' AND updated<?
 ) jobs
 WHERE id NOT IN (SELECT value FROM json_each(?))
-AND (json_extract(request,'$.tool') NOT IN ('desktop_observer','desktop_frame')
-    OR EXISTS (SELECT 1 FROM json_each(?) WHERE value='desktop:observe'))
+AND EXISTS (SELECT 1 FROM (SELECT ? AS scopes) permission WHERE CASE
+    WHEN json_extract(request,'$.tool') IN ('devices_list','fleet_status','workspace_open','code_list','code_search','code_read','code_symbols','code_diff','operation_get','terminal_read','file_download','workspace_context','task_context','task_resume')
+        THEN EXISTS (SELECT 1 FROM json_each(permission.scopes) WHERE value='code:read')
+    WHEN json_extract(request,'$.tool') IN ('code_apply_edits','change_resume','workspace_gc','files_sync','file_upload','transfer_cancel','transfer_resume','outcome_resolve')
+        THEN EXISTS (SELECT 1 FROM json_each(permission.scopes) WHERE value='code:write')
+    WHEN json_extract(request,'$.tool') IN ('terminal_exec','terminal_input','terminal_cancel')
+        THEN EXISTS (SELECT 1 FROM json_each(permission.scopes) WHERE value='terminal:exec')
+    WHEN json_extract(request,'$.tool') IN ('desktop_observer','desktop_frame')
+        THEN EXISTS (SELECT 1 FROM json_each(permission.scopes) WHERE value='desktop:observe')
+    WHEN json_extract(request,'$.tool')='desktop_worker'
+        THEN (SELECT count(DISTINCT value) FROM json_each(permission.scopes) WHERE value IN ('desktop:observe','desktop:input'))=2
+    ELSE 0 END)
 AND (jobs.state='dispatched' OR NOT EXISTS (
     SELECT 1 FROM kv b WHERE b.kind='operation_task_authorization' AND b.key=jobs.id
 ))
@@ -186,6 +196,13 @@ mod tests {
         add(&s, "desktop_frame").await;
         let mut non_transfer = selection();
         non_transfer.lanes = r#"["read","write","terminal","control"]"#;
+        assert!(
+            claim(&s, &non_transfer, crate::now())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        non_transfer.scopes = r#"["desktop:observe","desktop:input"]"#;
         assert_eq!(
             claim(&s, &non_transfer, crate::now())
                 .await
@@ -390,8 +407,13 @@ mod tests {
         let id = add(&s, "terminal_exec").await;
         let mut limited = selection();
         limited.scopes = r#"["code:read"]"#;
+        assert!(claim(&s, &limited, crate::now()).await.unwrap().is_none());
         assert_eq!(
-            claim(&s, &limited, crate::now()).await.unwrap().unwrap().0,
+            claim(&s, &selection(), crate::now())
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
             id
         );
     }

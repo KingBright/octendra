@@ -121,6 +121,7 @@ async fn real_streaming_export_checksum_range_expiry_and_duplicate() {
     let bytes: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
     std::fs::write(project.join("binary-test.bin"), &bytes).unwrap();
     let ws = Workspace {
+        directory: None,
         id: format!("{}:{}", g.config.devices[0].id, random()),
         device_id: g.config.devices[0].id.clone(),
         root: project.canonicalize().unwrap(),
@@ -308,15 +309,15 @@ async fn completed_export_remains_observable_without_blob_and_keeps_authorizatio
     );
     let mut unprivileged = principal(&g);
     unprivileged.scopes.clear();
-    assert!(
-        g.dispatch(
+    let denied = g
+        .dispatch(
             &unprivileged,
             "operation_get",
-            json!({"operation_id":export.id})
+            json!({"operation_id":export.id}),
         )
         .await
-        .is_ok()
-    );
+        .unwrap_err();
+    assert!(denied.to_string().contains("insufficient_scope"));
     let (jobs,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM jobs")
         .fetch_one(&g.store.pool)
         .await

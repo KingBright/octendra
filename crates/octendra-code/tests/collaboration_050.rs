@@ -67,6 +67,7 @@ impl Fixture {
         .unwrap();
         Arc::make_mut(&mut a.config).gateway_url = format!("http://{addr}");
         let ws = Workspace {
+            directory: None,
             id: format!("{}:{}", device, uuid::Uuid::new_v4()),
             device_id: device,
             root: root.canonicalize().unwrap(),

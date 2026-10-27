@@ -178,6 +178,7 @@ async fn invalid_arguments_are_rejected_before_device_lookup_or_queueing() {
 fn workspace() -> (tempfile::TempDir, Workspace) {
     let dir = tempfile::tempdir().unwrap();
     let ws = Workspace {
+        directory: None,
         id: "review".into(),
         device_id: "fixture".into(),
         root: dir.path().canonicalize().unwrap(),

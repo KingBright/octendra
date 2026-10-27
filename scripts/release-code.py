@@ -132,7 +132,38 @@ def run_stage(name, argv, checkout, directory, report, state, env, timeout=1800,
         source_snapshot.check(checkout)
 
 
-def build_commands(platforms=None):
+def pinned_rust_lld():
+    """ARM musl final links retain Rust's A53 erratum fix unsupported by Zig cc.
+
+    Keep Zig for cross C compilation and use the pinned Rust toolchain's LLD
+    for the final ELF link. No global Cargo configuration or flags are changed.
+    """
+    channel = tomllib.loads((ROOT/'rust-toolchain.toml').read_text())['toolchain']['channel']
+    prefix = ['rustup', 'run', channel, 'rustc']
+    sysroot = pathlib.Path(subprocess.check_output(prefix + ['--print', 'sysroot'], text=True, timeout=30).strip())
+    version = subprocess.check_output(prefix + ['-vV'], text=True, timeout=30)
+    host = next(line.removeprefix('host: ') for line in version.splitlines() if line.startswith('host: '))
+    linker = sysroot/'lib'/'rustlib'/host/'bin'/'rust-lld'
+    if not linker.is_file() or not os.access(linker, os.X_OK):
+        raise ValueError('arm64_musl_linker_unavailable: pinned rust-lld required; mitigation not removed')
+    return linker
+
+
+def arm64_musl_linker_configs(linker):
+    # Rust's default --fix-cortex-a53-843419 is emitted only for the cc
+    # flavor. Switching to LLD must explicitly preserve it, not merely link.
+    overrides = ('RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS',
+                 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS')
+    if any(os.environ.get(name) for name in overrides):
+        raise ValueError('arm64_musl_flag_override: cannot prove erratum mitigation; no build started')
+    return (
+        'target.aarch64-unknown-linux-musl.linker=' + json.dumps(str(linker)),
+        'target.aarch64-unknown-linux-musl.rustflags=' +
+        json.dumps(['-C', 'link-arg=--fix-cortex-a53-843419']),
+    )
+
+
+def build_commands(platforms=None, arm64_linker=None):
     selected = release_current.selected_platforms(platforms)
     native = ['cargo', 'build', '-p', 'octendra-code', '-p', 'octendra-cli', '--release', '--locked']
     stages = [('macos_release', native)]  # Native release-manifest producer is always required.
@@ -142,7 +173,12 @@ def build_commands(platforms=None):
         ('linux-arm64', 'linux_arm64_release', 'aarch64-unknown-linux-musl', ['cargo', 'zigbuild']),
     ]:
         if platform in selected:
-            stages.append((label, driver + native[2:] + ['--target', target]))
+            args = driver + native[2:] + ['--target', target]
+            if platform == 'linux-arm64':
+                linker = arm64_linker if arm64_linker is not None else pinned_rust_lld()
+                for config in arm64_musl_linker_configs(linker):
+                    args += ['--config', config]
+            stages.append((label, args))
     return stages
 
 

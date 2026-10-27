@@ -209,6 +209,7 @@ pub async fn invoke(
 ) -> Result<Value> {
     ensure!(valid_request_id(request_id), "invalid_request_id");
     ensure!(p.owner == g.config.owner, "unknown owner");
+    tools::require_account_scopes(p, tool)?;
     if !g.audit_observations && observation::eligible(g, tool, &args).await.unwrap_or(false) {
         observation::invoke(g, p, tool, args, request_id).await
     } else {
@@ -232,6 +233,7 @@ pub async fn invoke_durable(
         args.get("task_id").and_then(Value::as_str)
     };
     ensure!(p.owner == g.config.owner, "unknown owner");
+    tools::require_account_scopes(p, tool)?;
     let observed_request_id = if tool == "operation_get" {
         args.get("request_id")
             .and_then(Value::as_str)

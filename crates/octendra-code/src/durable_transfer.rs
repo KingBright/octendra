@@ -236,7 +236,10 @@ pub(crate) async fn run(
             p.phase("cancelling");
             // Drop of the network future does not mean the disk writer finished.
             // Each writer is flushed at its cancellation boundary below.
-            if cleanup(config, job, &j, &guard.client, true).await.is_err() {
+            if cleanup(config, ws, job, &j, &guard.client, true)
+                .await
+                .is_err()
+            {
                 return suspended(
                     config,
                     store,
@@ -326,7 +329,7 @@ pub(crate) async fn run(
                 )
                 .await;
             }
-            let _ = cleanup(config, job, &j, &guard.client, false).await;
+            let _ = cleanup(config, ws, job, &j, &guard.client, false).await;
             let not_started =
                 j.offset == 0 && j.publication_temp.is_none() && j.phase == "preparing";
             let (error_code, outcome, execution_state, execution_started, retry_policy) =
@@ -512,7 +515,7 @@ async fn suspended(
     }
     Ok(value)
 }
-fn clean_publication(_config: &AgentConfig, j: &Journal) -> Result<()> {
+fn clean_publication(ws: &Workspace, j: &Journal) -> Result<()> {
     let Some(name) = &j.publication_temp else {
         return Ok(());
     };
@@ -525,22 +528,16 @@ fn clean_publication(_config: &AgentConfig, j: &Journal) -> Result<()> {
             && name.ends_with(".tmp"),
         "invalid publication cleanup path"
     );
-    let canonical = j.root.canonicalize()?;
     ensure!(
-        canonical == j.root && canonical.is_dir(),
-        "workspace authorization changed"
+        ws.id == j.workspace_id && ws.device_id == j.device_id && ws.root == j.root,
+        "workspace_root_denied: publication journal belongs to another workspace"
     );
-    let ws = Workspace {
-        id: j.workspace_id.clone(),
-        device_id: j.device_id.clone(),
-        root: j.root.clone(),
-    };
     let relative = files::relative(&j.path)?;
     let parent = relative
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(std::path::Path::new("."));
-    let dir = transfers::root(&ws)?.open_dir(parent)?;
+    let dir = transfers::root(ws)?.open_dir(parent)?;
     let meta = match dir.symlink_metadata(name) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -568,6 +565,7 @@ fn clean_publication(_config: &AgentConfig, j: &Journal) -> Result<()> {
 }
 async fn cleanup(
     config: &AgentConfig,
+    ws: &Workspace,
     job: &Job,
     j: &Journal,
     client: &reqwest::Client,
@@ -588,7 +586,7 @@ async fn cleanup(
             "remote cleanup not confirmed"
         );
     }
-    clean_publication(config, j)?;
+    clean_publication(ws, j)?;
     match tokio::fs::remove_file(j.data_path(config)).await {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -924,7 +922,7 @@ async fn publish(
         })
         .await??;
         if matches {
-            clean_publication(config, j)?;
+            clean_publication(ws, j)?;
             return Ok(completed_upload(job, j, &sha, true));
         }
     }
@@ -939,7 +937,7 @@ async fn publish(
         canonical == ws.root && canonical.is_dir(),
         "workspace authorization changed"
     );
-    clean_publication(config, j)?;
+    clean_publication(ws, j)?;
     let (stage, mut output) = transfers::Staged::new(ws, &job.arguments).map_err(|error| {
         transfers::classify_destination_error(error, "destination_staging", Some(false))
     })?;

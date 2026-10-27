@@ -927,6 +927,7 @@ mod tests {
             shell: "/nonexistent-shell".into(),
         };
         let ws = Workspace {
+            directory: None,
             id: "fixture".into(),
             device_id: config.device_id.clone(),
             root: temp.path().to_owned(),
@@ -1001,6 +1002,7 @@ mod tests {
             shell: "/bin/sh".into(),
         };
         let ws = Workspace {
+            directory: None,
             id: "workspace".into(),
             device_id: config.device_id.clone(),
             root: temp.path().into(),
@@ -1070,6 +1072,7 @@ mod tests {
         let id = uuid::Uuid::new_v4().to_string();
         let pending = status(&id, now());
         let ws = Workspace {
+            directory: None,
             id: pending.workspace_id.clone(),
             device_id: "fixture".into(),
             root: temp.path().into(),
@@ -1173,6 +1176,7 @@ mod tests {
         .await
         .unwrap();
         let ws = Workspace {
+            directory: None,
             id: "workspace".into(),
             device_id: "device".into(),
             root: d.path().to_path_buf(),
@@ -1221,6 +1225,7 @@ mod tests {
         saved.output_profile = OutputProfile::CargoTest;
         store.put("terminal", &id, &saved, i64::MAX).await.unwrap();
         let ws = Workspace {
+            directory: None,
             id: "workspace".into(),
             device_id: "device".into(),
             root: d.path().to_path_buf(),
@@ -1290,6 +1295,7 @@ mod tests {
         saved.output_profile = OutputProfile::CargoTest;
         store.put("terminal", &id, &saved, i64::MAX).await.unwrap();
         let ws = Workspace {
+            directory: None,
             id: "workspace".into(),
             device_id: "device".into(),
             root: d.path().to_path_buf(),

@@ -15,6 +15,7 @@ async fn compare_legacy_and_stable_terminal_tail_reads() {
         .await
         .unwrap();
     let ws = Workspace {
+        directory: None,
         id: random(),
         device_id: random(),
         root: dir.path().canonicalize().unwrap(),

@@ -347,6 +347,7 @@ mod tests {
     fn batch_transfers_only_changed_files_and_replay_does_not_rewrite() {
         let d = tempfile::tempdir().unwrap();
         let ws = Workspace {
+            directory: None,
             id: "w".into(),
             device_id: "d".into(),
             root: d.path().canonicalize().unwrap(),

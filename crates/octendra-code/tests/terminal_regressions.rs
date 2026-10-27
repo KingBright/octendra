@@ -29,6 +29,7 @@ impl Fixture {
             shell: "/bin/sh".into(),
         };
         let ws = Workspace {
+            directory: None,
             id: random(),
             device_id: config.device_id.clone(),
             root: config.roots[0].clone(),

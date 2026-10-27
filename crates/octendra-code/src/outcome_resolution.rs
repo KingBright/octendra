@@ -9,6 +9,8 @@ use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 
 pub(crate) async fn resolve(g: &Gateway, p: &Principal, args: &Value) -> Result<Value> {
+    ensure!(p.owner == g.config.owner, "unknown owner");
+    crate::tools::require_account_scopes(p, "outcome_resolve")?;
     let id = files::text(args, "operation_id")?;
     uuid::Uuid::parse_str(id).context("invalid_arguments: operation id")?;
     let resolution = files::text(args, "resolution")?;
@@ -28,6 +30,15 @@ pub(crate) async fn resolve(g: &Gateway, p: &Principal, args: &Value) -> Result<
         original.owner == p.owner,
         "access_denied: operation owner mismatch"
     );
+    let device = g
+        .config
+        .devices
+        .iter()
+        .find(|d| d.id == original.device_id)
+        .context("device permission revoked for original operation")?;
+    crate::tools::require_account_scopes(p, &original.tool)?;
+    crate::tools::require_device_scopes(device, "outcome_resolve")?;
+    crate::tools::require_device_scopes(device, &original.tool)?;
     let saved: Option<String> =
         sqlx::query_scalar("SELECT value FROM kv WHERE kind='outcome_resolution' AND key=?")
             .bind(id)

@@ -2444,6 +2444,7 @@ dependencies = [
  "argon2 0.5.3",
  "axum",
  "base64",
+ "cap-primitives",
  "cap-std",
  "clap",
  "core-graphics",

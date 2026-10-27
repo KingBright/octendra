@@ -34,6 +34,7 @@ async fn fixture() -> (
         shell: "/bin/sh".into(),
     };
     let ws = Workspace {
+        directory: None,
         id: format!("{}:{}", config.device_id, uuid::Uuid::new_v4()),
         device_id: config.device_id.clone(),
         root: config.roots[0].clone(),

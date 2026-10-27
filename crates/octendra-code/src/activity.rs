@@ -42,15 +42,13 @@ fn operation(g: &Gateway, p: &Principal, row: &ActivityRow) -> Result<Value> {
             && g.config.devices.iter().any(|d| d.id == job.device_id),
         "operation_unavailable: original operation access is required"
     );
-    if tools::requires_desktop_observe(&job.tool) {
-        let registered = g
-            .config
-            .devices
-            .iter()
-            .find(|d| d.id == job.device_id)
-            .context("unknown device")?;
-        tools::require_desktop_observe(p, registered)?;
-    }
+    let registered = g
+        .config
+        .devices
+        .iter()
+        .find(|d| d.id == job.device_id)
+        .context("unknown device")?;
+    tools::require_observation(p, registered, &job.tool)?;
     // Do not decorate results with download URLs or refreshable credentials.
     // A status read must not mutate transfers or depend on an expired artifact.
     let mut value: Value = row
@@ -278,9 +276,9 @@ pub(crate) async fn status(g: &Gateway, p: &Principal) -> Result<Value> {
     let mut request_views = Vec::new();
     for raw in requests {
         let mut entry: Value = serde_json::from_str(&raw)?;
-        let permitted = entry["scope"]
+        let permitted = entry["tool"]
             .as_str()
-            .is_some_and(|scope| p.scopes.iter().any(|s| s == scope));
+            .is_some_and(|tool| tools::has_required_scopes(p, tool));
         if !permitted {
             continue;
         }

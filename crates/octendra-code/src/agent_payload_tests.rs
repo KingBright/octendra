@@ -55,6 +55,7 @@ async fn fixture() -> (
         axum::serve(listener, router).await.unwrap();
     });
     let ws = Workspace {
+        directory: None,
         id: format!("{}:{}", device, uuid::Uuid::new_v4()),
         device_id: device,
         root: root.canonicalize().unwrap(),

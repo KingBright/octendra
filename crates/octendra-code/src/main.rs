@@ -42,6 +42,9 @@ enum Command {
     Agent {
         #[arg(long)]
         config: PathBuf,
+        /// Only read/list one explicit status directory; requires write/exec=false.
+        #[arg(long)]
+        state_only: bool,
         /// Also write diagnostics to the invoking console. Default Windows service mode has no window.
         #[arg(long)]
         foreground: bool,
@@ -289,11 +292,21 @@ async fn main() -> Result<()> {
     }
     let filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
-    if let Command::Agent { config, foreground } = &command {
+    if let Command::Agent {
+        config,
+        foreground,
+        state_only,
+    } = &command
+    {
         use tracing_subscriber::fmt::writer::{BoxMakeWriter, MakeWriterExt};
         let c: AgentConfig = read_config(config)?;
+        if *state_only {
+            octendra_code::agent::Agent::validate_state_only_config_path(&c, config)?;
+        }
         let _lock = lock(&c.state_dir)?;
-        let _ = octendra_code::auto_upgrade::prune_agent_releases_and_logs(&c.state_dir);
+        if !*state_only {
+            let _ = octendra_code::auto_upgrade::prune_agent_releases_and_logs(&c.state_dir);
+        }
         let file = std::sync::Mutex::new(octendra_code::agent_log::AgentLog::open(&c.state_dir)?);
         let writer = if *foreground || !cfg!(windows) {
             BoxMakeWriter::new(file.and(std::io::stderr))
@@ -312,10 +325,13 @@ async fn main() -> Result<()> {
             "agent starting; bounded local logs enabled"
         );
         let result = async {
-            octendra_code::agent::Agent::new_with_config_path(c, config.clone())
-                .await?
-                .run()
-                .await
+            let agent = if *state_only {
+                octendra_code::agent::Agent::new_state_only_with_config_path(c, config.clone())
+                    .await?
+            } else {
+                octendra_code::agent::Agent::new_with_config_path(c, config.clone()).await?
+            };
+            agent.run().await
         }
         .await;
         if result.is_err() {
@@ -600,4 +616,36 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod state_only_cli_tests {
+    use super::*;
+    #[test]
+    fn state_only_is_explicit_and_general_agent_arguments_remain_compatible() {
+        let general =
+            Cli::try_parse_from(["octendra-code", "agent", "--config", "fixture.json"]).unwrap();
+        assert!(matches!(
+            general.command,
+            Command::Agent {
+                state_only: false,
+                ..
+            }
+        ));
+        let restricted = Cli::try_parse_from([
+            "octendra-code",
+            "agent",
+            "--config",
+            "fixture.json",
+            "--state-only",
+        ])
+        .unwrap();
+        assert!(matches!(
+            restricted.command,
+            Command::Agent {
+                state_only: true,
+                ..
+            }
+        ));
+    }
 }

@@ -253,11 +253,11 @@ mod tests {
                 .any(|t| t.name == "desktop_worker")
         );
         assert!(
-            authorized_tools(&p)
+            !authorized_tools(&p)
                 .iter()
                 .any(|t| t.name.starts_with("desktop_"))
         );
-        assert!(tools::has_required_scopes(&p, "desktop_worker"));
+        assert!(!tools::has_required_scopes(&p, "desktop_worker"));
         assert!(
             !authorized_tools(&p)
                 .iter()

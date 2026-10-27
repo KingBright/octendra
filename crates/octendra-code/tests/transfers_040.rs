@@ -84,6 +84,7 @@ impl Fixture {
         let mut agent = Agent::new(config).await.unwrap();
         Arc::make_mut(&mut agent.config).gateway_url = format!("http://{address}");
         let ws = Workspace {
+            directory: None,
             id: format!("{device}:{}", uuid::Uuid::new_v4()),
             device_id: device,
             root: root.canonicalize().unwrap(),

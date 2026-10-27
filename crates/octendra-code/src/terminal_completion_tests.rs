@@ -73,6 +73,7 @@ async fn fixture(hold_first: bool, fail_first_exit: bool, period: Duration) -> F
     // Test-only override after the normal HTTPS-validating constructor.
     Arc::make_mut(&mut agent.config).gateway_url = format!("http://{address}");
     let ws = Workspace {
+        directory: None,
         id: format!("{}:{}", agent.config.device_id, uuid::Uuid::new_v4()),
         device_id: agent.config.device_id.clone(),
         root: root.path().canonicalize().unwrap(),

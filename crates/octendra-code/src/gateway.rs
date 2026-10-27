@@ -383,6 +383,7 @@ impl Gateway {
     ) -> Result<Value> {
         let scope = tools::scope(name).context("unknown tool")?;
         ensure!(p.owner == self.config.owner, "unknown owner");
+        tools::require_account_scopes(p, name)?;
         if !matches!(
             name,
             "devices_list"
@@ -635,14 +636,14 @@ impl Gateway {
             }
         };
         let device = device.as_str();
-        if tools::requires_desktop_observe(name) {
+        {
             let registered = self
                 .config
                 .devices
                 .iter()
                 .find(|d| d.id == device)
                 .context("unknown device")?;
-            tools::require_desktop_observe(p, registered)?;
+            tools::require_device_scopes(registered, name)?;
         }
         if let Some(object) = args.as_object_mut() {
             if !matches!(
@@ -1134,22 +1135,38 @@ impl Gateway {
                 .context("operation not found")?;
         let job: Job = serde_json::from_str(&request)?;
         ensure!(job.owner == p.owner, "operation belongs to another owner");
-        let _scope = tools::scope(&job.tool).context("unknown operation tool")?;
-        ensure!(
-            self.config.devices.iter().any(|d| d.id == job.device_id),
-            "device permission revoked for original operation"
-        );
-        if tools::requires_desktop_observe(&job.tool) {
-            let registered = self
-                .config
-                .devices
-                .iter()
-                .find(|d| d.id == job.device_id)
-                .context("unknown device")?;
-            tools::require_desktop_observe(p, registered)?;
-        }
+        let registered = self
+            .config
+            .devices
+            .iter()
+            .find(|d| d.id == job.device_id)
+            .context("device permission revoked for original operation")?;
+        tools::require_observation(p, registered, &job.tool)?;
         if let Some(result) = result {
             let mut result: Value = serde_json::from_str(&result)?;
+            if job.tool == "workspace_open" {
+                ensure!(result.is_object(), "invalid workspace result");
+                let online = self
+                    .store
+                    .get::<Online>("online", &job.device_id)
+                    .await?
+                    .filter(|o| (0..45).contains(&(now() - o.last_seen)));
+                result["local_permissions_currently_observed"] = json!(online.is_some());
+                result["capabilities_source"] =
+                    json!("current_connection_and_device_scopes_and_latest_online_agent_flags");
+                result["allow_write"] = json!(
+                    result["allow_write"] == true
+                        && online.as_ref().is_some_and(|o| o.hello.allow_write)
+                        && tools::has_required_scopes(p, "code_apply_edits")
+                        && tools::scopes_allow(&registered.scopes, "code_apply_edits")
+                );
+                result["allow_exec"] = json!(
+                    result["allow_exec"] == true
+                        && online.as_ref().is_some_and(|o| o.hello.allow_exec)
+                        && tools::has_required_scopes(p, "terminal_exec")
+                        && tools::scopes_allow(&registered.scopes, "terminal_exec")
+                );
+            }
             crate::transfers::decorate(self, &job, &mut result).await?;
             if job.tool == "file_upload" && crate::durable_transfer::is_suspended(&result) {
                 result["source_authorization"] =

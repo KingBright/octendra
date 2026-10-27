@@ -82,7 +82,7 @@ async fn typed_gateway_ack_to_four_k_existing_chunk_artifact_and_close() {
             .await
             .unwrap_err()
             .to_string()
-            .contains("device_offline")
+            .contains("insufficient_scope")
     );
     assert!(crate::tools::validate("desktop_worker", &public).is_ok());
     public["task_id"] = json!(Uuid::new_v4());

@@ -28,6 +28,8 @@ pub(crate) async fn require_open(tx: &mut Transaction<'_, Sqlite>, idem: &str) -
     Ok(())
 }
 pub(crate) async fn close(g: &Gateway, p: &Principal, args: &Value) -> Result<Value> {
+    ensure!(p.owner == g.config.owner, "unknown owner");
+    crate::tools::require_account_scopes(p, "outcome_resolve")?;
     let workspace = files::text(args, "workspace_id")?;
     let key = files::text(args, "original_idempotency_key")?;
     let resolution_key = files::text(args, "idempotency_key")?;
@@ -41,10 +43,13 @@ pub(crate) async fn close(g: &Gateway, p: &Principal, args: &Value) -> Result<Va
         &json!({"owner":p.owner,"workspace":workspace,"original_key":key}),
     )?);
     let device = workspace.split_once(':').context("invalid workspace id")?.0;
-    ensure!(
-        g.config.devices.iter().any(|d| d.id == device),
-        "device_scope_denied: code:write"
-    );
+    let registered = g
+        .config
+        .devices
+        .iter()
+        .find(|d| d.id == device)
+        .context("device_scope_denied: code:write")?;
+    crate::tools::require_device_scopes(registered, "outcome_resolve")?;
     let mut tx = g.store.pool.begin_with("BEGIN IMMEDIATE").await?;
     let saved: Option<String> =
         sqlx::query_scalar("SELECT value FROM kv WHERE kind='submission_close_dedup' AND key=?")

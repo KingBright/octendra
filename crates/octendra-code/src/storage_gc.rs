@@ -217,6 +217,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let ws = Workspace {
+            directory: None,
             id: format!("{}:{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()),
             device_id: uuid::Uuid::new_v4().to_string(),
             root: root.path().canonicalize().unwrap(),

@@ -39,11 +39,13 @@ pub(crate) async fn device_job(g: &Gateway, headers: &HeaderMap, id: &str) -> Re
         ) && job.owner == g.config.owner,
         "transfer unavailable"
     );
-    let _scope = tools::scope(&job.tool).context("unsupported transfer")?;
-    ensure!(
-        g.config.devices.iter().any(|d| d.id == device),
-        "transfer scope revoked"
-    );
+    let registered = g
+        .config
+        .devices
+        .iter()
+        .find(|d| d.id == device)
+        .context("transfer scope revoked")?;
+    tools::require_device_scopes(registered, &job.tool)?;
     Ok(job)
 }
 
@@ -120,6 +122,7 @@ async fn report_paused(
 
 /// Both the caller and the registered device must retain access to the original job.
 pub(crate) async fn apply(g: &Gateway, p: &Principal, name: &str, args: &Value) -> Result<Value> {
+    tools::require_account_scopes(p, name)?;
     let id = files::text(args, "operation_id")?;
     uuid::Uuid::parse_str(id)?;
     let key = files::text(args, "idempotency_key")?;
@@ -133,7 +136,6 @@ pub(crate) async fn apply(g: &Gateway, p: &Principal, name: &str, args: &Value) 
         .await?
         .context("transfer unavailable")?;
     let job: Job = serde_json::from_str(&text)?;
-    let _scope = tools::scope(&job.tool).context("transfer unavailable")?;
     ensure!(
         matches!(job.tool.as_str(), "file_upload" | "file_download")
             && job.owner == p.owner
@@ -141,6 +143,15 @@ pub(crate) async fn apply(g: &Gateway, p: &Principal, name: &str, args: &Value) 
             && g.config.devices.iter().any(|d| d.id == job.device_id),
         "transfer unavailable"
     );
+    let registered = g
+        .config
+        .devices
+        .iter()
+        .find(|d| d.id == job.device_id)
+        .context("transfer scope revoked")?;
+    tools::require_account_scopes(p, &job.tool)?;
+    tools::require_device_scopes(registered, name)?;
+    tools::require_device_scopes(registered, &job.tool)?;
     let online = g.store.get::<Value>("online", &job.device_id).await?;
     ensure!(
         online

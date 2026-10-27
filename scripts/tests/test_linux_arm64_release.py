@@ -1,9 +1,11 @@
 """Architecture selection only: artificial bytes, no Cargo, SSH, install or device."""
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
@@ -42,12 +44,51 @@ class LinuxArm64Tests(unittest.TestCase):
                 release_current.selected_platforms(value)
 
     def test_arm64_build_selects_only_native_contract_and_arm_target(self):
-        commands = runner.build_commands(['linux-arm64'])
+        linker = Path('/artificial/pinned Rust/lib/rustlib/host/bin/rust-lld')
+        commands = runner.build_commands(['linux-arm64'], arm64_linker=linker)
         self.assertEqual([name for name, _ in commands], ['macos_release', 'linux_arm64_release'])
         arm = commands[-1][1]
         self.assertEqual(arm[arm.index('--target') + 1], 'aarch64-unknown-linux-musl')
         self.assertEqual(arm.count('-p'), 2)
         self.assertNotIn('x86_64-unknown-linux-musl', arm)
+        self.assertEqual(arm[:2], ['cargo', 'zigbuild'])
+        self.assertEqual(arm[arm.index('--config') + 1],
+                         'target.aarch64-unknown-linux-musl.linker=' + json.dumps(str(linker)))
+        self.assertIn('target.aarch64-unknown-linux-musl.rustflags=' +
+                      json.dumps(['-C', 'link-arg=--fix-cortex-a53-843419']), arm)
+        self.assertFalse(any('RUSTFLAGS' in arg or 'target-cpu=' in arg for arg in arm))
+
+    def test_external_flag_override_fails_before_any_arm_build(self):
+        for name in ('RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS',
+                     'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS'):
+            with mock.patch.dict(runner.os.environ, {name: 'artificial-flags'}):
+                with self.assertRaisesRegex(ValueError, 'cannot prove erratum mitigation'):
+                    runner.build_commands(['linux-arm64'], arm64_linker=Path('/fixture/rust-lld'))
+                # Ordinary platform selection remains compatible.
+                self.assertEqual(len(runner.build_commands()), 3)
+
+    def test_legacy_builds_do_not_query_or_override_arm_linker(self):
+        with mock.patch.object(runner, 'pinned_rust_lld', side_effect=AssertionError('ARM only')):
+            commands = runner.build_commands()
+        self.assertEqual([name for name, _ in commands],
+                         ['macos_release', 'linux_release', 'windows_release'])
+        self.assertFalse(any('--config' in args for _, args in commands))
+
+    def test_arm_linker_comes_from_pinned_rust_and_missing_linker_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            linker = root/'lib/rustlib/artificial-host/bin/rust-lld'
+            linker.parent.mkdir(parents=True)
+            linker.write_text('artificial linker fixture; never executed')
+            linker.chmod(0o700)
+            replies = [str(root) + '\n', 'host: artificial-host\n']
+            with mock.patch.object(runner.subprocess, 'check_output', side_effect=replies) as query:
+                self.assertEqual(runner.pinned_rust_lld(), linker)
+                self.assertEqual(query.call_args_list[0].args[0][:2], ['rustup', 'run'])
+            linker.unlink()
+            with mock.patch.object(runner.subprocess, 'check_output', side_effect=replies):
+                with self.assertRaisesRegex(ValueError, 'mitigation not removed'):
+                    runner.pinned_rust_lld()
 
     def test_package_paths_are_architecture_specific_and_opt_in(self):
         root = Path('/artificial/shared-target')
