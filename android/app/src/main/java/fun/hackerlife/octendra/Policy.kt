@@ -98,15 +98,21 @@ object Policy {
             "cause_type" to e.javaClass.simpleName)
     }
 }
-data class GatewayConfig(val gatewayUrl: String, val deviceId: String, val deviceToken: String, val name: String) {
-    fun identity(): String = sha256((gatewayUrl + "\n" + deviceId).toByteArray())
-    fun json(): JSONObject = obj("gateway_url" to gatewayUrl, "device_id" to deviceId, "device_token" to deviceToken, "name" to name)
+data class GatewayConfig(val gatewayUrl: String, val deviceId: String, val deviceToken: String, val name: String,
+    val storageIdentity: String? = null) {
+    fun identity(): String = storageIdentity ?: sha256((gatewayUrl + "\n" + deviceId).toByteArray())
+    fun json(): JSONObject = obj("gateway_url" to gatewayUrl, "device_id" to deviceId, "device_token" to deviceToken, "name" to name).apply {
+        storageIdentity?.let { put("storage_identity", it) }
+    }
     companion object {
-        fun parse(v: JSONObject): GatewayConfig {
+        fun parse(v: JSONObject, encryptedLocalConfig: Boolean = false): GatewayConfig {
             val token = v.getString("device_token")
             demand(token.length in 32..512 && token.all { it.code in 33..126 }, "invalid_device_token")
+            // Imported JSON cannot select another connection's private storage.
+            val storage = if (encryptedLocalConfig && v.has("storage_identity")) v.getString("storage_identity") else null
+            demand(storage == null || Regex("[a-f0-9]{64}").matches(storage), "invalid_storage_identity")
             return GatewayConfig(Policy.origin(v.getString("gateway_url")), Policy.uuid(v.getString("device_id")), token,
-                v.optString("name", "Android").take(80))
+                v.optString("name", "Android").take(80), storage)
         }
     }
 }

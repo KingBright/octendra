@@ -48,5 +48,9 @@ android {
     buildFeatures { buildConfig = true }
     lint { abortOnError = true; checkReleaseBuilds = true }
 }
-dependencies { testImplementation("junit:junit:4.13.2") }
+dependencies {
+    testImplementation("junit:junit:4.13.2")
+    // JVM tests must exercise JSON parsing instead of Android's stub methods.
+    testImplementation("org.json:json:20260814")
+}
 kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }

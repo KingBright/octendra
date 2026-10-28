@@ -45,6 +45,9 @@ class MainActivity : Activity() {
     private val io = Executors.newSingleThreadExecutor()
     private val refresh = object : Runnable { override fun run() { redraw(); handler.postDelayed(this, 1000) } }
     private var revision = Long.MIN_VALUE
+    private var configFields = emptyList<View>()
+    private var editingConfig = false
+    private lateinit var editConfig: Button
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -62,10 +65,13 @@ class MainActivity : Activity() {
         capabilities = label("", 13)
         label("连接配置", 19, true)
         label("使用服务端为这台手机签发的独立设备配置。APK 不包含任何服务地址、账号或密钥。", 13)
+        editConfig = button("编辑连接配置") { setConfigEditing(!editingConfig) }
+        val configStart = body.childCount
         gateway = field("服务地址", "https://your-gateway.example")
         device = field("设备 ID", "服务端签发的 UUID")
         token = field("设备令牌", "独立、可撤销的设备令牌", true)
         name = field("本机备注", Build.MODEL)
+        configFields = (configStart until body.childCount).map { body.getChildAt(it) }
         button("导入设备配置 JSON") { picker(11, "application/json") }
         button("保存配置") { guarded { save(); toast("已加密保存到此手机") } }
         toggle = button("开启远程控制") {
@@ -107,6 +113,15 @@ class MainActivity : Activity() {
         }
         label("无广告 · 无统计 SDK · HTTPS 连接 · 本机可随时停止", 12)
         guarded { ConfigStore(this).read()?.let { showConfig(it) } }
+        setConfigEditing(false)
+    }
+    private fun setConfigEditing(editing: Boolean) {
+        // Set secure before revealing credentials; hide them before allowing capture.
+        if (editing) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        configFields.forEach { it.visibility = if (editing) View.VISIBLE else View.GONE }
+        if (!editing) window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        editingConfig = editing
+        editConfig.text = if (editing) "收起连接配置" else "编辑连接配置"
     }
     private fun dp(value: Int) = (resources.displayMetrics.density * value).toInt()
     private fun label(text: String, size: Int, strong: Boolean = false): TextView = TextView(this).apply {
@@ -147,9 +162,31 @@ class MainActivity : Activity() {
                 if (requestCode == 11) {
                     demand(!AgentRuntime.running, "请先停止连接，再导入配置")
                     val text = contentResolver.openInputStream(uri)?.use { String(Transport.bounded(it, 8192), Charsets.UTF_8) } ?: throw AgentError("无法读取配置")
-                    val c = GatewayConfig.parse(org.json.JSONObject(text))
-                    ConfigStore(this).write(c)
-                    runOnUiThread { showConfig(c); toast("配置已导入并加密保存") }
+                    val imported = org.json.JSONObject(text)
+                    val store = ConfigStore(this)
+                    val source = store.read()
+                    val migration = ConfigMigration.requested(source, imported)
+                    if (migration == null) {
+                        val c = GatewayConfig.parse(imported)
+                        store.write(c)
+                        runOnUiThread { showConfig(c); toast("配置已导入并加密保存") }
+                    } else {
+                        val expectedSource = source ?: throw AgentError("migration_source_missing")
+                        runOnUiThread { guarded {
+                            demand(!AgentRuntime.running, "请先停止连接，再迁移配置")
+                            AlertDialog.Builder(this).setTitle("迁移现有连接？")
+                                .setMessage("从 ${expectedSource.gatewayUrl}\n到 ${migration.gatewayUrl}\n\n保留共享文件、本机操作历史和此设备的身份。现有设备令牌将用于新服务。仅在新旧服务均由你信任的同一所有者管理时继续。")
+                                .setNegativeButton("取消", null).setPositiveButton("迁移并保留数据") { _, _ ->
+                                    io.submit {
+                                        try {
+                                            demand(!AgentRuntime.running, "请先停止连接，再迁移配置")
+                                            store.migrate(migration, expectedSource)
+                                            runOnUiThread { showConfig(migration); toast("已迁移连接，共享文件和操作历史已保留") }
+                                        } catch (e: Exception) { runOnUiThread { showError(e) } }
+                                    }
+                                }.show()
+                        } }
+                    }
                 } else if (requestCode == 12) {
                     val c = ConfigStore(this).read() ?: throw AgentError("请先保存配置")
                     val root = exposedRoot(this, c); val folder = File(root, "imports").apply { mkdirs() }

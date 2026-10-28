@@ -27,10 +27,16 @@ class ConfigStore(private val context: Context) {
         if (!file.baseFile.exists()) return null
         try {
             val plain = ConfigCipher.decrypt(file.readFully(), context.packageName.toByteArray(), existingKeys(keyStore()))
-            return GatewayConfig.parse(JSONObject(String(plain, Charsets.UTF_8)))
+            return GatewayConfig.parse(JSONObject(String(plain, Charsets.UTF_8)), encryptedLocalConfig = true)
         } catch (_: Exception) { throw AgentError("config_unreadable", "配置无法解密，请重新导入设备配置。") }
     }
     @Synchronized fun write(config: GatewayConfig) {
+        writeEncrypted(ConfigMigration.regularSave(read(), config))
+    }
+    @Synchronized fun migrate(config: GatewayConfig, expectedSource: GatewayConfig) {
+        writeEncrypted(ConfigMigration.approved(read(), expectedSource, config))
+    }
+    private fun writeEncrypted(config: GatewayConfig) {
         val bytes = ConfigCipher.encrypt(config.json().toString().toByteArray(), context.packageName.toByteArray(), writeKey())
         val stream = file.startWrite()
         try { stream.write(bytes); file.finishWrite(stream) } catch (e: Exception) { file.failWrite(stream); throw e }
