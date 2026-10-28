@@ -21,6 +21,8 @@ mod pty;
 
 const PART_BYTES: usize = 16 * 1024 * 1024;
 const URL_TTL: u64 = 7200;
+// Keep the existing dedicated relay bucket usable when upgrading its owner.
+const LEGACY_RELAY_BUCKET: &str = "remote-hosts-transfer";
 
 fn failure(message: &str) -> TransportError {
     TransportError::FileTransfer(format!("minio_relay: {message}"))
@@ -85,7 +87,7 @@ impl MinioRelayProfile {
         };
         if !identifier(&self.name)
             || !identifier(&self.expected_hostname)
-            || !self.bucket.starts_with("octendra-")
+            || !(self.bucket.starts_with("octendra-") || self.bucket == LEGACY_RELAY_BUCKET)
             || !identifier(&self.bucket)
             || self.bucket.len() > 63
             || self.bucket.ends_with('-')
@@ -822,6 +824,17 @@ mod tests {
         );
         assert_eq!(uri_encode("a/b c+%", true), "a/b%20c%2B%25");
         assert_eq!(uri_encode("a/b c+%", false), "a%2Fb%20c%2B%25");
+    }
+
+    #[test]
+    fn existing_relay_bucket_survives_namespace_upgrade() {
+        let (mut profile, _) = fixture();
+        profile.bucket = LEGACY_RELAY_BUCKET.into();
+        assert!(profile.validate().is_ok());
+        profile.bucket = format!("{LEGACY_RELAY_BUCKET}-business");
+        assert!(profile.validate().is_err());
+        profile.bucket = "octendra-transfer".into();
+        assert!(profile.validate().is_ok());
     }
 
     #[test]

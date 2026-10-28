@@ -34,6 +34,8 @@ LOCAL_EVIDENCE = (".integration-artifacts/", ".rust-storage/")
 # Exact reviewed lines only: the fresh installer's rejected namespace set and
 # an immutable-byte legacy fixture. No presentation, file or substring exemption.
 LEGACY_NAMESPACE_GUARDS = {
+    # Existing dedicated storage names remain valid; no old command or UI alias.
+    'crates/octendra-connector/src/minio_relay.rs': {'4b1317ea31ecb01514049ff348d1d3c7e4d7289954ca9aeced579853efa87394'},
     # Existing Android v1 decryption aliases are compatibility data, not UI.
     # Exact line hashes preserve those bytes; any edited line still fails.
     'android/app/src/main/java/fun/hackerlife/octendra/ConfigCipher.kt': {'118210fe8b14ce23c2c2ff6af7b02f9d9189c5a4391a3dbee1d8f7b98637bbb4'},
