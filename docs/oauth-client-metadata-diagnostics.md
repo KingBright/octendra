@@ -46,6 +46,29 @@ new-instance state path. Return only its JSON and exit status through the existi
 maintenance channel. Keep the existing Gateway and OAuth state running unchanged.
 On an error, report the fixed error; do not fall back to a raw dump or create a client.
 
+## Temporary runtime compatibility
+
+SQLite 3.40 mislabels built-in JSON functions as unsafe in schemas. With the
+existing CHECK/expression-index schema, `trusted_schema=OFF` can reject the schema
+before this diagnostic reads any client. Do not disable the guard, preload the
+schema under a different trust setting, or alter the production database to pass.
+
+A temporary compatible library may be used only for the diagnostic process and
+its synthetic-test children. Its source must match the repository's locked
+SQLite dependency and the official SQLite source hash. Before using `LD_PRELOAD`,
+the original host owner must verify the artifact hash in an owner-controlled
+temporary directory. Never export the variable globally, run `ldconfig`, replace
+a system library, restart a service or copy production state off the host.
+
+Verify the loaded version/source ID with an in-memory connection, then run the
+synthetic suite under that same interpreter/library. Only after those pass should
+the unchanged diagnostic inspect the already verified state path. The original
+read-only/query-only/trusted-schema/authorizer/output guards remain active. An ELF
+cross-build and a local test pass do not prove that the NAS loader/ABI works;
+the host's synthetic preflight is mandatory before a production read. Remove only
+the exact owned temporary library/scripts after all diagnostic processes exit,
+keeping the non-sensitive receipt. The system Python and Gateway remain unchanged.
+
 Synthetic verification, without production state or a Rust build:
 
 ```sh

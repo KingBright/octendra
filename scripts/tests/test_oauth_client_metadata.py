@@ -63,6 +63,7 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0)
         self.assertEqual(len(result["clients"]), 2)
         self.assertTrue(result["diagnostic"]["known_kv_schema"])
+        self.assertEqual(result["diagnostic"]["sqlite_version"], sqlite3.sqlite_version)
         for row in result["clients"]:
             self.assertEqual(set(row), {"client_name", "client_id", "redirect_uris",
                                         "token_endpoint_auth_method"})
@@ -139,7 +140,8 @@ class MetadataTests(unittest.TestCase):
             db.commit()
             db.set_authorizer(metadata.authorizer)
             try:
-                for query in ("SELECT * FROM sessions", "DELETE FROM kv", "PRAGMA user_version=1"):
+                for query in ("SELECT * FROM sessions", "DELETE FROM kv", "PRAGMA user_version=1",
+                              "SELECT load_extension('never-load-a-library')"):
                     with self.subTest(query=query), self.assertRaises(sqlite3.DatabaseError):
                         db.execute(query)
             finally:
@@ -222,6 +224,21 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0)
         self.assertTrue(result["diagnostic"]["json_functions_available"])
         self.assertTrue(result["diagnostic"]["known_kv_schema"])
+
+    def test_historical_check_and_expression_index_keep_original_guards(self):
+        with sqlite3.connect(self.path) as db:
+            db.execute("ALTER TABLE kv RENAME TO old_kv")
+            db.execute("CREATE TABLE kv (kind TEXT,key TEXT,value TEXT CHECK(json_valid(value)),"
+                       "expires INTEGER,PRIMARY KEY(kind,key))")
+            db.execute("INSERT INTO kv SELECT * FROM old_kv")
+            db.execute("DROP TABLE old_kv")
+            db.execute("CREATE INDEX kv_kind_state_created ON kv "
+                       "(kind,json_extract(value,'$.state'),json_extract(value,'$.created_at'))")
+        before = self.path.read_bytes()
+        p, result = self.run_cli("--state-db", str(self.path))
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual(len(result["clients"]), 2)
+        self.assertEqual(self.path.read_bytes(), before)
 
     def test_unsafe_schema_errors_are_categorical_and_remain_denied(self):
         with mock.patch.object(metadata, "json_capability", side_effect=
