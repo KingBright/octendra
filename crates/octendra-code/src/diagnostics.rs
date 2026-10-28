@@ -341,6 +341,7 @@ mod tests {
     fn permission_words_in_unrelated_errors_do_not_claim_authorization_failure() {
         for message in [
             "permission snapshot channel closed",
+            "permission denied by workspace policy",
             "scope metadata could not be loaded",
             "authorized transport disconnected",
         ] {

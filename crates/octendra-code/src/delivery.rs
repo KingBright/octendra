@@ -59,7 +59,7 @@ impl Delivery {
         // the previous process can still arrive. During this process, keep a
         // compact fingerprint receipt for late responses, never a duplicate body.
         // code_apply_edits remains the original change_resume recovery anchor.
-        sqlx::query("DELETE FROM kv WHERE kind='local_operation' AND json_extract(value,'$.state')='done' AND json_extract(value,'$.tool') IS NOT NULL AND (json_extract(value,'$.tool')<>'code_apply_edits' OR (json_extract(value,'$.gateway_accepted')=1 AND json_extract(value,'$.result') IS NULL)) AND NOT EXISTS (SELECT 1 FROM receipt_outbox r WHERE r.id=kv.key)")
+        sqlx::query("DELETE FROM kv WHERE kind='local_operation' AND json_extract(value,'$.state')='done' AND COALESCE(json_extract(value,'$.history_hold'),0)=0 AND json_extract(value,'$.tool') IS NOT NULL AND (json_extract(value,'$.tool')<>'code_apply_edits' OR (json_extract(value,'$.gateway_accepted')=1 AND json_extract(value,'$.result') IS NULL)) AND NOT EXISTS (SELECT 1 FROM receipt_outbox r WHERE r.id=kv.key)")
             .execute(&store.pool).await?;
         // Do not recover another device's receipts or redirect private results.
         // Expired in-flight leases are reclaimed by claim(); a restart need not

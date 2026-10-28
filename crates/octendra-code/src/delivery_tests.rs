@@ -250,6 +250,13 @@ async fn reopening_prunes_only_gateway_owned_local_results() {
     let pending = uuid::Uuid::new_v4().to_string();
     let edit = uuid::Uuid::new_v4().to_string();
     let retired_edit = uuid::Uuid::new_v4().to_string();
+    let held = uuid::Uuid::new_v4().to_string();
+    let held_value = json!({"state":"done","tool":"terminal_exec","gateway_accepted":true,
+        "history_hold":true,"fingerprint":"original","result":{"output":"preserved history"}});
+    d.store
+        .put("local_operation", &held, &held_value, i64::MAX)
+        .await
+        .unwrap();
     d.store
         .put(
             "local_operation",
@@ -291,6 +298,15 @@ async fn reopening_prunes_only_gateway_owned_local_results() {
     let store = d.store.clone();
     drop(d);
     let reopened = Delivery::new(store, config).await.unwrap();
+    assert_eq!(
+        reopened
+            .store
+            .get::<Value>("local_operation", &held)
+            .await
+            .unwrap(),
+        Some(held_value)
+    );
+    assert!(!rows(&reopened).await.iter().any(|row| row.0 == held));
     assert!(
         reopened
             .store

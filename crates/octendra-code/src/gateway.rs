@@ -42,6 +42,38 @@ struct DeviceSignals {
 }
 const RECOVERY_INTERVAL: Duration = Duration::from_secs(1);
 
+/// A local import grants history observation, never device authentication or dispatch.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportedHistoryAccess {
+    protocol: u8,
+    owner: String,
+    source_owner: String,
+    source_device_id: String,
+    recovery_device_id: String,
+    recovery_workspace_id: Option<String>,
+    scopes: Vec<String>,
+}
+impl ImportedHistoryAccess {
+    fn matches(&self, gateway: &Gateway, principal: &Principal, job: &Job) -> bool {
+        self.protocol == 1
+            && self.owner == gateway.config.owner
+            && self.owner == principal.owner
+            && self.source_owner == job.owner
+            && self.source_device_id == job.device_id
+            && uuid::Uuid::parse_str(&self.recovery_device_id).is_ok()
+            && self.recovery_workspace_id.as_ref().is_none_or(|workspace| {
+                workspace
+                    .strip_prefix(&format!("{}:", self.recovery_device_id))
+                    .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+            })
+    }
+    fn describe(&self) -> Value {
+        json!({"protocol":1,"read_only":true,"source_device_id":self.source_device_id,
+            "recovery_device_id":self.recovery_device_id,"recovery_workspace_id":self.recovery_workspace_id})
+    }
+}
+
 #[derive(Clone)]
 pub struct Gateway {
     pub config: Arc<GatewayConfig>,
@@ -1134,12 +1166,37 @@ impl Gateway {
                 .await?
                 .context("operation not found")?;
         let job: Job = serde_json::from_str(&request)?;
-        ensure!(job.owner == p.owner, "operation belongs to another owner");
+        let history =
+            if job.owner != p.owner || !self.config.devices.iter().any(|d| d.id == job.device_id) {
+                self.store
+                    .get::<ImportedHistoryAccess>("imported_history", &job.device_id)
+                    .await?
+                    .filter(|history| history.matches(self, p, &job))
+            } else {
+                None
+            };
+        ensure!(
+            job.owner == p.owner || history.is_some(),
+            "operation belongs to another owner"
+        );
+        if let Some(history) = &history {
+            // This scope snapshot is never registered and cannot authenticate.
+            let source_permissions = DeviceRegistration {
+                id: history.source_device_id.clone(),
+                name: "imported history".into(),
+                token_hash: String::new(),
+                scopes: history.scopes.clone(),
+            };
+            tools::require_observation(p, &source_permissions, &job.tool)?;
+        }
+        let observation_device = history
+            .as_ref()
+            .map_or(&job.device_id, |history| &history.recovery_device_id);
         let registered = self
             .config
             .devices
             .iter()
-            .find(|d| d.id == job.device_id)
+            .find(|d| &d.id == observation_device)
             .context("device permission revoked for original operation")?;
         tools::require_observation(p, registered, &job.tool)?;
         if let Some(result) = result {
@@ -1182,10 +1239,16 @@ impl Gateway {
                 crate::terminal_sync::project_result(&mut result, observed);
             }
             result["operation_lifecycle"] = self.lifecycle_or_unavailable(id, &job.device_id).await;
+            if let Some(history) = &history {
+                result["history_migration"] = history.describe();
+            }
             result["receipt"] = crate::receipts::decision(&result, None, Some(id), updated);
             return Ok(result);
         }
         let mut pending = json!({"operation_id":id,"device_id":job.device_id,"state":state,"pending":true,"next_action":"operation_get","retry_after_ms":1000});
+        if let Some(history) = &history {
+            pending["history_migration"] = history.describe();
+        }
         pending["operation_lifecycle"] = self.lifecycle_or_unavailable(id, &job.device_id).await;
         if job.tool == "terminal_exec"
             && let Some(observed) = crate::terminal_sync::observed(self, id).await?
@@ -2290,3 +2353,7 @@ mod observer_tests;
 #[cfg(test)]
 #[path = "gateway_security_tests.rs"]
 mod security_tests;
+
+#[cfg(test)]
+#[path = "imported_history_tests.rs"]
+mod imported_history_tests;

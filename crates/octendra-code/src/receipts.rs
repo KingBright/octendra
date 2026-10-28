@@ -501,7 +501,7 @@ mod tests {
                 "do_not_replay_reconcile_state_first",
             ),
             (
-                "permission denied by workspace policy",
+                "access_denied: workspace policy rejected request",
                 "access_denied",
                 "not_started_or_partial",
                 "do_not_replay_until_original_outcome_is_observed",
