@@ -197,15 +197,17 @@ def run_verification(root, report, gates=None, timeout=900, logs_root=None, sour
         # keeps a cold compiler running regardless of its elapsed duration.
         gate_timeouts = {'rust_tests': 2700, 'workspace': 1800} if gates is None else {}
         if gates is None:
+            # Verify the profile shipped by release-code.py. Reuse its existing
+            # cache instead of contending with unrelated interactive dev builds.
             gates = [
                 ('fmt', ['cargo', 'fmt', '--all', '--', '--check']),
-                ('clippy', ['cargo', 'clippy', '-p', 'octendra-code', '-p', 'octendra-release', '--all-targets', '--locked', '--', '-D', 'warnings']),
+                ('clippy', ['cargo', 'clippy', '-p', 'octendra-code', '-p', 'octendra-release', '--all-targets', '--release', '--locked', '--', '-D', 'warnings']),
                 ('python_tests', [sys.executable, '-W', 'error::ResourceWarning', '-m', 'unittest', 'discover', '-s', 'scripts/tests', '-v']),
                 # Concurrency fixtures create their own parallel actors. Keep
                 # unrelated fsync-heavy cases from distorting their watchdogs;
                 # do not weaken assertions, deadlines, or in-test concurrency.
-                ('rust_tests', ['bash', 'scripts/test.sh', '--locked', '--no-fail-fast', '--', '--test-threads=1', '--color', 'never']),
-                ('workspace', ['cargo', 'check', '--workspace', '--locked']),
+                ('rust_tests', ['bash', 'scripts/test.sh', '--release', '--locked', '--no-fail-fast', '--', '--test-threads=1', '--color', 'never']),
+                ('workspace', ['cargo', 'check', '--workspace', '--release', '--locked']),
             ]
         env = dict(os.environ, CARGO_TERM_COLOR='never', PYTHONUNBUFFERED='1')
         for name, argv in gates:

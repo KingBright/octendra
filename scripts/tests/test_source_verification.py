@@ -102,8 +102,11 @@ class SourceEvidenceTests(unittest.TestCase):
         # Serialize independent cases, not the actors inside each concurrency test.
         # Preserve the full workspace and collection of every failure.
         self.assertEqual(commands['rust_tests'], [
-            'bash', 'scripts/test.sh', '--locked', '--no-fail-fast',
+            'bash', 'scripts/test.sh', '--release', '--locked', '--no-fail-fast',
             '--', '--test-threads=1', '--color', 'never'])
+        self.assertIn('--all-targets', commands['clippy'])
+        self.assertIn('--release', commands['clippy'])
+        self.assertEqual(commands['workspace'], ['cargo', 'check', '--workspace', '--release', '--locked'])
 
     def test_existing_receipt_is_rejected_before_executing_commands(self):
         self.report.parent.mkdir()
