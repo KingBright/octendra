@@ -1,5 +1,12 @@
 # Repository delivery rules
 
+## Daily delivery loop
+
+- Use `main` and the single existing primary worktree. Do not create feature branches, additional checkouts or linked worktrees, and do not use merge-based delivery.
+- Make the smallest correct change, run the relevant bounded checks, commit the explicit source files, push `main`, and verify the remote contains the commit. Do not leave a completed code iteration uncommitted.
+- Keep upgrades direct: reuse the existing builder and installer, preserve required platform signing and device authorization, verify the delivered hash and live behavior, and fix issues on `main`. Do not add release gates, staging branches or rollback machinery without a demonstrated requirement.
+- For the current brand migration, retain the usable old instances until their data and device connections have been accepted on Octendra, then retire them as requested. This temporary fallback does not require a separate rollback project.
+
 ## Build and deployment authority
 
 - Build, test, package, and deploy on the owner's authorized development machines. Mac Studio is the primary release builder; default builds use primary main and the established `~/rust-target`. The explicit `release-code.py --source-commit <full SHA>` entry alone may materialize that exact Git tree in the producer-owned fixed `target/release-slot/source` directory. Verification, compilation and packaging use that one bound input root; publication authority stays in primary main, source/producer identities are recorded separately, and the owned input is checked and removed when the original operation ends. Preserve primary worktree/index/WIP. Do not create other source snapshots, worktrees, arbitrary execution roots or Cargo targets; packaging may copy only verified final products.
@@ -7,7 +14,7 @@
 - Use the pinned local Rust toolchain and Cargo to produce macOS arm64, Linux x86_64 musl, and Windows x86_64 MSVC artifacts. Use the existing cargo-zigbuild/cargo-xwin linkers and SDKs. A successful cross-build is not target-platform execution evidence.
 - Verify one unchanged fingerprint of the primary main inputs (an existing snapshot may be checked as read-only evidence), preserve test and build receipts, then transfer its verified bundle directly through the authorized Octendra or configured management channel. Do not download deployment input from GitHub Releases.
 - Develop only in the actual primary main directory; do not create task checkouts or linked worktrees. Preserve unrelated worktree changes. Stage explicit task files only.
-- Upgrade Gateway first, then Agents using existing maintenance leases, platform signing, exact SHA-256 validation, health observations, and rollback paths. Never bypass local macOS signing or device authorization.
+- Upgrade Gateway first, then Agents using existing maintenance leases, platform signing, exact SHA-256 validation and health observations. Fix failures directly; do not introduce additional rollback paths. Never bypass local macOS signing or device authorization.
 - For macOS Agent upgrades, use `scripts/launch-code-upgrade.py --start`. Never use `launchctl submit` or a repeating updater: submit jobs can retain KeepAlive and reinstall obsolete candidates. Preserve the prepared request marker and observe its original result before another launch.
 - Do not restart other projects or kill unrelated compiler processes. Cancel only operations whose ownership is confirmed.
 - Run bounded regression tests on the appropriate owned target machine. Investigate hangs locally; disabling cloud CI does not authorize skipping the equivalent tests.

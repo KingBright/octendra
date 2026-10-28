@@ -23,3 +23,7 @@ docs/**/*.lock
 /deploy/local/
 /docs/live/
 /.local-deployment/
+
+# Local migration credentials, diagnostic receipts and generated storage records.
+/.integration-artifacts/
+/.rust-storage/
