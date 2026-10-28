@@ -2194,6 +2194,18 @@ async fn gateway_upgrade(
     }
 }
 
+fn security_rejection(status: StatusCode, code: &'static str) -> Response {
+    (
+        status,
+        [
+            ("cache-control", "no-store"),
+            ("x-content-type-options", "nosniff"),
+        ],
+        Json(json!({"error": code})),
+    )
+        .into_response()
+}
+
 async fn security_headers(
     State(config): State<Arc<GatewayConfig>>,
     request: Request,
@@ -2209,18 +2221,18 @@ async fn security_headers(
         .and_then(|v| v.to_str().ok())
         != Some(expected.as_str())
     {
-        return StatusCode::BAD_REQUEST.into_response();
+        return security_rejection(StatusCode::BAD_REQUEST, "gateway_host_mismatch");
     }
     if let Some(origin) = request.headers().get(header::ORIGIN) {
         let Ok(origin) = origin.to_str() else {
-            return StatusCode::FORBIDDEN.into_response();
+            return security_rejection(StatusCode::FORBIDDEN, "browser_origin_invalid");
         };
         if !config
             .browser_origins()
             .iter()
             .any(|allowed| allowed == origin)
         {
-            return StatusCode::FORBIDDEN.into_response();
+            return security_rejection(StatusCode::FORBIDDEN, "browser_origin_denied");
         }
     }
     let file_response = request.uri().path().starts_with("/files/");
@@ -2274,3 +2286,7 @@ pub(crate) fn payload_poll_test_route(g: Gateway) -> Router {
 #[cfg(test)]
 #[path = "observer_tests.rs"]
 mod observer_tests;
+
+#[cfg(test)]
+#[path = "gateway_security_tests.rs"]
+mod security_tests;
