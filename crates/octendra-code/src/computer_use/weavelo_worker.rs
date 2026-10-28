@@ -137,11 +137,15 @@ async fn exchange(route: &Route, request: Value, maximum: usize) -> Result<(Valu
     .context("GUI operation timed out")?
 }
 pub(super) async fn probe(route: &Route, input: bool) -> Result<()> {
-    let (status, _) = exchange(route, json!("Status"), 0).await?;
+    let current = refresh_route(route, input).await?;
     ensure!(
-        status["generation"] == route.generation,
+        current.generation == route.generation,
         "octendra_authority_gui_generation_changed"
     );
+    Ok(())
+}
+pub(super) async fn refresh_route(route: &Route, input: bool) -> Result<Route> {
+    let (status, _) = exchange(route, json!("Status"), 0).await?;
     ensure!(
         status["executable_sha256"] == route.gui_executable_sha256,
         "octendra_authority_gui_executable_changed"
@@ -158,7 +162,13 @@ pub(super) async fn probe(route: &Route, input: bool) -> Result<()> {
         !input || status["computer_use"]["input"] == true,
         "octendra_authority_input_unavailable"
     );
-    Ok(())
+    let mut current = route.clone();
+    current.generation = status["generation"]
+        .as_str()
+        .context("octendra_authority_gui_generation_invalid")?
+        .into();
+    current.validate(uid())?;
+    Ok(current)
 }
 pub(super) async fn validate_lease(route: &Route, binding: &Binding) -> Result<()> {
     probe(route, false).await?;
@@ -560,6 +570,46 @@ fn rgba_layout(size: [u32; 2], encoding: &str, length: usize, maximum: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn reopened_gui_uses_current_generation_but_old_lease_cannot_validate() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = dir.path().join("gui-receive.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let route = Route {
+            input_platform: None,
+            profile: dir.path().to_owned(),
+            generation: "1-2".into(),
+            gui_executable_sha256: "0".repeat(64),
+            target: Target {
+                peer_device_id: "approved-peer".into(),
+                source: Source::MainDisplay,
+                connection_id: 1,
+            },
+        };
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let len = stream.read_u32().await.unwrap() as usize;
+                let mut request = vec![0; len];
+                stream.read_exact(&mut request).await.unwrap();
+                let body = serde_json::to_vec(&json!({"ok":true,"generation":"3-4","executable_sha256":"0".repeat(64),"computer_use":{"protocol":1,"observe":true}})).unwrap();
+                stream.write_u32(body.len() as u32).await.unwrap();
+                stream.write_all(&body).await.unwrap();
+            }
+        });
+        let refreshed = refresh_route(&route, false).await.unwrap();
+        assert_eq!(refreshed.generation, "3-4");
+        assert_eq!(refreshed.target, route.target);
+        assert_eq!(
+            probe(&route, false).await.unwrap_err().to_string(),
+            "octendra_authority_gui_generation_changed"
+        );
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn private_gui_failures_preserve_codes_but_never_raw_messages() {
         use std::os::unix::fs::PermissionsExt;

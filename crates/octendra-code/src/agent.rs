@@ -510,15 +510,26 @@ impl Agent {
             let args: DesktopJob = serde_json::from_value(v.clone())?;
             if matches!(args.request, crate::computer_use::Request::Capabilities {}) {
                 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
-                return Ok(serde_json::to_value(
-                    crate::computer_use::Response::Capabilities {
-                        capabilities: if job.tool == "desktop_observer" {
-                            self.desktop_workers.observer_capabilities().await
-                        } else {
-                            self.desktop_workers.capabilities().await
-                        },
-                    },
-                )?);
+                {
+                    let capabilities = if job.tool == "desktop_observer" {
+                        self.desktop_workers.observer_capabilities().await
+                    } else {
+                        self.desktop_workers.capabilities().await
+                    };
+                    let available = capabilities.available;
+                    let mut response =
+                        serde_json::to_value(crate::computer_use::Response::Capabilities {
+                            capabilities,
+                        })?;
+                    if available
+                        && let Some((version, identity)) =
+                            self.desktop_workers.current_capability().await
+                    {
+                        response["capability_version"] = json!(version);
+                        response["capability_identity"] = serde_json::to_value(identity)?;
+                    }
+                    return Ok(response);
+                }
                 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
                 return Ok(serde_json::to_value(
                     crate::computer_use::unavailable(&args.request)

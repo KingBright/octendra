@@ -66,6 +66,21 @@ pub(super) struct WorkerApproval {
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+fn same_approval_scope(previous: &LaunchApproval, next: &LaunchApproval) -> bool {
+    let scope = |approval: &LaunchApproval| {
+        let mut value = serde_json::to_value(approval).expect("serializable desktop approval");
+        let fields = value.as_object_mut().expect("desktop approval object");
+        for key in ["capability_version", "agent_sha256", "worker_sha256"] {
+            fields.remove(key);
+        }
+        if let Some(route) = fields.get_mut("weavelo").and_then(|v| v.as_object_mut()) {
+            route.remove("gui_executable_sha256");
+            route.remove("generation");
+        }
+        value
+    };
+    scope(previous) == scope(next)
+}
 #[cfg(target_os = "linux")]
 fn uid() -> Result<u32> {
     let status = std::fs::read_to_string("/proc/self/status")?;
@@ -452,6 +467,7 @@ fn validate_pixels(p: &RawPixels) -> Result<()> {
 }
 struct State {
     approval: Option<LaunchApproval>,
+    last_approved: Option<LaunchApproval>,
     pipe: Option<Pipe>,
     binding: Option<Binding>,
     last: Option<FrameRef>,
@@ -499,6 +515,7 @@ impl NativeWorkers {
             lock_path: desktop_lock_path(),
             state: Arc::new(Mutex::new(State {
                 approval: None,
+                last_approved: None,
                 pipe: None,
                 binding: None,
                 last: None,
@@ -537,13 +554,56 @@ impl NativeWorkers {
             .and_then(|_| std::fs::read(&path).ok())
             .map(|b| (path, digest(&b)));
         let mut state = result.state.try_lock().expect("new desktop state");
+        state.last_approved = approval.clone();
         state.approval = approval;
         state.source = source;
         drop(state);
         result
     }
+    async fn refresh_compatible_approval(&self) {
+        let mut state = self.state.lock().await;
+        if state.poisoned || state.pipe.is_some() || state.binding.is_some() {
+            return;
+        }
+        let (Some(previous), Some((path, previous_digest))) =
+            (state.last_approved.as_ref(), state.source.as_ref())
+        else {
+            return;
+        };
+        let Ok(bytes) = uid().and_then(|owner| owned_file(path, 0o600, 16384, owner)) else {
+            return;
+        };
+        let next_digest = digest(&bytes);
+        if next_digest == *previous_digest {
+            return;
+        }
+        let Ok(next) = serde_json::from_slice::<LaunchApproval>(&bytes) else {
+            return;
+        };
+        if next.capability_version <= previous.capability_version
+            || !same_approval_scope(previous, &next)
+            || next
+                .validate(&previous.identity.device_id.to_string())
+                .is_err()
+        {
+            return;
+        }
+        let path = path.clone();
+        state.last_approved = Some(next.clone());
+        state.approval = Some(next);
+        state.source = Some((path, next_digest));
+    }
+    pub async fn current_capability(&self) -> Option<(u64, CapabilityIdentity)> {
+        self.state
+            .lock()
+            .await
+            .approval
+            .as_ref()
+            .map(|approval| (approval.capability_version, approval.identity.clone()))
+    }
     #[cfg(target_os = "macos")]
     pub async fn capabilities(&self) -> Capabilities {
+        self.refresh_compatible_approval().await;
         let route = self
             .state
             .lock()
@@ -552,7 +612,9 @@ impl NativeWorkers {
             .as_ref()
             .and_then(|a| a.weavelo.clone().map(|route| (route, a.input)));
         if let Some((route, input)) = route {
-            let ready = super::weavelo_worker::probe(&route, input).await.is_ok();
+            let ready = super::weavelo_worker::refresh_route(&route, input)
+                .await
+                .is_ok();
             return self
                 .capabilities_with_probe("weavelo_source_canvas", |a| {
                     a.validate(&a.identity.device_id.to_string()).is_ok() && ready
@@ -571,6 +633,7 @@ impl NativeWorkers {
     }
     #[cfg(windows)]
     pub async fn capabilities(&self) -> Capabilities {
+        self.refresh_compatible_approval().await;
         self.capabilities_with_probe("windows_wgc_uia_standard_control_click_only", |a| {
             a.validate(&a.identity.device_id.to_string()).is_ok()
         })
@@ -578,6 +641,7 @@ impl NativeWorkers {
     }
     #[cfg(target_os = "linux")]
     pub async fn capabilities(&self) -> Capabilities {
+        self.refresh_compatible_approval().await;
         self.capabilities_with_probe("linux_portal_window_observe_only", |a| {
             !a.input && a.weavelo.is_none() && a.validate(&a.identity.device_id.to_string()).is_ok()
         })
@@ -714,6 +778,7 @@ impl NativeWorkers {
         request: Request,
         observe_only: bool,
     ) -> Result<serde_json::Value> {
+        self.refresh_compatible_approval().await;
         let mut state = self.state.lock().await;
         if observe_only
             && (!(cfg!(target_os = "linux") || cfg!(test))
@@ -773,7 +838,7 @@ impl NativeWorkers {
         {
             state.poisoned = true;
         }
-        let Some(a) = state.approval.clone() else {
+        let Some(mut a) = state.approval.clone() else {
             return Ok(serde_json::json!({"error":"unavailable"}));
         };
         #[cfg(test)]
@@ -827,6 +892,11 @@ impl NativeWorkers {
                 state.pipe.is_none() && *lease_ms > 0 && *lease_ms <= MAX_LEASE_MS,
                 "desktop busy/lease"
             );
+            #[cfg(not(windows))]
+            if let Some(route) = &a.weavelo {
+                a.weavelo = Some(super::weavelo_worker::refresh_route(route, a.input).await?);
+                state.approval = Some(a.clone());
+            }
             state.lock = Some(self.acquire_lock()?);
             let key = digest(format!("{}:{}", identity.device_id, identity.desktop_id).as_bytes());
             if let Some(store) = &self.store {

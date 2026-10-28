@@ -1119,6 +1119,97 @@ async fn capability_fixture(dir: &Path) -> (NativeWorkers, Identity, PathBuf) {
     w.state.lock().await.source = Some((source.clone(), digest(bytes)));
     (w, id, source)
 }
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn newer_compatible_approval_refreshes_without_reviving_old_or_broader_grants() {
+    use super::super::weavelo_route::{Route, Source, Target};
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let route = Route {
+        input_platform: None,
+        profile: dir.path().to_owned(),
+        generation: "1-2".into(),
+        gui_executable_sha256: "0".repeat(64),
+        target: Target {
+            peer_device_id: "approved-peer".into(),
+            source: Source::MainDisplay,
+            connection_id: 1,
+        },
+    };
+    let mut id = identity();
+    id.desktop_id = route.desktop_id();
+    let binary = std::env::current_exe().unwrap();
+    let hash = digest(&std::fs::read(&binary).unwrap());
+    let mut approval = LaunchApproval {
+        weavelo: Some(route),
+        enabled: true,
+        observe: true,
+        input: false,
+        capability_version: 7,
+        identity: CapabilityIdentity::from_execution(&id),
+        desktop_uid: uid().unwrap(),
+        desktop_session: "weavelo".into(),
+        logical_size: [2, 2],
+        logical_position: [0, 0],
+        max_frame_bytes: MAX_WORKER_PIXELS,
+        worker_path: binary,
+        worker_sha256: hash.clone(),
+        agent_sha256: hash,
+    };
+    let path = dir.path().join("desktop-launch.json");
+    let original = serde_json::to_vec(&approval).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let workers = NativeWorkers::load(dir.path(), &id.device_id.to_string());
+    assert!(workers.state.lock().await.approval.is_some());
+    approval.capability_version = 8;
+    approval.weavelo.as_mut().unwrap().gui_executable_sha256 = "1".repeat(64);
+    let renewed = serde_json::to_vec(&approval).unwrap();
+    std::fs::write(&path, &renewed).unwrap();
+    workers.refresh_compatible_approval().await;
+    assert_eq!(
+        workers
+            .state
+            .lock()
+            .await
+            .approval
+            .as_ref()
+            .unwrap()
+            .capability_version,
+        8
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), renewed);
+    assert_eq!(
+        workers.current_capability().await,
+        Some((8, approval.identity.clone()))
+    );
+    let mut broader = approval.clone();
+    broader.capability_version = 9;
+    broader.weavelo.as_mut().unwrap().target.peer_device_id = "other-peer".into();
+    broader.identity.desktop_id = broader.weavelo.as_ref().unwrap().desktop_id();
+    std::fs::write(&path, serde_json::to_vec(&broader).unwrap()).unwrap();
+    workers.refresh_compatible_approval().await;
+    assert_eq!(
+        workers
+            .state
+            .lock()
+            .await
+            .approval
+            .as_ref()
+            .unwrap()
+            .capability_version,
+        8
+    );
+    workers.revoke(None).await;
+    assert!(workers.current_capability().await.is_none());
+    std::fs::write(&path, &original).unwrap();
+    workers.refresh_compatible_approval().await;
+    assert!(workers.state.lock().await.approval.is_none());
+    std::fs::write(&path, &renewed).unwrap();
+    workers.refresh_compatible_approval().await;
+    assert!(workers.state.lock().await.approval.is_none());
+}
+
 #[tokio::test]
 async fn capability_reports_current_ready_authority_without_spawning() {
     let dir = tempfile::tempdir().unwrap();
