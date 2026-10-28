@@ -48,7 +48,7 @@ async fn desktop_oauth_handoff_discovery_has_top_level_and_mirrored_schemes_with
         assert_eq!(tool["securitySchemes"], tool["_meta"]["securitySchemes"]);
     }
     assert!(
-        contract::authorized_tools(&f.p)
+        !contract::authorized_tools(&f.p)
             .iter()
             .any(|t| t.name.starts_with("desktop_"))
     );
@@ -78,8 +78,9 @@ async fn desktop_oauth_handoff_missing_scope_is_stable_and_never_replays_or_chan
         assert_eq!(v["result"]["isError"], true);
         assert_eq!(
             v["result"]["structuredContent"]["error_code"],
-            "device_offline"
+            "account_scope_denied"
         );
+        assert_eq!(v["result"]["structuredContent"]["execution_started"], false);
         assert!(challenge(&v).is_null());
     }
     let after: Value = f.g.store.get(&kind, &hash(&bearer)).await.unwrap().unwrap();
@@ -88,7 +89,7 @@ async fn desktop_oauth_handoff_missing_scope_is_stable_and_never_replays_or_chan
 }
 
 #[tokio::test]
-async fn desktop_oauth_handoff_observe_and_input_are_requested_in_one_consent() {
+async fn desktop_oauth_handoff_input_without_observe_is_refused_without_relink() {
     let mut f = Fixture::new().await;
     let _ =
         f.g.store
@@ -101,8 +102,9 @@ async fn desktop_oauth_handoff_observe_and_input_are_requested_in_one_consent() 
     assert_eq!(v["result"]["isError"], true);
     assert_eq!(
         v["result"]["structuredContent"]["error_code"],
-        "device_offline"
+        "account_scope_denied"
     );
+    assert_eq!(v["result"]["structuredContent"]["execution_started"], false);
     assert!(challenge(&v).is_null());
     assert_eq!(f.count().await, 0);
 }
@@ -122,7 +124,11 @@ async fn desktop_oauth_handoff_existing_scope_device_policy_and_unknown_tool_do_
         let (status, v) = call(&f, &bearer, "desktop_worker", desktop_args(&f)).await;
         assert_eq!(status, StatusCode::OK, "{v}");
         assert_eq!(v["result"]["isError"], true);
-        assert!(v.to_string().contains("device_offline"), "{v}");
+        assert_eq!(
+            v["result"]["structuredContent"]["error_code"],
+            "device_scope_denied"
+        );
+        assert_eq!(v["result"]["structuredContent"]["execution_started"], false);
         assert!(challenge(&v).is_null(), "{v}");
     }
     let (_, v) = call(&f, &bearer, "unknown_tool", json!({})).await;

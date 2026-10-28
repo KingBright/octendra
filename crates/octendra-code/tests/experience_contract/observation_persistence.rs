@@ -254,11 +254,11 @@ async fn failing_error_audit_does_not_turn_denial_into_success() {
         .await
         .unwrap();
     assert_eq!(okay["receipt"]["evidence_complete"], true);
-    let mut limited = f.p.clone();
-    limited.scopes.clear();
+    // The caller has read authority; the bad digest fails inside observation,
+    // so this exercises audit-write failure rather than the earlier scope gate.
     let value = receipts::invoke(
         &f.g,
-        &limited,
+        &f.p,
         "devices_list",
         json!({"known_tools_sha256":"invalid"}),
         &request_id(),
@@ -266,10 +266,33 @@ async fn failing_error_audit_does_not_turn_denial_into_success() {
     .await
     .unwrap();
     assert!(value.get("error").is_some());
+    assert_eq!(value["error_code"], "invalid_arguments");
     assert_eq!(value["receipt"]["durable"], false);
     assert_eq!(
         value["receipt"]["persistence_error"],
         "observation_error_record_not_saved"
     );
     assert_eq!(value["receipt"]["evidence_complete"], false);
+}
+
+#[tokio::test]
+async fn missing_scope_is_denied_before_a_failing_error_audit() {
+    let f = Fixture::new().await;
+    sqlx::query("CREATE TRIGGER fail_observer_error BEFORE INSERT ON kv WHEN NEW.kind='request_receipt' BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        .execute(&f.g.store.pool).await.unwrap();
+    let mut limited = f.p.clone();
+    limited.scopes.clear();
+    let trace = request_id();
+    let error = receipts::invoke(&f.g, &limited, "devices_list", json!({}), &trace)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().starts_with("insufficient_scope:"));
+    assert!(
+        f.g.store
+            .get::<Value>("request_receipt", &trace)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(f.count().await, 0);
 }
