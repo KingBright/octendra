@@ -1,4 +1,4 @@
-"""Read-only release gates. Never poll jobs, renew leases or create business tasks."""
+"""Runtime observations and authority-preserving support for verified Agent upgrades."""
 import contextlib
 import errno
 import http.client
@@ -14,12 +14,97 @@ import re
 import sqlite3
 import stat
 import subprocess
+import tempfile
 import time
 import urllib.parse
 import urllib.request
 import uuid
 
 LANES = {'read', 'write', 'transfer', 'terminal', 'control'}
+
+
+def _desktop_approval_bytes(path):
+    owner = os.getuid()
+    parent = path.parent.lstat()
+    info = path.lstat()
+    if (not stat.S_ISDIR(parent.st_mode) or path.parent.is_symlink()
+            or parent.st_uid != owner or stat.S_IMODE(parent.st_mode) != 0o700
+            or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+            or info.st_uid != owner or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_size > 16384):
+        raise ValueError('desktop_approval_not_private')
+    with path.open('rb') as source:
+        actual = os.fstat(source.fileno())
+        if (actual.st_dev, actual.st_ino) != (info.st_dev, info.st_ino):
+            raise ValueError('desktop_approval_changed')
+        return source.read(16385)
+
+
+def _replace_desktop_approval(path, expected, replacement):
+    if _desktop_approval_bytes(path) != expected:
+        raise ValueError('desktop_approval_changed')
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.octendra-desktop-', delete=False) as output:
+        temporary = pathlib.Path(output.name)
+        try:
+            os.fchmod(output.fileno(), 0o600)
+            output.write(replacement); output.flush(); os.fsync(output.fileno())
+            if _desktop_approval_bytes(path) != expected:
+                raise ValueError('desktop_approval_changed')
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def renew_desktop_approval(config, binary, previous_sha256, installed_sha256):
+    """Rebind an existing grant only after the updater verifies its installed artifact.
+
+    No grant is created or enabled. Device, target, input consent and worker path
+    stay unchanged. The original bytes remain in memory for the existing updater's
+    failure recovery; they are never included in the public upgrade receipt.
+    """
+    path = pathlib.Path(config['state_dir']) / 'desktop-launch.json'
+    if not path.exists() and not path.is_symlink():
+        return {'state': 'not_configured'}, None
+    try:
+        original = _desktop_approval_bytes(path)
+        grant = json.loads(original)
+        if grant.get('enabled') is not True or grant.get('observe') is not True:
+            return {'state': 'disabled_preserved'}, None
+        if grant.get('identity', {}).get('device_id') != config['device_id']:
+            raise ValueError('desktop_approval_device_mismatch')
+        version = grant.get('capability_version')
+        if type(version) is not int or not 0 < version < 2**64 - 1:
+            raise ValueError('desktop_approval_version_invalid')
+        if grant.get('agent_sha256') != previous_sha256:
+            raise ValueError('desktop_approval_previous_agent_mismatch')
+        binary = pathlib.Path(binary)
+        if hashlib.sha256(binary.read_bytes()).hexdigest() != installed_sha256:
+            raise ValueError('desktop_approval_installed_agent_mismatch')
+        worker = pathlib.Path(grant['worker_path'])
+        if worker.is_symlink() or not worker.is_file():
+            raise ValueError('desktop_approval_worker_untrusted')
+        if worker.samefile(binary):
+            if grant.get('worker_sha256') != previous_sha256:
+                raise ValueError('desktop_approval_previous_worker_mismatch')
+            grant['worker_sha256'] = installed_sha256
+        elif hashlib.sha256(worker.read_bytes()).hexdigest() != grant.get('worker_sha256'):
+            raise ValueError('desktop_approval_worker_changed')
+        grant['agent_sha256'] = installed_sha256
+        grant['capability_version'] = version + 1
+        replacement = (json.dumps(grant, indent=2) + '\n').encode()
+        if len(replacement) > 16384:
+            raise ValueError('desktop_approval_too_large')
+        _replace_desktop_approval(path, original, replacement)
+        return ({'state': 'renewed', 'capability_version': version + 1},
+                {'path': path, 'original': original, 'replacement': replacement})
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        reason = str(error) if isinstance(error, ValueError) and str(error).startswith('desktop_approval_') else 'desktop_approval_unavailable'
+        return {'state': 'requires_reapproval', 'reason': reason}, None
+
+
+def restore_desktop_approval(update):
+    if update is not None:
+        _replace_desktop_approval(update['path'], update['replacement'], update['original'])
 
 
 def validate_instance_binding(binding, *, installed=False):

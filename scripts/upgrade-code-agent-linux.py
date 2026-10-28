@@ -23,7 +23,7 @@ import tempfile
 import time
 import uuid
 
-from agent_upgrade_support import GatewayObservationError, gateway_observation
+from agent_upgrade_support import GatewayObservationError, gateway_observation, renew_desktop_approval, restore_desktop_approval
 from maintenance_client import MaintenanceLease
 
 
@@ -115,7 +115,7 @@ def main():
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", args.version) or not re.fullmatch(r"[0-9a-f]{64}", args.sha256):
         p.error("invalid version/checksum")
     record = {"state":"preflight","version":args.version,"candidate_sha256":args.sha256,"service_changed":False}
-    backup = maintenance = None
+    backup = maintenance = desktop_approval_update = None
     try:
         if sha(args.candidate) != args.sha256:
             raise RuntimeError("candidate checksum mismatch")
@@ -143,6 +143,8 @@ def main():
         atomic_copy(args.candidate, args.binary_path); record["service_changed"] = True
         if sha(args.binary_path) != args.sha256:
             raise RuntimeError("installed checksum mismatch")
+        record['desktop_approval'], desktop_approval_update = renew_desktop_approval(
+            config, args.binary_path, record['previous_sha256'], args.sha256)
         subprocess.run(["systemctl", "--user", "restart", args.service_name], check=True, timeout=20)
         ready = wait_gateway(config, args.version, before.get("last_seen", 0))
         record.update(state="upgraded", phase="completed", installed_sha256=sha(args.binary_path), previous_version=old_version, **ready)
@@ -151,6 +153,7 @@ def main():
         if record["service_changed"] and backup is not None:
             try:
                 atomic_copy(backup, args.binary_path)
+                restore_desktop_approval(desktop_approval_update)
                 subprocess.run(["systemctl", "--user", "restart", args.service_name], check=True, timeout=20)
                 record["rollback"] = "restored_previous_binary"
             except Exception as rollback:

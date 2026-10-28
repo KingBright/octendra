@@ -22,7 +22,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from agent_upgrade_support import GatewayObservationError, gateway_observation, wait_ready, validate_instance_binding
+from agent_upgrade_support import GatewayObservationError, gateway_observation, wait_ready, validate_instance_binding, renew_desktop_approval, restore_desktop_approval
 from maintenance_client import MaintenanceLease
 import macos_code_identity
 
@@ -131,6 +131,7 @@ def perform_upgrade(args, base):
     old_version = None
     maintenance = None
     signed_candidate = None
+    desktop_approval_update = None
     try:
         if sha(args.candidate) != args.sha256:
             raise RuntimeError('candidate checksum mismatch')
@@ -213,6 +214,8 @@ def perform_upgrade(args, base):
         changed = True
         if sha(binary) != expected_installed_sha:
             raise RuntimeError('installed binary does not match signed candidate checksum')
+        record['desktop_approval'], desktop_approval_update = renew_desktop_approval(
+            config, binary, record['previous_sha256'], expected_installed_sha)
         subprocess.run(['launchctl', 'kickstart', '-k', service], check=True, timeout=10)
         requires_lanes = tuple(int(n) for n in args.version.split('-')[0].split('+')[0].split('.')) >= (0, 3, 1)
         record['phase'] = 'verifying_readiness'
@@ -240,6 +243,7 @@ def perform_upgrade(args, base):
                     raise RuntimeError('rollback backup checksum mismatch')
                 rollback_started = int(time.time())
                 atomic_copy(backup, binary)
+                restore_desktop_approval(desktop_approval_update)
                 subprocess.run(['launchctl', 'kickstart', '-k', service], check=True, timeout=10)
                 record['rollback'] = 'binary_restored; readiness_pending'
                 record['rollback_readiness'] = wait_ready(base, config, old_version, rollback_started,
