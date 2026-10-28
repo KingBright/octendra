@@ -21,8 +21,15 @@ mtime or permanent expiry.
 SQLite opens the specified existing database with `mode=ro` and `query_only=ON`.
 The fixed SELECT projects JSON fields only from live `client`/`oauth2_client` rows;
 complete JSON objects and secret fields never reach Python. An SQL authorizer rejects
-other tables, writes, and unapproved functions. Results and errors are bounded; failures
-produce only `{"error":"client_metadata_unavailable"}` with exit 2 and no partial rows.
+other tables, writes, and unapproved functions. Results and errors are bounded. Failures
+exit 2 with a fixed error code, stage, safe exception class and completed public checks;
+they never include exception text, SQL operands, paths or partial client rows. Stages
+distinguish `path_stat`, `sqlite_connect`, `sqlite_readonly_setup`,
+`sqlite_json_capability`, `known_schema`, `public_projection`, `path_recheck` and
+`public_metadata`. Checks include file existence/regularity/size, SQLite version,
+JSON-function availability and the known four-column KV schema. For example,
+`sqlite_unsafe_schema_function` identifies a trusted-schema/function incompatibility
+without disabling protection; `state_path_missing` never triggers another-path search.
 
 Public metadata and the secret hash share a JSON column. SQLite therefore internally
 reads/parses that column and its database pages. This is not a promise that no

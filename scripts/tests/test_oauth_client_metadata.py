@@ -1,6 +1,8 @@
 """Synthetic state only; never opens a production config or credential."""
 import hashlib
 import importlib.util
+import contextlib
+import io
 import json
 from pathlib import Path
 import sqlite3
@@ -8,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "inspect-oauth-client-metadata.py"
@@ -59,6 +62,7 @@ class MetadataTests(unittest.TestCase):
         p, result = self.run_cli("--state-db", str(self.path))
         self.assertEqual(p.returncode, 0)
         self.assertEqual(len(result["clients"]), 2)
+        self.assertTrue(result["diagnostic"]["known_kv_schema"])
         for row in result["clients"]:
             self.assertEqual(set(row), {"client_name", "client_id", "redirect_uris",
                                         "token_endpoint_auth_method"})
@@ -104,7 +108,10 @@ class MetadataTests(unittest.TestCase):
                 self.put("client", PUBLIC_ID, value)
                 p, result = self.run_cli("--state-db", str(self.path))
                 self.assertEqual(p.returncode, 2)
-                self.assertEqual(result, {"error": "client_metadata_unavailable"})
+                self.assertEqual(result["stage"], "public_metadata")
+                self.assertIn(result["error"], ("public_client_identity_invalid",
+                                                "public_auth_method_invalid"))
+                self.assertNotIn("clients", result)
 
     def test_malformed_json_and_wrong_namespaces_fail_without_dump(self):
         with sqlite3.connect(self.path) as db:
@@ -148,7 +155,9 @@ class MetadataTests(unittest.TestCase):
                             9223372036854775807))
         p, result = self.run_cli("--state-db", str(self.path))
         self.assertEqual(p.returncode, 2)
-        self.assertEqual(result, {"error": "client_metadata_unavailable"})
+        self.assertEqual(result["error"], "client_count_exceeds_limit")
+        self.assertEqual(result["stage"], "public_metadata")
+        self.assertNotIn("clients", result)
 
     def test_sidecar_symlinks_are_rejected(self):
         link = Path(str(self.path) + "-wal")
@@ -160,6 +169,68 @@ class MetadataTests(unittest.TestCase):
         p, result = self.run_cli("--unexpected", SECRET, SECRET)
         self.assertEqual(p.returncode, 2)
         self.assertEqual(result, {"error": "invalid_arguments"})
+
+    def call_main(self):
+        output, errors = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            code = metadata.main(["--state-db", str(self.path)])
+        self.assertNotIn(SECRET, output.getvalue() + errors.getvalue())
+        self.assertEqual(errors.getvalue(), "")
+        return code, json.loads(output.getvalue())
+
+    def test_path_failure_is_distinct_and_does_not_echo_path(self):
+        p, result = self.run_cli("--state-db", str(Path(self.temp.name) / SECRET))
+        self.assertEqual(p.returncode, 2)
+        self.assertEqual(result["stage"], "path_stat")
+        self.assertEqual(result["error"], "state_path_missing")
+        self.assertFalse(result["diagnostic"]["state_file_exists"])
+
+    def test_connection_failure_is_classified_without_exception_text(self):
+        with mock.patch.object(metadata.sqlite3, "connect", side_effect=
+                               sqlite3.OperationalError("unable to open " + SECRET)):
+            code, result = self.call_main()
+        self.assertEqual(code, 2)
+        self.assertEqual(result["stage"], "sqlite_connect")
+        self.assertEqual(result["error_class"], "OperationalError")
+        self.assertTrue(result["diagnostic"]["state_file_regular"])
+
+    def test_missing_json_function_is_distinct(self):
+        with mock.patch.object(metadata, "json_capability", side_effect=
+                               sqlite3.OperationalError("no such function: " + SECRET)):
+            code, result = self.call_main()
+        self.assertEqual(code, 2)
+        self.assertEqual(result["stage"], "sqlite_json_capability")
+        self.assertEqual(result["error"], "sqlite_json_function_unavailable")
+        self.assertTrue(result["diagnostic"]["sqlite_connected"])
+
+    def test_unexpected_schema_does_not_return_schema_or_row_values(self):
+        with sqlite3.connect(self.path) as db:
+            db.execute("DROP TABLE kv")
+            db.execute("CREATE TABLE kv (unrelated TEXT)")
+            db.execute("INSERT INTO kv VALUES(?)", (SECRET,))
+        p, result = self.run_cli("--state-db", str(self.path))
+        self.assertEqual(p.returncode, 2)
+        self.assertEqual(result["stage"], "known_schema")
+        self.assertEqual(result["error"], "state_schema_unexpected")
+        self.assertFalse(result["diagnostic"]["known_kv_schema"])
+
+    def test_known_gateway_expression_index_is_included_in_fixture(self):
+        with sqlite3.connect(self.path) as db:
+            db.execute("CREATE INDEX kv_kind_state_created ON kv "
+                       "(kind,json_extract(value,'$.state'),json_extract(value,'$.created_at'))")
+        p, result = self.run_cli("--state-db", str(self.path))
+        self.assertEqual(p.returncode, 0)
+        self.assertTrue(result["diagnostic"]["json_functions_available"])
+        self.assertTrue(result["diagnostic"]["known_kv_schema"])
+
+    def test_unsafe_schema_errors_are_categorical_and_remain_denied(self):
+        with mock.patch.object(metadata, "json_capability", side_effect=
+                               sqlite3.DatabaseError("malformed database schema: unsafe use of " + SECRET)):
+            code, result = self.call_main()
+        self.assertEqual(code, 2)
+        self.assertEqual(result["error"], "sqlite_unsafe_schema_function")
+        self.assertEqual(result["stage"], "sqlite_json_capability")
+        self.assertNotIn("clients", result)
 
 
 if __name__ == "__main__":
