@@ -402,7 +402,7 @@ impl Agent {
         let mut result = match perform(progress.clone()).await {
             Ok(v) => v,
             Err(e) => {
-                crate::diagnostics::error(&job.tool, &e.to_string(), Some(&job.id), "agent_execute")
+                crate::diagnostics::error_from_source(&job.tool, &e, Some(&job.id), "agent_execute")
             }
         };
         if crate::durable_transfer::is_suspended(&result) {

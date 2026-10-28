@@ -14,6 +14,21 @@ pub(crate) fn outcome_unknown(value: &Value) -> bool {
                 || value["execution_state"] == "unknown"
                 || value["state"] == "outcome_unknown"))
 }
+pub(crate) fn error_from_source(
+    tool: &str,
+    source: &anyhow::Error,
+    operation: Option<&str>,
+    stage: &str,
+) -> Value {
+    if source
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+    {
+        error(tool, "local_permission_denied", operation, stage)
+    } else {
+        error(tool, &source.to_string(), operation, stage)
+    }
+}
 pub(crate) fn error(tool: &str, message: &str, operation: Option<&str>, stage: &str) -> Value {
     let task_rejection = [
         "task_authorization_missing",
@@ -183,11 +198,28 @@ pub(crate) fn error(tool: &str, message: &str, operation: Option<&str>, stage: &
             "refresh_scoped_snapshot",
             "not_executed",
         )
-    } else if message.contains("scope")
-        || message.contains("permission")
-        || message.contains("authorized")
-        || message.contains("authorization revoked")
-        || message.contains("outside allowed directories")
+    } else if is_code(message, "local_permission_denied") {
+        (
+            "local_permission_denied",
+            "inspect_selected_device_local_file_or_os_permission",
+            "not_executed_or_partial",
+        )
+    } else if (message.starts_with("octendra_authority_") || message.starts_with("octendra_task_"))
+        && message.len() <= 96
+        && message.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+    {
+        (
+            message,
+            if message == "octendra_task_authority_expired" {
+                "reopen_original_desktop_session_and_capture_fresh_frame"
+            } else {
+                "inspect_existing_desktop_approval_and_refresh_capabilities"
+            },
+            "not_executed",
+        )
+    } else if is_code(message, "access_denied")
+        || is_code(message, "authorization revoked")
+        || message == "outside allowed directories"
     {
         (
             "access_denied",
@@ -269,6 +301,7 @@ pub(crate) fn error(tool: &str, message: &str, operation: Option<&str>, stage: &
         "storage_capacity_insufficient" => "free_storage_or_reduce_request",
         "invalid_arguments" => "correct_arguments",
         "access_denied" => "check_account_and_device_permissions",
+        "local_permission_denied" => "inspect_selected_device_local_file_or_os_permission",
         "task_authorization_missing"
         | "task_authorization_version_required"
         | "task_authorization_version_changed"
@@ -304,6 +337,69 @@ pub(crate) fn error_with_request(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn permission_words_in_unrelated_errors_do_not_claim_authorization_failure() {
+        for message in [
+            "permission snapshot channel closed",
+            "scope metadata could not be loaded",
+            "authorized transport disconnected",
+        ] {
+            let value = super::error("desktop_worker", message, None, "agent_execute");
+            assert_eq!(value["error_code"], "execution_failed", "{message}");
+            assert_eq!(value["outcome"], "unknown");
+            assert_ne!(value["user_action"], "check_account_and_device_permissions");
+        }
+        let denied = super::error("code_read", "insufficient_scope", None, "gateway_dispatch");
+        assert_eq!(denied["error_code"], "account_scope_denied");
+    }
+
+    #[test]
+    fn local_permission_failure_uses_the_io_source_without_serializing_its_context() {
+        let source = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            .context("private path /secret/device-file");
+        let value =
+            super::error_from_source("code_read", &source, Some("original"), "agent_execute");
+        assert_eq!(value["error_code"], "local_permission_denied");
+        assert_eq!(value["failure_boundary"], "device");
+        assert!(!value.to_string().contains("secret"));
+        assert_ne!(value["user_action"], "check_account_and_device_permissions");
+    }
+
+    #[test]
+    fn desktop_authority_codes_keep_their_specific_recovery_boundary() {
+        for message in [
+            "octendra_authority_gui_executable_changed",
+            "octendra_task_agent_changed",
+            "octendra_authority_input_platform_mismatch",
+        ] {
+            let value = super::error("desktop_worker", message, None, "agent_execute");
+            assert_eq!(value["error_code"], message);
+            assert_eq!(value["execution_state"], "not_started");
+            assert_eq!(
+                value["recovery_action"],
+                "inspect_existing_desktop_approval_and_refresh_capabilities"
+            );
+        }
+        let expired = super::error(
+            "desktop_worker",
+            "octendra_task_authority_expired",
+            None,
+            "agent_execute",
+        );
+        assert_eq!(
+            expired["recovery_action"],
+            "reopen_original_desktop_session_and_capture_fresh_frame"
+        );
+        let unsafe_message = super::error(
+            "desktop_worker",
+            "octendra_task_failure: https://private/?token=secret",
+            None,
+            "agent_execute",
+        );
+        assert_eq!(unsafe_message["error_code"], "execution_failed");
+        assert!(!unsafe_message.to_string().contains("secret"));
+    }
+
     #[test]
     fn oversized_payload_is_rejected_before_execution() {
         for stage in ["gateway_dispatch", "agent_execute"] {

@@ -1,7 +1,7 @@
 //! Fixed private worker bridge to a selected, already-authorized Weavelo source.
 //! Reuses desktop-launch authority, Agent journals and bounded worker frame bytes.
 //! Bounded gestures use the original GUI receipt; HID is explicitly translated.
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use octendra_desktop_protocol::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -110,7 +110,16 @@ async fn exchange(route: &Route, request: Value, maximum: usize) -> Result<(Valu
         let mut body = vec![0; len];
         s.read_exact(&mut body).await?;
         let body: Value = serde_json::from_slice(&body)?;
-        ensure!(body["ok"] == true, "GUI request unavailable");
+        if body["ok"] != true {
+            if let Some(code) = body["error"].as_str().filter(|code| {
+                !code.is_empty()
+                    && code.len() <= 96
+                    && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+            }) {
+                bail!("{code}");
+            }
+            bail!("GUI request unavailable");
+        }
         let count = body
             .get("bytes")
             .map(|b| b.as_u64().context("pixel length"))
@@ -130,12 +139,24 @@ async fn exchange(route: &Route, request: Value, maximum: usize) -> Result<(Valu
 pub(super) async fn probe(route: &Route, input: bool) -> Result<()> {
     let (status, _) = exchange(route, json!("Status"), 0).await?;
     ensure!(
-        status["generation"] == route.generation
-            && status["executable_sha256"] == route.gui_executable_sha256
-            && status["computer_use"]["protocol"] == 1
-            && status["computer_use"]["observe"] == true
-            && (!input || status["computer_use"]["input"] == true),
-        "GUI generation/identity/observe contract changed"
+        status["generation"] == route.generation,
+        "octendra_authority_gui_generation_changed"
+    );
+    ensure!(
+        status["executable_sha256"] == route.gui_executable_sha256,
+        "octendra_authority_gui_executable_changed"
+    );
+    ensure!(
+        status["computer_use"]["protocol"] == 1,
+        "octendra_authority_gui_protocol_changed"
+    );
+    ensure!(
+        status["computer_use"]["observe"] == true,
+        "octendra_authority_observe_unavailable"
+    );
+    ensure!(
+        !input || status["computer_use"]["input"] == true,
+        "octendra_authority_input_unavailable"
     );
     Ok(())
 }
@@ -539,6 +560,56 @@ fn rgba_layout(size: [u32; 2], encoding: &str, length: usize, maximum: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn private_gui_failures_preserve_codes_but_never_raw_messages() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = dir.path().join("gui-receive.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let route = Route {
+            input_platform: None,
+            profile: dir.path().to_owned(),
+            generation: "1-2".into(),
+            gui_executable_sha256: "0".repeat(64),
+            target: Target {
+                peer_device_id: "fixture-peer".into(),
+                source: Source::MainDisplay,
+                connection_id: 1,
+            },
+        };
+        let server = tokio::spawn(async move {
+            for error in [
+                "octendra_task_authority_expired",
+                "permission error https://private/?token=secret",
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let count = stream.read_u32().await.unwrap() as usize;
+                let mut request = vec![0; count];
+                stream.read_exact(&mut request).await.unwrap();
+                let body = serde_json::to_vec(&json!({"ok":false,"error":error})).unwrap();
+                stream.write_u32(body.len() as u32).await.unwrap();
+                stream.write_all(&body).await.unwrap();
+            }
+        });
+        assert_eq!(
+            exchange(&route, json!("Status"), 0)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "octendra_task_authority_expired"
+        );
+        assert_eq!(
+            exchange(&route, json!("Status"), 0)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "GUI request unavailable"
+        );
+        server.await.unwrap();
+    }
+
     #[test]
     fn weavelo_rgba_layout_rejects_unknown_encoding_padding_and_budget_overflow() {
         assert!(rgba_layout([3, 1], "rgba8_srgb", 12, 12).is_ok());
