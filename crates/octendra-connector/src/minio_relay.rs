@@ -62,6 +62,27 @@ pub struct MinioRelayProfile {
 }
 
 impl MinioRelayProfile {
+    fn storage_namespace(&self) -> &'static str {
+        if self.bucket == LEGACY_RELAY_BUCKET {
+            "remote-hosts"
+        } else {
+            "octendra"
+        }
+    }
+
+    fn retention_matches(&self, xml: &str) -> bool {
+        let namespace = self.storage_namespace();
+        let id = format!("<ID>{namespace}-orphans</ID>");
+        let prefix = format!("<Prefix>{namespace}/</Prefix>");
+        xml.split("<Rule>").any(|rule| {
+            let rule = rule.split("</Rule>").next().unwrap_or("");
+            rule.contains(&id)
+                && rule.contains("<Status>Enabled</Status>")
+                && rule.contains(&prefix)
+                && rule.contains("<Expiration><Days>1</Days></Expiration>")
+        })
+    }
+
     /// Whether this exact route is eligible; ordinary LAN/FRP/VPN SSH remains direct.
     pub fn matches_route(&self, path: &AccessPath) -> bool {
         path.enabled
@@ -202,7 +223,8 @@ impl MinioRelayStore {
             }
             let stale_multipart_aborted = client.abort_stale_uploads().await?;
             let key = format!(
-                "octendra/{}/check-{}/payload",
+                "{}/{}/check-{}/payload",
+                profile.storage_namespace(),
                 profile.name,
                 uuid::Uuid::new_v4()
             );
@@ -397,13 +419,7 @@ impl RelayClient {
             .map_err(|_| failure("bucket retention read failed"))?;
         if response.status().is_success() {
             let xml = bounded_xml(response).await?;
-            if !xml.split("<Rule>").any(|rule| {
-                let rule = rule.split("</Rule>").next().unwrap_or("");
-                rule.contains("<ID>octendra-orphans</ID>")
-                    && rule.contains("<Status>Enabled</Status>")
-                    && rule.contains("<Prefix>octendra/</Prefix>")
-                    && rule.contains("<Expiration><Days>1</Days></Expiration>")
-            }) {
+            if !self.profile.retention_matches(&xml) {
                 return Err(failure(
                     "existing bucket lifecycle is not the relay policy; reconcile it explicitly",
                 ));
@@ -413,7 +429,10 @@ impl RelayClient {
         if response.status() != StatusCode::NOT_FOUND {
             return require_success(response.status(), "read relay retention");
         }
-        let rule = "<LifecycleConfiguration><Rule><ID>octendra-orphans</ID><Filter><Prefix>octendra/</Prefix></Filter><Status>Enabled</Status><Expiration><Days>1</Days></Expiration><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>";
+        let namespace = self.profile.storage_namespace();
+        let rule = format!(
+            "<LifecycleConfiguration><Rule><ID>{namespace}-orphans</ID><Filter><Prefix>{namespace}/</Prefix></Filter><Status>Enabled</Status><Expiration><Days>1</Days></Expiration><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"
+        );
         let checksum =
             base64::engine::general_purpose::STANDARD.encode(md5::Md5::digest(rule.as_bytes()));
         let response = self
@@ -432,7 +451,11 @@ impl RelayClient {
     /// Reap at most 20 uploads per invocation, scoped to this dedicated profile and older than
     /// one day (far beyond the two-hour operation deadline). Never abort current operations.
     async fn abort_stale_uploads(&self) -> Result<u32, TransportError> {
-        let prefix = format!("octendra/{}/", self.profile.name);
+        let prefix = format!(
+            "{}/{}/",
+            self.profile.storage_namespace(),
+            self.profile.name
+        );
         let response = self
             .request(
                 Method::GET,
@@ -835,6 +858,20 @@ mod tests {
         assert!(profile.validate().is_err());
         profile.bucket = "octendra-transfer".into();
         assert!(profile.validate().is_ok());
+    }
+
+    #[test]
+    fn legacy_relay_retains_its_lifecycle_namespace() {
+        let legacy = "<Rule><ID>remote-hosts-orphans</ID><Status>Enabled</Status><Filter><Prefix>remote-hosts/</Prefix></Filter><Expiration><Days>1</Days></Expiration></Rule>";
+        let current = "<Rule><ID>octendra-orphans</ID><Status>Enabled</Status><Filter><Prefix>octendra/</Prefix></Filter><Expiration><Days>1</Days></Expiration></Rule>";
+        let (mut profile, _) = fixture();
+        assert!(profile.retention_matches(current));
+        assert!(!profile.retention_matches(legacy));
+        profile.bucket = LEGACY_RELAY_BUCKET.into();
+        assert!(profile.retention_matches(legacy));
+        assert!(!profile.retention_matches(current));
+        assert!(!profile.retention_matches(&legacy.replace("Enabled", "Disabled")));
+        assert!(!profile.retention_matches(&legacy.replace("<Days>1", "<Days>2")));
     }
 
     #[test]

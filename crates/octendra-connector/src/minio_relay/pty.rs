@@ -166,8 +166,10 @@ impl<B: ManagedPtyBackend + 'static> ConnectorPtyManager<B> {
         };
         let client = store.client(profile).await?;
         let key = format!(
-            "octendra/{}/{}/{sha}/payload",
-            profile.name, request.operation_id
+            "{}/{}/{}/{sha}/payload",
+            profile.storage_namespace(),
+            profile.name,
+            request.operation_id
         );
         emit_sftp_progress(request, "minio_preflight", 0, Some(size), 0, 0);
         let mut result = match request.spec.direction {
@@ -499,8 +501,10 @@ mod tests {
             },
         };
         let key = format!(
-            "octendra/{}/check-{}/{sha}/payload",
-            profile.name, request.operation_id
+            "{}/{}/check-{}/{sha}/payload",
+            profile.storage_namespace(),
+            profile.name,
+            request.operation_id
         );
         let result = async {
             client.put_file(&key, &request, size, &sha).await?;

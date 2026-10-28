@@ -35,7 +35,7 @@ LOCAL_EVIDENCE = (".integration-artifacts/", ".rust-storage/")
 # an immutable-byte legacy fixture. No presentation, file or substring exemption.
 LEGACY_NAMESPACE_GUARDS = {
     # Existing dedicated storage names remain valid; no old command or UI alias.
-    'crates/octendra-connector/src/minio_relay.rs': {'4b1317ea31ecb01514049ff348d1d3c7e4d7289954ca9aeced579853efa87394'},
+    'crates/octendra-connector/src/minio_relay.rs': {'4b1317ea31ecb01514049ff348d1d3c7e4d7289954ca9aeced579853efa87394', 'a09bfd4f2bff0c8d9bf5d0fa91d7139ea5af1c4c9d773f659f99ec7dfac1e1ba', 'ddb377aeb13e0944584e370250e60ab85031a4fb7cde6ce6d6eaf95496747f39'},
     # Existing Android v1 decryption aliases are compatibility data, not UI.
     # Exact line hashes preserve those bytes; any edited line still fails.
     'android/app/src/main/java/fun/hackerlife/octendra/ConfigCipher.kt': {'118210fe8b14ce23c2c2ff6af7b02f9d9189c5a4391a3dbee1d8f7b98637bbb4'},
