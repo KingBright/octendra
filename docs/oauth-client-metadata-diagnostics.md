@@ -1,5 +1,28 @@
 # Existing OAuth client metadata, offline
 
+The native product command is:
+
+```sh
+octendra-code inspect-oauth-clients --state-db /absolute/path/to/state.sqlite
+```
+
+It uses the product's locked SQLite dependency and a new read-only connection,
+without `Store::open`, schema initialization/migration, configuration reads or a
+service lock. It runs before logging setup and suppresses argument-parser details.
+Success prints one JSON object with the four public fields below, redaction count
+and SQLite version; failure exits 2 with only a fixed `error` and `stage`. There is
+no HTTP/MCP endpoint and no authentication or permission change. Deploy it only
+as the verified normal product executable through the existing release/upgrade
+flow; do not install an alternate executable or library under a diagnostic path.
+
+The native command checks the existing ordinary four-column KV table, sets
+`query_only=ON`, `trusted_schema=OFF` and memory-only temporary storage, and installs
+a projection-only SQL authorizer and bounded query progress handler. It never
+returns complete stored client JSON, sessions, secret hashes or tokens to Rust.
+SQLite still parses the shared JSON column internally, as explained below.
+
+The older Python preparation command remains:
+
 `scripts/inspect-oauth-client-metadata.py --state-db /absolute/path/to/state.sqlite`
 inspects existing Code Gateway registrations using the caller's existing filesystem
 access. It does not open gateway configuration, start a server, authenticate, register
@@ -68,6 +91,14 @@ cross-build and a local test pass do not prove that the NAS loader/ABI works;
 the host's synthetic preflight is mandatory before a production read. Remove only
 the exact owned temporary library/scripts after all diagnostic processes exit,
 keeping the non-sensitive receipt. The system Python and Gateway remain unchanged.
+
+This is not an installation mechanism or permission to select another executable
+directory. If the host rejects loading because the staging mount is `noexec`, stop
+the temporary-library path. Do not relocate it, change mount options or permissions,
+or repurpose an installed product's `bin` directory to bypass that restriction.
+Only an existing supported diagnostic-runtime deployment mechanism could supply a
+different approved input location; the current Gateway/Agent and restricted admin
+helper installers do not provide one.
 
 Synthetic verification, without production state or a Rust build:
 

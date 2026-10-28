@@ -2454,6 +2454,7 @@ dependencies = [
  "futures-util",
  "globset",
  "ignore",
+ "libsqlite3-sys",
  "nix 0.30.1",
  "octendra-admin",
  "octendra-desktop-protocol",

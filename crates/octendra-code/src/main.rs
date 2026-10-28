@@ -1,5 +1,6 @@
 //! Octendra gateway/device service alongside the existing managed SSH connector.
 #![cfg_attr(windows, windows_subsystem = "windows")]
+mod oauth_client_metadata;
 #[cfg(unix)]
 mod owner_password;
 #[cfg(unix)]
@@ -22,6 +23,11 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Offline read-only projection of existing public OAuth client metadata.
+    InspectOauthClients {
+        #[arg(long)]
+        state_db: PathBuf,
+    },
     #[cfg(target_os = "macos")]
     #[command(hide = true)]
     MaintenanceTask {
@@ -157,6 +163,21 @@ fn lock(dir: &std::path::Path) -> Result<std::fs::File> {
 }
 #[tokio::main]
 async fn main() -> Result<()> {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|a| a == "inspect-oauth-clients")
+    {
+        // No logger, config, service lock or parser diagnostics on this path.
+        let (output, code) = match Cli::try_parse() {
+            Ok(Cli {
+                command: Command::InspectOauthClients { state_db },
+            }) => oauth_client_metadata::run(&state_db).await,
+            _ => (serde_json::json!({"error":"invalid_arguments"}), 2),
+        };
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout().lock(), "{output}");
+        std::process::exit(code);
+    }
     // Handle before any logger/service setup; never display parser diagnostics,
     // paths, configuration, password bytes or verification errors for this command.
     if std::env::args_os()
@@ -439,6 +460,9 @@ async fn main() -> Result<()> {
             unreachable!("password reset handled before service logger initialization")
         }
         Command::CheckOwnerPassword { .. } => unreachable!("offline check handled before logging"),
+        Command::InspectOauthClients { .. } => {
+            unreachable!("offline inspection handled before logging")
+        }
         Command::InitGateway {
             config,
             public_url,

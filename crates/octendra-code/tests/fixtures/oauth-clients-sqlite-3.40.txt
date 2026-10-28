@@ -1,0 +1,5 @@
+Synthetic fixture only; no production data.
+Created by official SQLite 3.40.0 2022-11-16 12:10:08 89c459e766ea7e9165d0beeb124708b955a4950d0f4792f457465d71b158d318
+Source SHA3-256 ab8da6bc754642989e67d581f26683dc705b068cea671970f0a7d32cfacbad19
+Database SHA256 1d7451065bc47f3f6c80331202a25e04c2cca87d0c83529b65620c641c679ba3
+Contains ordinary kv, CHECK(json_valid(value)), JSON expression index and one fake client. user_version=34000.
