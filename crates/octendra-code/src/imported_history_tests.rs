@@ -94,6 +94,22 @@ async fn imported_receipt_is_observable_without_rewriting_original_evidence() {
         observed["history_migration"]["recovery_workspace_id"],
         f.workspace
     );
+    let batch = f
+        .gateway
+        .dispatch(
+            &f.principal,
+            "operation_get",
+            json!({
+                "operation_ids":[f.operation],"wait_ms":0,"max_bytes":16384,"response_mode":"full"
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(batch["operations"][0]["output"], "historical output\n");
+    assert_eq!(
+        batch["operations"][0]["history_migration"]["read_only"],
+        true
+    );
     let saved: (String, String, String) =
         sqlx::query_as("SELECT request,result,fingerprint FROM jobs WHERE id=?")
             .bind(&f.operation)
@@ -152,6 +168,19 @@ async fn owner_device_protocol_and_both_scope_boundaries_remain_required() {
         assert!(
             f.gateway.result(&f.principal, &f.operation).await.is_err(),
             "{field}"
+        );
+        assert!(
+            f.gateway
+                .dispatch(
+                    &f.principal,
+                    "operation_get",
+                    json!({
+                        "operation_ids":[f.operation],"wait_ms":0,"max_bytes":16384
+                    })
+                )
+                .await
+                .is_err(),
+            "batch {field}"
         );
     }
     f.put_grant(f.grant()).await;

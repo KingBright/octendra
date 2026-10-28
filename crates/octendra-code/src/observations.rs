@@ -165,19 +165,9 @@ async fn view(g: &Gateway, p: &Principal, ids: &[String]) -> Result<View> {
         let device: String = row.try_get("device")?;
         let tool: String = row.try_get("tool")?;
         let _scope = tools::scope(&tool).context("unknown original operation tool")?;
-        ensure!(
-            owner == p.owner
-                && p.owner == g.config.owner
-                && g.config.devices.iter().any(|d| d.id == device),
-            "operation_unavailable: original operation access is required"
-        );
-        let registered = g
-            .config
-            .devices
-            .iter()
-            .find(|d| d.id == device)
-            .context("unknown device")?;
-        tools::require_observation(p, registered, &tool)?;
+        g.require_operation_observation(p, &owner, &device, &tool)
+            .await
+            .context("operation_unavailable: original operation access is required")?;
         let state: String = row.try_get("state")?;
         let progress: Option<String> = row.try_get("progress")?;
         let mut stamp = json!({"id":id,"state":state});

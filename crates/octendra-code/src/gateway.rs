@@ -55,12 +55,12 @@ struct ImportedHistoryAccess {
     scopes: Vec<String>,
 }
 impl ImportedHistoryAccess {
-    fn matches(&self, gateway: &Gateway, principal: &Principal, job: &Job) -> bool {
+    fn matches(&self, gateway: &Gateway, principal: &Principal, owner: &str, device: &str) -> bool {
         self.protocol == 1
             && self.owner == gateway.config.owner
             && self.owner == principal.owner
-            && self.source_owner == job.owner
-            && self.source_device_id == job.device_id
+            && self.source_owner == owner
+            && self.source_device_id == device
             && uuid::Uuid::parse_str(&self.recovery_device_id).is_ok()
             && self.recovery_workspace_id.as_ref().is_none_or(|workspace| {
                 workspace
@@ -1158,25 +1158,27 @@ impl Gateway {
             }
         }
     }
-    pub(crate) async fn result(&self, p: &Principal, id: &str) -> Result<Value> {
-        let (request, result, state, updated): (String, Option<String>, String, i64) =
-            sqlx::query_as("SELECT request,result,state,updated FROM jobs WHERE id=?")
-                .bind(id)
-                .fetch_optional(&self.store.pool)
-                .await?
-                .context("operation not found")?;
-        let job: Job = serde_json::from_str(&request)?;
-        let history =
-            if job.owner != p.owner || !self.config.devices.iter().any(|d| d.id == job.device_id) {
-                self.store
-                    .get::<ImportedHistoryAccess>("imported_history", &job.device_id)
-                    .await?
-                    .filter(|history| history.matches(self, p, &job))
-            } else {
-                None
-            };
+    pub(crate) async fn require_operation_observation(
+        &self,
+        p: &Principal,
+        owner: &str,
+        device: &str,
+        tool: &str,
+    ) -> Result<(Option<Value>, &DeviceRegistration)> {
         ensure!(
-            job.owner == p.owner || history.is_some(),
+            p.owner == self.config.owner,
+            "operation belongs to another owner"
+        );
+        let history = if owner != p.owner || !self.config.devices.iter().any(|d| d.id == device) {
+            self.store
+                .get::<ImportedHistoryAccess>("imported_history", device)
+                .await?
+                .filter(|history| history.matches(self, p, owner, device))
+        } else {
+            None
+        };
+        ensure!(
+            owner == p.owner || history.is_some(),
             "operation belongs to another owner"
         );
         if let Some(history) = &history {
@@ -1187,18 +1189,31 @@ impl Gateway {
                 token_hash: String::new(),
                 scopes: history.scopes.clone(),
             };
-            tools::require_observation(p, &source_permissions, &job.tool)?;
+            tools::require_observation(p, &source_permissions, tool)?;
         }
         let observation_device = history
             .as_ref()
-            .map_or(&job.device_id, |history| &history.recovery_device_id);
+            .map_or(device, |history| &history.recovery_device_id);
         let registered = self
             .config
             .devices
             .iter()
-            .find(|d| &d.id == observation_device)
+            .find(|d| d.id == observation_device)
             .context("device permission revoked for original operation")?;
-        tools::require_observation(p, registered, &job.tool)?;
+        tools::require_observation(p, registered, tool)?;
+        Ok((history.map(|history| history.describe()), registered))
+    }
+    pub(crate) async fn result(&self, p: &Principal, id: &str) -> Result<Value> {
+        let (request, result, state, updated): (String, Option<String>, String, i64) =
+            sqlx::query_as("SELECT request,result,state,updated FROM jobs WHERE id=?")
+                .bind(id)
+                .fetch_optional(&self.store.pool)
+                .await?
+                .context("operation not found")?;
+        let job: Job = serde_json::from_str(&request)?;
+        let (history, registered) = self
+            .require_operation_observation(p, &job.owner, &job.device_id, &job.tool)
+            .await?;
         if let Some(result) = result {
             let mut result: Value = serde_json::from_str(&result)?;
             if job.tool == "workspace_open" {
@@ -1240,14 +1255,14 @@ impl Gateway {
             }
             result["operation_lifecycle"] = self.lifecycle_or_unavailable(id, &job.device_id).await;
             if let Some(history) = &history {
-                result["history_migration"] = history.describe();
+                result["history_migration"] = history.clone();
             }
             result["receipt"] = crate::receipts::decision(&result, None, Some(id), updated);
             return Ok(result);
         }
         let mut pending = json!({"operation_id":id,"device_id":job.device_id,"state":state,"pending":true,"next_action":"operation_get","retry_after_ms":1000});
         if let Some(history) = &history {
-            pending["history_migration"] = history.describe();
+            pending["history_migration"] = history.clone();
         }
         pending["operation_lifecycle"] = self.lifecycle_or_unavailable(id, &job.device_id).await;
         if job.tool == "terminal_exec"
