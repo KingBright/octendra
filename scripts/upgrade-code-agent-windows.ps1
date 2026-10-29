@@ -9,6 +9,19 @@ param(
   [int]$IdleTimeout=180
 )
 $ErrorActionPreference='Stop'
+function Initialize-UpgradeTransport {
+  # Match the connected Agent's direct route when no proxy was configured.
+  # Automatic Windows proxy discovery can stall an otherwise healthy device.
+  $proxyConfigured=$false
+  foreach($name in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY')) {
+    if(-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))){$proxyConfigured=$true}
+  }
+  $settings=Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction SilentlyContinue
+  if($null -ne $settings -and -not $proxyConfigured -and $settings.ProxyEnable -ne 1 -and [string]::IsNullOrWhiteSpace($settings.AutoConfigURL)) {
+    [Net.WebRequest]::DefaultWebProxy=$null
+  }
+}
+Initialize-UpgradeTransport
 if ($Sha256 -notmatch '^[0-9a-f]{64}$' -or $Version -notmatch '^\d+\.\d+\.\d+$') { throw 'invalid version/checksum' }
 $record=[ordered]@{state='preflight';version=$Version;candidate_sha256=$Sha256;service_changed=$false}
 $lease=[guid]::NewGuid().ToString('N').PadRight(64,'0').Substring(0,64)
@@ -125,8 +138,10 @@ try {
   $candidateVersion = (& $Candidate --version | Out-String).Trim()
   if ($LASTEXITCODE -ne 0 -or $candidateVersion -ne "octendra-code $Version") { throw 'candidate version mismatch or nonzero exit' }
   $config=Get-Content -Raw -LiteralPath $ConfigPath|ConvertFrom-Json
+  $record.phase='gateway_preflight'
   $headers=@{Authorization=('Bearer '+$config.device_token);'Cache-Control'='no-cache'};$before=Invoke-RestMethod -Method Get -Uri ($config.gateway_url+'/device/readiness') -Headers $headers -TimeoutSec 10
   Maintenance-Call 'acquire';$maintenance=$true
+  $record.phase='draining'
   $deadline=(Get-Date).AddSeconds($IdleTimeout)
   do {
     $agents=@(Get-Process octendra-code -ErrorAction SilentlyContinue)
@@ -139,12 +154,14 @@ try {
   } while ($true)
   $backupRoot=Join-Path $env:LOCALAPPDATA ("octendra-code\releases\before-$Version-"+(Get-Date -Format yyyyMMddTHHmmss)+'-'+[guid]::NewGuid().ToString('N').Substring(0,8));New-Item -ItemType Directory -Force $backupRoot|Out-Null;$backup=Join-Path $backupRoot 'octendra-code.exe';Copy-Item -LiteralPath $BinaryPath -Destination $backup
   $record.backup=$backup;$record.previous_sha256=(Get-FileHash -Algorithm SHA256 $backup).Hash.ToLowerInvariant();$record.state='installing'
+  $record.phase='replacing'
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue;Start-Sleep -Seconds 2
   Copy-AgentBinary -Source $Candidate -Target $BinaryPath;$record.service_changed=$true
   if ((Get-FileHash -Algorithm SHA256 $BinaryPath).Hash.ToLowerInvariant() -ne $Sha256) {throw 'installed checksum mismatch'}
   $record.desktop_approval=Renew-DesktopApproval -Config $config -Binary $BinaryPath -PreviousHash $record.previous_sha256 -InstalledHash $Sha256
   Start-ScheduledTask -TaskName $TaskName
-  $ready=Gateway-Ready $Version ([long]$before.last_seen);$record.state='upgraded';$record.installed_sha256=$Sha256;$record.gateway_verified=$true;$record.session=$ready.session;$record.samples=$ready.samples
+  $record.phase='verifying'
+  $ready=Gateway-Ready $Version ([long]$before.last_seen);$record.state='upgraded';$record.phase='completed';$record.installed_sha256=$Sha256;$record.gateway_verified=$true;$record.session=$ready.session;$record.samples=$ready.samples
 } catch {
   $record.state='failed';$record.error=$_.Exception.Message
   if ($record.service_changed -and $backup) { try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop;Start-Sleep -Seconds 2;Copy-AgentBinary -Source $backup -Target $BinaryPath;if ((Get-FileHash -Algorithm SHA256 -LiteralPath $BinaryPath).Hash.ToLowerInvariant() -ne $record.previous_sha256) { throw 'rollback checksum mismatch' };Restore-DesktopApproval;Start-ScheduledTask -TaskName $TaskName;$record.rollback='restored_previous_binary' } catch { $record.rollback='failed' } }
