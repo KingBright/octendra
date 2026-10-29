@@ -10,6 +10,9 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.util.Log
 import org.json.JSONObject
 import java.util.concurrent.Executors
@@ -23,6 +26,8 @@ object AgentRuntime {
     @Volatile var lastContact = 0L
     @Volatile var currentOperation: String? = null
     @Volatile var connectionDiagnostics: ConnectionDiagnostics? = null
+    @Volatile var reconnectNetwork: (() -> Long)? = null
+    @Volatile var networkMonitoring = false
     val revision = AtomicLong()
     fun changed() { revision.incrementAndGet() }
 }
@@ -31,6 +36,20 @@ class AgentService : Service() {
     private val workers = Executors.newFixedThreadPool(3)
     private val receiptWake = java.util.concurrent.Semaphore(0)
     private val diagnosticsWorker = Executors.newSingleThreadScheduledExecutor()
+    private val retryWake = Object()
+    private val networks = NetworkRecoveryState()
+    private var connectivity: ConnectivityManager? = null
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            if (networks.available(network.networkHandle)) queueNetworkRecovery() else wakeNetwork()
+        }
+        override fun onLost(network: Network) {
+            if (networks.lost(network.networkHandle)) queueNetworkRecovery()
+        }
+        override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+            if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) && networks.validated(network.networkHandle)) wakeNetwork()
+        }
+    }
     private var transport: Transport? = null
     private var journal: Journal? = null
     @Volatile private var alive = false
@@ -60,6 +79,14 @@ class AgentService : Service() {
             AgentRuntime.connectionDiagnostics = diagnostics
             val net = Transport(config, diagnostics); transport = net
             alive = true; started = true; AgentRuntime.running = true; AgentRuntime.lastContact = 0; AgentRuntime.state = "正在连接"; AgentRuntime.changed()
+            AgentRuntime.reconnectNetwork = { reconnectNetwork() }
+            connectivity = getSystemService(ConnectivityManager::class.java)
+            try {
+                connectivity?.registerDefaultNetworkCallback(networkCallback)
+                AgentRuntime.networkMonitoring = connectivity != null
+            } catch (error: RuntimeException) {
+                Log.w("OctendraConnection", "channel=lifecycle event=network_monitor_unavailable code=${ConnectionDiagnostics.errorCode(error)}")
+            }
             Log.i("OctendraConnection", "channel=lifecycle event=service_started")
             AgentRuntime.bridge = ShellBridge(this); updateBridge()
             val dispatcher = Dispatcher(this, config, db, net)
@@ -75,7 +102,7 @@ class AgentService : Service() {
     }
     private fun updateBridge() { if (controls(this).getBoolean("shell_enabled", false)) AgentRuntime.bridge?.open() else AgentRuntime.bridge?.close() }
     private fun hello(): JSONObject {
-        val features = mutableListOf("android_commands_v1", "android_durable_receipts_v1", "android_files_v1")
+        val features = mutableListOf("android_commands_v1", "android_durable_receipts_v1", "android_files_v1", "android_network_recovery_v1")
         if (AccessService.instance != null) features += "android_accessibility_v1"
         if (AgentRuntime.bridge?.connected() == true) features += "android_shell_bridge_v1"
         return obj("version" to BuildConfig.VERSION_NAME, "wire_protocol" to 2, "platform" to "android", "arch" to Build.SUPPORTED_ABIS.firstOrNull(),
@@ -84,9 +111,25 @@ class AgentService : Service() {
             "active_operations" to arr(listOfNotNull(AgentRuntime.currentOperation)), "poll_wait_ms" to 20000)
     }
     private fun contact() { AgentRuntime.lastContact = System.currentTimeMillis(); AgentRuntime.state = "已连接"; AgentRuntime.changed() }
+    private fun wakeNetwork() {
+        synchronized(retryWake) { retryWake.notifyAll() }
+        receiptWake.release()
+    }
+    private fun reconnectNetwork(): Long {
+        val generation = transport?.reconnect() ?: throw AgentError("transport_stopped")
+        wakeNetwork()
+        Log.i("OctendraConnection", "channel=lifecycle event=network_reconnect generation=$generation")
+        return generation
+    }
+    private fun queueNetworkRecovery() {
+        if (!alive) return
+        try { diagnosticsWorker.execute { if (alive) reconnectNetwork() } }
+        catch (_: java.util.concurrent.RejectedExecutionException) { /* Service is stopping. */ }
+    }
     private fun pause(milliseconds: Long): Boolean {
         if (!alive) return false
-        try { Thread.sleep(milliseconds); return alive } catch (_: InterruptedException) { return false }
+        try { synchronized(retryWake) { if (alive) retryWake.wait(milliseconds) }; return alive }
+        catch (_: InterruptedException) { return false }
     }
     private fun failure(e: Exception, attempt: Int): Boolean {
         if (!alive) return false
@@ -145,6 +188,10 @@ class AgentService : Service() {
     override fun onDestroy() {
         Log.i("OctendraConnection", "channel=lifecycle event=service_stopped")
         alive = false; AgentRuntime.running = false; AgentRuntime.currentOperation = null
+        AgentRuntime.reconnectNetwork = null
+        if (AgentRuntime.networkMonitoring) try { connectivity?.unregisterNetworkCallback(networkCallback) } catch (_: RuntimeException) { }
+        AgentRuntime.networkMonitoring = false
+        wakeNetwork()
         transport?.close(); AgentRuntime.bridge?.close(); AgentRuntime.bridge = null
         workers.shutdownNow()
         diagnosticsWorker.shutdownNow()

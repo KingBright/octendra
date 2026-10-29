@@ -919,7 +919,7 @@ impl Agent {
         }
     }
     async fn run_loop(&self, skill_home: Option<&std::path::Path>) -> Result<()> {
-        let client = liveness::network_client()?;
+        let mut client = liveness::network_client()?;
         let delivery = Delivery::new(self.store.clone(), self.config.clone()).await?;
         let (skill_revision, skill_consistent) = self.startup_skill_status(skill_home);
         let hello = DeviceHello {
@@ -970,6 +970,11 @@ impl Agent {
                     .await
             }
             .await;
+            if health.is_err()
+                && let Ok(fresh) = liveness::network_client()
+            {
+                client = fresh;
+            }
             if let Ok(v) = &health {
                 let gateway_wire = v["wire_protocol"].as_u64().unwrap_or(0) as u32;
                 if gateway_wire < crate::capabilities::MIN_GATEWAY_WIRE_PROTOCOL {
@@ -1141,6 +1146,7 @@ impl Agent {
         hello: &DeviceHello,
         period: Duration,
     ) -> Result<()> {
+        let mut client = client.clone();
         let mut terminal_changes = self.terminals.subscribe_changes();
         let mut periodic = tokio::time::interval(period);
         periodic.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1236,19 +1242,25 @@ impl Agent {
                 .timeout(Duration::from_secs(5))
                 .send()
                 .await;
-            if let Ok(resp) = response
-                && resp.status().is_success()
-            {
-                if !self.state_only {
-                    crate::auto_upgrade::check_and_spawn_agent_upgrade(
-                        self,
-                        client,
-                        resp.headers(),
-                    );
+            match response {
+                Ok(resp) if resp.status().is_success() => {
+                    if !self.state_only {
+                        crate::auto_upgrade::check_and_spawn_agent_upgrade(
+                            self,
+                            &client,
+                            resp.headers(),
+                        );
+                    }
+                    acknowledged_terminal_fingerprint = fingerprint;
+                    last_acknowledged = tokio::time::Instant::now();
+                    self.liveness.observed(contact_started);
                 }
-                acknowledged_terminal_fingerprint = fingerprint;
-                last_acknowledged = tokio::time::Instant::now();
-                self.liveness.observed(contact_started);
+                Err(_) => {
+                    if let Ok(fresh) = liveness::network_client() {
+                        client = fresh;
+                    }
+                }
+                _ => {}
             }
         }
     }

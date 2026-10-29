@@ -35,6 +35,12 @@ LaunchAgents, installs the admin UI, synchronizes the Agent Skill, and starts:
 Both services start automatically at user login. MCP stdio is not a daemon; Codex or Antigravity
 starts a child process with the shared database and vault-key path.
 
+## Agent startup and network recovery
+
+The Code Agent uses the existing operating-system service manager. macOS LaunchAgents start after user login and use KeepAlive. Linux user units require their existing enabled state and user lingering to start before login; the NAS Gateway is a system service. Windows uses an interactive user logon task, StartWhenAvailable and failure restart every minute (up to 999 retries). Desktop access still requires the normal local user session; installation does not enable automatic login or change device permissions.
+
+Agent polling and independent heartbeats use bounded timeouts and reconnect backoff. Failed transport paths rebuild their HTTP clients so stale sockets and routes do not pin the device offline after a network change. Durable operation receipts retry independently; connection recovery does not replay business commands. Android’s network callbacks, boot opt-in and authorized USB bridge recovery are described in [Android Agent](android-agent.md).
+
 ## Instance Sync Listener
 
 The normal API remains loopback-only. To let another approved Octendra installation synchronize

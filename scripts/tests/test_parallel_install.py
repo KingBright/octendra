@@ -640,6 +640,15 @@ class ParallelInstallTests(unittest.TestCase):
         self.assertEqual(root.find('.//t:Command',ns).text,str(binary))
         self.assertEqual(root.find('.//t:Arguments',ns).text,subprocess.list2cmdline(['agent','--config',str(config)]))
 
+    def test_windows_agent_recovers_without_requiring_another_logon(self):
+        root=ET.fromstring(install.windows_task(PureWindowsPath('C:/agent.exe'),PureWindowsPath('C:/agent.json'),'S-1-5-21-test'))
+        ns={'t':'http://schemas.microsoft.com/windows/2004/02/mit/task'}
+        self.assertEqual(root.find('.//t:StartWhenAvailable',ns).text,'true')
+        self.assertEqual(root.find('.//t:RestartOnFailure/t:Interval',ns).text,'PT1M')
+        self.assertEqual(root.find('.//t:RestartOnFailure/t:Count',ns).text,'999')
+        self.assertEqual(root.find('.//t:MultipleInstancesPolicy',ns).text,'IgnoreNew')
+        self.assertEqual(root.find('.//t:ExecutionTimeLimit',ns).text,'PT0S')
+
     def test_windows_xml_can_be_passed_as_unicode_to_task_scheduler(self):
         # COM's XmlText/RegisterTask consume a BSTR, not the original UTF-8
         # bytes. An encoding declaration causes native error 0x8004131a.

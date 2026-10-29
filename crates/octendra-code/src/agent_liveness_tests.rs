@@ -234,6 +234,102 @@ async fn rejected_keepalive_is_not_contact_and_recovery_never_executes_work() {
 }
 
 #[tokio::test]
+async fn tcp_outage_and_route_replacement_recover_the_same_device_session_without_replaying_work() {
+    use tokio::{
+        io::copy_bidirectional,
+        net::{TcpListener, TcpStream},
+        sync::watch,
+    };
+
+    let mut first = fixture().await;
+    let mut replacement = fixture().await;
+    let first_address = first
+        .agent
+        .config
+        .gateway_url
+        .trim_start_matches("http://")
+        .parse::<std::net::SocketAddr>()
+        .unwrap();
+    let replacement_address = replacement
+        .agent
+        .config
+        .gateway_url
+        .trim_start_matches("http://")
+        .parse::<std::net::SocketAddr>()
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (route, mut selected) = watch::channel(Some(first_address));
+    let refused = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let failed = refused.clone();
+    let proxy = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                changed = selected.changed() => {
+                    if changed.is_err() { break; }
+                    connections.abort_all();
+                }
+                incoming = listener.accept() => {
+                    let Ok((mut incoming, _)) = incoming else { break; };
+                    let destination = *selected.borrow();
+                    if let Some(destination) = destination {
+                        connections.spawn(async move {
+                            if let Ok(mut outgoing) = TcpStream::connect(destination).await {
+                                let _ = copy_bidirectional(&mut incoming, &mut outgoing).await;
+                            }
+                        });
+                    } else {
+                        failed.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
+        }
+    });
+    Arc::make_mut(&mut first.agent.config).gateway_url = format!("http://{address}");
+    let agent = first.agent.clone();
+    let hello = first.hello.clone();
+    let client = first.client.clone();
+    let worker = tokio::spawn(async move { agent.keepalive_with_client(client, &hello).await });
+    let original = tokio::time::timeout(Duration::from_secs(3), first.seen.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    route.send(None).unwrap();
+    *first.agent.liveness.acknowledged_at.lock().unwrap() = None;
+    tokio::time::timeout(Duration::from_secs(4), async {
+        while refused.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("no real TCP failure observed");
+    route.send(Some(replacement_address)).unwrap();
+    let recovered = tokio::time::timeout(Duration::from_secs(8), replacement.seen.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(original["session"], recovered["session"]);
+    assert_eq!(original["roots"], recovered["roots"]);
+    assert!(
+        first
+            .agent
+            .config
+            .gateway_url
+            .ends_with(&address.to_string())
+    );
+    let (count,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM kv WHERE kind IN ('terminal','local_operation')")
+            .fetch_one(&first.agent.store.pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+    worker.abort();
+    proxy.abort();
+}
+
+#[tokio::test]
 async fn poll_health_writes_are_bounded_when_sqlite_is_exhausted() {
     let f = fixture().await;
     let mut held = Vec::new();

@@ -75,7 +75,7 @@ pub(crate) fn sync_embedded_skill() -> std::io::Result<()> {
 
 pub(crate) fn sync_embedded_skill_at(home: &std::path::Path) -> std::io::Result<()> {
     for target in [
-        home.join(".codex/skills/octendra-agent"),
+        home.join(".agents/skills/octendra-agent"),
         home.join(".gemini/config/skills/octendra-agent"),
     ] {
         for (relative, content) in EMBEDDED_SKILL {
@@ -128,7 +128,7 @@ pub(crate) fn installed_skill_revision_at(
             .collect();
         Some(hash(serde_json::to_vec(&files?).ok()?))
     };
-    let codex = bundle_hash(home.join(".codex/skills/octendra-agent"));
+    let codex = bundle_hash(home.join(".agents/skills/octendra-agent"));
     let antigravity = bundle_hash(home.join(".gemini/config/skills/octendra-agent"));
     let revision = codex.clone().or_else(|| antigravity.clone());
     let consistent = match (&codex, &antigravity) {
@@ -137,6 +137,35 @@ pub(crate) fn installed_skill_revision_at(
         _ => Some(false),
     };
     (revision, consistent)
+}
+
+#[cfg(test)]
+mod skill_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn restart_sync_uses_the_canonical_codex_directory_without_recreating_duplicates() {
+        let home = tempfile::tempdir().unwrap();
+        sync_embedded_skill_at(home.path()).unwrap();
+        assert!(
+            home.path()
+                .join(".agents/skills/octendra-agent/SKILL.md")
+                .is_file()
+        );
+        assert!(!home.path().join(".codex/skills/octendra-agent").exists());
+        assert_eq!(
+            installed_skill_revision_at(home.path()),
+            (Some(embedded_skill_revision().to_owned()), Some(true))
+        );
+        let reference = home
+            .path()
+            .join(".agents/skills/octendra-agent/references/setup-and-runtime.md");
+        std::fs::write(&reference, "interrupted old instruction copy").unwrap();
+        assert_eq!(installed_skill_revision_at(home.path()).1, Some(false));
+        sync_embedded_skill_at(home.path()).unwrap();
+        assert_eq!(installed_skill_revision_at(home.path()).1, Some(true));
+        assert!(!home.path().join(".codex/skills/octendra-agent").exists());
+    }
 }
 
 pub(crate) fn compatibility(agent_wire: Option<u32>) -> Value {
