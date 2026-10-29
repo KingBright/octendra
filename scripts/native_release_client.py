@@ -26,10 +26,16 @@ REQUEST_ID = re.compile(r"req_[0-9a-f]{32}\Z")
 def installed_binary() -> pathlib.Path:
     """Use only the canonical installed Agent, never an arbitrary PATH program."""
     if os.name == 'nt':
+        current = pathlib.Path.home() / 'Octendra/agent/bin/octendra-code.exe'
+        if current.is_file():
+            return current
         base = os.environ.get('LOCALAPPDATA')
         if not base:
             raise ValueError('native_adapter_localappdata_missing')
         return pathlib.Path(base) / 'OctendraCode' / 'bin' / 'octendra-code.exe'
+    current = pathlib.Path.home() / '.local/share/octendra/agent/bin/octendra-code'
+    if current.is_file():
+        return current
     return pathlib.Path.home() / '.local/share/octendra-code/bin/octendra-code'
 
 

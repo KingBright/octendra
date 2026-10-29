@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from unittest import mock
 
@@ -255,6 +256,35 @@ class NativeStdioTests(unittest.TestCase):
         a.close()
         self.assertIsNone(b.process.poll())
         self.assertEqual(b.rpc('tools/call',{})['structuredContent']['answer'],42)
+
+
+class InstalledBinaryTests(unittest.TestCase):
+    def test_current_agent_precedes_legacy_on_both_platforms(self):
+        with tempfile.TemporaryDirectory() as temp, \
+             mock.patch.object(pathlib.Path, 'home', return_value=pathlib.Path(temp)):
+            root = pathlib.Path(temp)
+            for platform, relative in (
+                ('posix', '.local/share/octendra/agent/bin/octendra-code'),
+                ('nt', 'Octendra/agent/bin/octendra-code.exe'),
+            ):
+                with self.subTest(platform=platform):
+                    current = root / relative
+                    current.parent.mkdir(parents=True)
+                    current.touch()
+                    with mock.patch.object(native, 'os', types.SimpleNamespace(name=platform, environ={})):
+                        self.assertEqual(native.installed_binary(), current)
+
+    def test_legacy_install_remains_selectable_before_migration(self):
+        with tempfile.TemporaryDirectory() as temp, \
+             mock.patch.object(pathlib.Path, 'home', return_value=pathlib.Path(temp)):
+            root = pathlib.Path(temp)
+            for platform, environment, expected in (
+                ('posix', {}, root / '.local/share/octendra-code/bin/octendra-code'),
+                ('nt', {'LOCALAPPDATA': str(root / 'Local')}, root / 'Local/OctendraCode/bin/octendra-code.exe'),
+            ):
+                with self.subTest(platform=platform), \
+                     mock.patch.object(native, 'os', types.SimpleNamespace(name=platform, environ=environment)):
+                    self.assertEqual(native.installed_binary(), expected)
 
 
 if __name__ == '__main__':

@@ -217,8 +217,15 @@ def main():
         )
         assert status == 303 and headers["Location"] == "/status"
         status, headers, body = call("/status")
-        assert status == 200 and b"Authoritative Gateway state" in body
-        assert b"Heartbeat is not counted as business progress" in body
+        assert status == 200
+        if b"id='octendra-status'" in body:
+            # The localized status UI exposes the same authenticated snapshot
+            # and audit view without the original English explanatory copy.
+            assert b"data-revision='" in body and b"id=operation-audit" in body
+            assert b"action=/status/logout" in body
+        else:
+            assert b"Authoritative Gateway state" in body
+            assert b"Heartbeat is not counted as business progress" in body
         assert "no-store" in headers.get("Cache-Control", "")
     if parsed_version >= (0, 10, 4):
         spark_redirect = "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-octendra-acceptance-" + args.run_id
