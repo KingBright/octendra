@@ -296,9 +296,19 @@ async fn tcp_outage_and_route_replacement_recover_the_same_device_session_withou
         .await
         .unwrap()
         .unwrap();
+    // The server sees the request before its response reaches the client. Wait
+    // for that acknowledgement so it cannot overwrite our forced due state.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while first.agent.liveness.due_at(Instant::now()) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("initial TCP round-trip was not acknowledged");
     route.send(None).unwrap();
     *first.agent.liveness.acknowledged_at.lock().unwrap() = None;
-    tokio::time::timeout(Duration::from_secs(4), async {
+    // Allow two watchdog ticks: a stale pooled socket, then a fresh TCP dial.
+    tokio::time::timeout(Duration::from_secs(6), async {
         while refused.load(Ordering::SeqCst) == 0 {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
