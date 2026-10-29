@@ -98,7 +98,7 @@ Use a private LAN, VPN, or SSH tunnel. A routed or public listener must be prote
 
 `Install`, `Update`, and `Skills` synchronize the bundled Skill into:
 
-- `%USERPROFILE%\.codex\skills\octendra-agent`
+- `%USERPROFILE%\.agents\skills\octendra-agent`
 - `%USERPROFILE%\.gemini\config\skills\octendra-agent`
 
 Run `PrintConfig` to display the exact `mcp-stdio` command and paths for the current installation.

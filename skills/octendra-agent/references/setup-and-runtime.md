@@ -2,6 +2,12 @@
 
 Use this when configuring MCP or checking whether the local Octendra service is usable.
 
+The service `skills` command installs the Codex user skill under
+`~/.agents/skills/octendra-agent` and the Antigravity global skill under
+`~/.gemini/config/skills/octendra-agent`. Remove superseded duplicate skill copies
+after verifying the canonical installation. Existing conversations retain the
+instructions and MCP processes they already loaded until their normal reload.
+
 ## macOS Local Service
 
 Expected paths:
@@ -14,6 +20,12 @@ Expected paths:
 - HTTP API: `http://127.0.0.1:8787`
 - Logs: `/Users/YOUR_USER/.local/state/octendra/logs`
 - Output artifacts: `/Users/YOUR_USER/.local/share/octendra/artifacts`
+
+These are fresh-install defaults. During a brand migration, preserve the database,
+vault and artifact paths already configured for that host, including compatibility
+paths carrying the previous product name. Use the installed MCP configuration and
+service `print-config` output as authority; do not create a second empty database
+from the example paths.
 
 Useful commands:
 

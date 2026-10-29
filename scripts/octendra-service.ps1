@@ -227,7 +227,7 @@ function Install-Skills([hashtable]$Config) {
     if (-not (Test-Path -LiteralPath (Join-Path $source 'SKILL.md') -PathType Leaf)) {
         throw "Octendra Agent Skill is missing: $source"
     }
-    $codex = Join-Path $env:USERPROFILE '.codex\skills\octendra-agent'
+    $codex = Join-Path $env:USERPROFILE '.agents\skills\octendra-agent'
     $antigravity = Join-Path $env:USERPROFILE '.gemini\config\skills\octendra-agent'
     Copy-Directory $source $codex
     Copy-Directory $source $antigravity
