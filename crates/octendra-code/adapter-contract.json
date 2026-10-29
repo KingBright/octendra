@@ -3,7 +3,7 @@
   "boundary": "Adapter-sent catalog is not proof of final host exposure. No final host report means unknown.",
   "protocol": 1,
   "server_tools_sha256": "9a9188e1a97da8be7b0bc18b0544bf4a28f750ff0f1b036ab13f4f617889a430",
-  "skill_revision": "bd407a4d18d62b072b8d72d0b72dc2c6e03d972c056b0c57dc5113e93c91b70f",
+  "skill_revision": "1267168eacea3f31ff8247185d5d48c2d9d0ba8d038c759275bf97d544e7b208",
   "tools": [
     {
       "_meta": {
@@ -2349,5 +2349,5 @@
     "host_tools": "x-octendra-host-tools",
     "request_id": "x-octendra-request-id"
   },
-  "version": "0.12.2"
+  "version": "0.12.3"
 }

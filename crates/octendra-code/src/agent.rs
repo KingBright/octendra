@@ -1669,6 +1669,7 @@ mod tests {
         let (directory, agent) = startup_skill_fixture(true).await;
         let home = directory.path().join("artificial-home");
         let paths = [
+            home.join(".agents/skills/octendra-agent/SKILL.md"),
             home.join(".codex/skills/octendra-agent/SKILL.md"),
             home.join(".gemini/config/skills/octendra-agent/SKILL.md"),
         ];
@@ -1703,7 +1704,11 @@ mod tests {
             Some(crate::capabilities::embedded_skill_revision())
         );
         assert_eq!(consistent, Some(true));
-        assert!(home.join(".codex/skills/octendra-agent/SKILL.md").is_file());
+        assert!(
+            home.join(".agents/skills/octendra-agent/SKILL.md")
+                .is_file()
+        );
+        assert!(!home.join(".codex/skills/octendra-agent").exists());
         assert!(
             home.join(".gemini/config/skills/octendra-agent/SKILL.md")
                 .is_file()

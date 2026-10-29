@@ -6,6 +6,7 @@ import android.os.Process
 import android.system.Os
 import android.system.OsConstants
 import android.system.StructTimeval
+import android.system.StructPollfd
 import org.json.JSONObject
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -75,7 +76,21 @@ class ShellBridge(private val context: Context) {
         }
         candidate.close(); AgentRuntime.changed()
     }
-    fun connected(): Boolean = channel?.let { it.authenticated && !it.closed } == true
+    fun connected(): Boolean {
+        val current = channel ?: return false
+        if (!current.authenticated || current.closed) return false
+        // Observe peer death without reading frames or issuing a shell command.
+        val disconnected = try {
+            val descriptor = StructPollfd().apply {
+                fd = current.descriptor.fileDescriptor
+                events = OsConstants.POLLIN.toShort()
+            }
+            Os.poll(arrayOf(descriptor), 0)
+            descriptor.revents.toInt() and (OsConstants.POLLHUP or OsConstants.POLLERR or OsConstants.POLLNVAL) != 0
+        } catch (_: Exception) { true }
+        if (disconnected) { discard(current); return false }
+        return current.authenticated && !current.closed
+    }
     fun execute(request: JSONObject, inputFile: File? = null, outputFile: File? = null): JSONObject = synchronized(commandLock) {
         demand(controls(context).getBoolean("shell_enabled", false), "shell_not_enabled_locally")
         val current = channel?.takeIf { it.authenticated && !it.closed }
