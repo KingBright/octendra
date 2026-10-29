@@ -32,7 +32,20 @@ pub fn validate(name: &str, arguments: &Value) -> Result<()> {
         .iter()
         .find(|t| t.name == name)
         .context("unknown tool")?;
-    validate_node(&tool.input_schema, arguments, "$")?;
+    // Old clients may retain these retired envelope fields. They never grant
+    // authority; accept them without advertising them to new model sessions.
+    let mut compatible = arguments.clone();
+    if let Some(object) = compatible.as_object_mut() {
+        for key in ["authorization_version", "task_id"] {
+            if !tool.input_schema["properties"]
+                .as_object()
+                .is_some_and(|properties| properties.contains_key(key))
+            {
+                object.remove(key);
+            }
+        }
+    }
+    validate_node(&tool.input_schema, &compatible, "$")?;
     if desktop_session_tool(name) {
         let a: crate::agent::DesktopJob = serde_json::from_value(arguments.clone())
             .map_err(|_| anyhow::anyhow!("invalid_arguments: desktop request envelope"))?;
@@ -309,10 +322,6 @@ fn build_catalog() -> Vec<Tool> {
     let mut tools: Vec<Tool> = vec![];
     let mut add = |name: &str, description: &str, mut properties: Value, required: Vec<&str>| {
         properties["response_mode"] = json!({"type":"string","enum":["full","compact"],"default":"compact","description":"MCP envelope view; compact is the default. full restores diagnostic metadata."});
-        if name != "task_context" {
-            properties["authorization_version"] = json!({"type":"integer","minimum":1,"maximum":9223372036854775807u64,"description":"Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization."});
-            properties["task_id"] = json!({"type":"string","description":"Optional correlation label for one authorized cross-device task; it never authorizes or replays work."});
-        }
         let read =
             scope(name) == Some("code:read") && !matches!(name, "workspace_open" | "file_download");
         let value = json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"outputSchema":{"type":"object","additionalProperties":true},"_meta":{"securitySchemes":[{"type":"oauth2","scopes":required_scopes(name)}]},"annotations":{"readOnlyHint":read,"destructiveHint":!read&&name!="workspace_open","idempotentHint":read,"openWorldHint":matches!(name, "terminal_exec" | "terminal_input" | "terminal_cancel")}});
@@ -538,6 +547,28 @@ fn build_catalog() -> Vec<Tool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordinary_tools_omit_retired_grants_but_accept_cached_client_envelopes() {
+        let catalog = catalog();
+        let tool = catalog.iter().find(|t| t.name == "terminal_exec").unwrap();
+        assert!(
+            !tool.input_schema["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("authorization_version")
+        );
+        assert!(
+            !tool.input_schema["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("task_id")
+        );
+        let mut args = json!({"workspace_id":"device:/project","command":"true","task_id":"legacy-label","authorization_version":1});
+        validate("terminal_exec", &args).unwrap();
+        args["misspelled_command"] = json!("true");
+        assert!(validate("terminal_exec", &args).is_err());
+    }
 
     #[test]
     fn terminal_wait_catalog_matches_execution_defaults_and_bounds() {

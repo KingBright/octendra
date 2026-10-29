@@ -13,10 +13,25 @@ SPEC.loader.exec_module(IDENTITY)
 
 
 class MacOsCodeIdentityTests(unittest.TestCase):
+    def test_keychain_failures_and_timeouts_never_echo_secret_arguments(self):
+        secret = 'artificial-secret-for-redaction-test'
+        command = ['/usr/bin/security', 'unlock-keychain', '-p', secret, '/private/keychain']
+        with mock.patch.object(IDENTITY.subprocess, 'run', return_value=subprocess.CompletedProcess(command, 51, secret, secret)):
+            with self.assertRaisesRegex(RuntimeError, 'keychain_unlock_rejected') as failure:
+                IDENTITY._security(*command[1:])
+        self.assertNotIn(secret, str(failure.exception))
+        self.assertNotIn(secret, repr(failure.exception.args))
+        with mock.patch.object(IDENTITY.subprocess, 'run', side_effect=subprocess.TimeoutExpired(command, 30, output=secret, stderr=secret)):
+            with self.assertRaises(subprocess.TimeoutExpired) as timed_out:
+                IDENTITY._security(*command[1:])
+        self.assertNotIn(secret, str(timed_out.exception))
+        self.assertNotIn(secret, repr(timed_out.exception.cmd))
+        self.assertIsNone(timed_out.exception.output)
+
     def test_existing_identity_lookup_requires_exact_public_fingerprint(self):
         fingerprint = 'a'*40
         for listing, expected in [
-            (f'1) {fingerprint.upper()} "historical approved subject"\n', 'ready'),
+            (f'1) {fingerprint.upper()} "historical approved subject"\n', 'certificate_available'),
             (f'1) {fingerprint} "subject" (CSSMERR_TP_NOT_TRUSTED)\n', 'authorization_required'),
             (f'1) {"b"*40} "subject containing {fingerprint}"\n', 'authorization_required')]:
             with mock.patch.object(IDENTITY, '_security', return_value=subprocess.CompletedProcess([], 0, listing)) as security:

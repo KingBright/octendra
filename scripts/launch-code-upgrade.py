@@ -249,7 +249,7 @@ def _start_once_locked(record, require_identity=True):
         signing = (macos_code_identity.existing_status(binding['signing_certificate_sha1'])
                    if binding and 'signing_certificate_sha1' in binding else
                    macos_code_identity.status(pathlib.Path(binding['signing_base']) if binding else base))
-        if signing.get('state') != 'ready':
+        if signing.get('state') not in ('ready', 'certificate_available'):
             return {'state': 'authorization_required', 'result': record['result'],
                     'service_changed': False, 'signing': signing,
                     'next_action': 'resolve the existing signing identity with its owner; do not create or trust a replacement'}

@@ -16,10 +16,10 @@ pub(crate) fn snapshot(
             let registration = registrations.iter().find(|r| r.id == id)?;
             let caps = &d["capabilities"];
             let mut view = json!({
-                "device_id":id,"name":d["name"],"online":d["online"],"version":d["version"],
+                "device_id":id,"name":d["name"],"online":d["online"],"version":caps.get("version").unwrap_or(&d["version"]),
                 "scopes":registration.scopes,"roots":caps["roots"],"platform":caps["platform"],
                 "allow_write":caps["allow_write"],"allow_exec":caps["allow_exec"],
-                "capability_reported":caps.is_object(),
+                "capability_reported":caps.is_object(),"runtime_features":d["runtime_features"],
                 "privileged_executor":caps["maintenance_tasks"]["privileged_executor"]
             });
             view["capabilities"] = capabilities(&view, Some(&p.scopes));
@@ -42,6 +42,13 @@ pub(crate) fn owner_status(view: &mut Value) {
     }
 }
 fn capabilities(device: &Value, account: Option<&Vec<String>>) -> Value {
+    let android = device["platform"] == "android";
+    let feature = |name: &str| {
+        device["runtime_features"]["names"]
+            .as_array()
+            .map(|names| names.iter().any(|value| value == name))
+    };
+    let desktop_scope = |scope| if android { "terminal:exec" } else { scope };
     let has = |scope: &str| {
         device["scopes"]
             .as_array()
@@ -50,31 +57,62 @@ fn capabilities(device: &Value, account: Option<&Vec<String>>) -> Value {
     let values = [
         (
             "code:read",
-            "读取代码",
+            "读取文件",
             device["roots"].as_array().map(|r| !r.is_empty()),
+            "local_roots_unavailable",
         ),
-        ("code:write", "修改代码", device["allow_write"].as_bool()),
+        (
+            "code:write",
+            "写入文件",
+            device["allow_write"].as_bool(),
+            "local_write_disabled",
+        ),
         (
             "terminal:exec",
-            "本机用户执行",
-            device["allow_exec"].as_bool(),
+            "shell 执行",
+            if android {
+                feature("android_shell_bridge_v1")
+            } else {
+                device["allow_exec"].as_bool()
+            },
+            if android {
+                "android_shell_disconnected"
+            } else {
+                "local_exec_disabled"
+            },
+        ),
+        (
+            desktop_scope("desktop:observe"),
+            "屏幕观察",
+            if android {
+                feature("android_accessibility_v1")
+            } else {
+                None
+            },
+            "android_accessibility_unavailable",
+        ),
+        (
+            desktop_scope("desktop:input"),
+            "屏幕操作",
+            if android {
+                feature("android_accessibility_v1")
+            } else {
+                None
+            },
+            "android_accessibility_unavailable",
         ),
     ]
-    .map(|(scope, label, local)| {
+    .map(|(scope, label, local, local_blocked)| {
         let account_allowed = account.map(|a| a.iter().any(|s| s == scope));
         let registered = has(scope);
-        let state = if account_allowed == Some(false) {
+        let state = if device["online"] != true {
+            "device_offline"
+        } else if account_allowed == Some(false) {
             "account_scope_denied"
         } else if !registered {
             "device_scope_denied"
-        } else if device["online"] != true {
-            "device_offline"
         } else if local == Some(false) {
-            match scope {
-                "code:write" => "local_write_disabled",
-                "terminal:exec" => "local_exec_disabled",
-                _ => "local_roots_unavailable",
-            }
+            local_blocked
         } else if local.is_none() {
             "capability_unknown"
         } else if account_allowed.is_none() {
@@ -104,6 +142,12 @@ pub(crate) fn reason(code: &str) -> Option<&'static str> {
         "local_write_disabled" => "设备 Agent 的文件写入开关已关闭；需在该设备审查本机设置。",
         "local_exec_disabled" => "设备 Agent 的执行开关已关闭；需在该设备审查本机设置。",
         "local_roots_unavailable" => "Agent 未提供可用代码根目录；需核对该设备的路径设置。",
+        "android_shell_disconnected" => {
+            "手机 shell 辅助进程未连接；已授权 USB 电脑上的恢复助手可恢复连接。手机内置命令仍可使用。"
+        }
+        "android_accessibility_unavailable" => {
+            "手机尚未启用无障碍服务，屏幕观察和操作暂不可用；文件能力不受影响。"
+        }
         "capability_unknown" => "Agent 未报告此能力，当前状态不可确认。",
         "device_offline" => "设备离线；目录和开关可能是上次报告，不能据此确认当前可执行。",
         "platform_authorization_required" => {
@@ -150,7 +194,7 @@ fn display(v: &Value) -> String {
 }
 pub(crate) fn render(view: &Value) -> String {
     let mut html = String::from(
-        "<section aria-labelledby='device-access'><h2 id='device-access'>连接与访问</h2><p>日常操作复用已连接客户端和设备的现有权限。</p><div class=grid>",
+        "<section aria-labelledby='device-access'><h2 id='device-access'>设备与能力</h2><p>复用现有连接，直接使用设备已提供的能力；普通任务无需额外审批或任务授权。</p><div class=grid>",
     );
     if let Some(devices) = view["devices"].as_array() {
         for d in devices {
@@ -160,36 +204,53 @@ pub(crate) fn render(view: &Value) -> String {
                 None => "连接状态未报告",
             };
             let caps = d["capabilities"].as_array();
-            let full =
-                caps.is_some_and(|v| v.len() == 3 && v.iter().all(|c| c["state"] == "available"));
+            let full = caps.is_some_and(|v| {
+                v.len() >= 3 && v.iter().take(3).all(|c| c["state"] == "available")
+            });
             let configured = caps.is_some_and(|v| {
-                v.len() == 3
+                v.len() >= 3
                     && v.iter()
+                        .take(3)
                         .all(|c| c["state"] == "registered_connection_unknown")
             });
             let profile = if full {
-                "已就绪，无需操作"
+                "文件与执行已就绪，无需操作"
             } else if configured {
-                "设备访问已就绪；当前连接未核验，无需为此重新授权"
+                "设备文件与执行已就绪；当前连接未核验，无需为此重新授权"
             } else {
-                "访问受限或状态未核验"
+                "部分能力不可用或尚未报告"
             };
             html.push_str(&format!("<section class=card data-device='{}'><h3>{}</h3><p class=state>{connected} · {profile}</p>",
                 display(&d["device_id"]),display(&d["name"])));
-            if let Some(caps) = caps
-                && let Some(c) = caps.iter().find(|c| {
-                    c["state"] != "available" && c["state"] != "registered_connection_unknown"
-                })
-                && let Some(reason) = reason(c["state"].as_str().unwrap_or(""))
-            {
-                html.push_str(&format!("<p>{reason}</p>"));
+            if let Some(caps) = caps {
+                for c in caps {
+                    let code = c["state"].as_str().unwrap_or("");
+                    let label = match code {
+                        "available" => "可用",
+                        "registered_connection_unknown" => "设备已提供，当前连接未核验",
+                        "device_offline" => "设备离线",
+                        "capability_unknown" => "尚未报告",
+                        _ => "暂不可用",
+                    };
+                    html.push_str(&format!(
+                        "<p><strong>{}</strong> · {label}",
+                        display(&c["label"])
+                    ));
+                    if code != "available"
+                        && code != "registered_connection_unknown"
+                        && let Some(reason) = reason(code)
+                    {
+                        html.push_str(&format!("<br><span class=muted>{reason}</span>"));
+                    }
+                    html.push_str("</p>");
+                }
             }
             html.push_str(
-                "<p class=muted>以本机用户权限执行，不授予 OS 管理员权限。</p></section>",
+                "<p class=muted>以本机用户权限执行，不授予 OS 管理员权限。当前连接未核验时，无需为此重新授权。</p></section>",
             );
         }
     }
-    html.push_str("</div><details id='access-disconnect'><summary>撤销或断开</summary><p>请在发起 MCP 连接的客户端中断开或撤销 Octendra。退出此管理页只结束网页会话，不撤销 MCP 连接；本页不会代你撤销权限。</p></details><details id='advanced-permissions'><summary>高级设置</summary>");
+    html.push_str("</div><details id='access-disconnect'><summary>断开连接</summary><p>请在发起 MCP 连接的客户端中断开 Octendra。退出此管理页只结束网页会话，不撤销 MCP 连接。</p></details><details id='advanced-permissions'><summary>连接诊断</summary>");
     if view["account_scope_source"] == "authenticated_mcp" {
         html.push_str(&format!(
             "<p>当前 MCP 连接 scopes：{}</p>",
@@ -232,6 +293,33 @@ pub(crate) fn render(view: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn android_capabilities_distinguish_files_shell_and_screen_without_new_grants() {
+        let (mut fleet, registrations, principal) = fixture();
+        fleet["devices"][0]["capabilities"]["platform"] = json!("android");
+        fleet["devices"][0]["capabilities"]["version"] = json!("0.12.4");
+        fleet["devices"][0]["runtime_features"] =
+            json!({"names":["android_commands_v1","android_shell_bridge_v1"]});
+        let view = snapshot(&fleet, &registrations, &principal);
+        let device = &view["devices"][0];
+        assert_eq!(device["version"], "0.12.4");
+        assert_eq!(device["capabilities"][0]["state"], "available");
+        assert_eq!(device["capabilities"][2]["state"], "available");
+        assert_eq!(
+            device["capabilities"][3]["state"],
+            "android_accessibility_unavailable"
+        );
+        fleet["devices"][0]["runtime_features"]["names"] = json!(["android_commands_v1"]);
+        assert_eq!(
+            snapshot(&fleet, &registrations, &principal)["devices"][0]["capabilities"][2]["state"],
+            "android_shell_disconnected"
+        );
+        fleet["devices"][0]["online"] = json!(false);
+        assert_eq!(
+            snapshot(&fleet, &registrations, &principal)["devices"][0]["capabilities"][0]["state"],
+            "device_offline"
+        );
+    }
     fn fixture() -> (Value, Vec<DeviceRegistration>, Principal) {
         (
             json!({"devices":[{"device_id":"d","name":"<script>device</script>","online":true,"version":"test","capabilities":{"roots":["/project"],"platform":"linux","allow_write":true,"allow_exec":true,"maintenance_tasks":{"privileged_executor":false},"session":"SECRET_SESSION"}}]}),
@@ -411,13 +499,15 @@ mod tests {
             .split("<details id='advanced-permissions'>")
             .next()
             .unwrap();
-        assert!(default.contains("已连接 · 已就绪，无需操作"));
-        assert!(default.contains("撤销或断开"));
+        assert!(default.contains("已连接 · 文件与执行已就绪，无需操作"));
+        assert!(default.contains("屏幕观察"));
+        assert!(default.contains("尚未报告"));
+        assert!(default.contains("断开连接"));
         assert!(!default.contains("code:read"));
         assert!(!default.contains("/project"));
         assert!(!default.contains("限时"));
         assert!(!default.contains("Task ID"));
-        assert!(html.contains("<details id='advanced-permissions'><summary>高级设置</summary>"));
+        assert!(html.contains("<details id='advanced-permissions'><summary>连接诊断</summary>"));
         assert!(!html.contains("<details id='advanced-permissions' open"));
         assert!(html.contains("不撤销 MCP 连接"));
     }

@@ -53,13 +53,21 @@ def _openssl():
 
 def _security(*args, check=True, capture=False, timeout=30):
     options = {"capture_output": True} if capture else {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
-    return subprocess.run(
-        ["/usr/bin/security", *map(str, args)],
-        check=check,
-        text=True,
-        timeout=timeout,
-        **options,
-    )
+    operation = str(args[0]) if args else 'unknown'
+    try:
+        result = subprocess.run(
+            ["/usr/bin/security", *map(str, args)], check=False,
+            text=True, timeout=timeout, **options,
+        )
+    except subprocess.TimeoutExpired:
+        raise subprocess.TimeoutExpired(['/usr/bin/security', operation], timeout) from None
+    # security arguments can contain passwords. Never retain them in a public
+    # exception or the CompletedProcess command representation.
+    result.args = ['/usr/bin/security', operation]
+    if check and result.returncode:
+        code = 'keychain_unlock_rejected' if operation == 'unlock-keychain' else 'keychain_operation_failed'
+        raise RuntimeError(f'{code}: {operation}; exit={result.returncode}; inspect the original local keychain')
+    return result
 
 
 def _certificate_sha1(keychain, expected=None):
@@ -357,7 +365,8 @@ def existing_status(certificate_sha1):
         match = re.match(r'^\s*\d+\)\s+([0-9a-fA-F]{40})\s', line)
         if match and match[1].lower() == fingerprint and 'CSSMERR_' not in line:
             valid = True
-    return {'state': 'ready' if valid else 'authorization_required',
+    return {'state': 'certificate_available' if valid else 'authorization_required',
+            'private_key_access': 'not_checked',
             'certificate_name': 'Existing approved signing identity',
             'certificate_sha1': fingerprint, 'code_identifier': CODE_IDENTIFIER,
             'designated_requirement': f'identifier "{CODE_IDENTIFIER}" and certificate leaf = H"{fingerprint}"'}
@@ -366,7 +375,7 @@ def existing_status(certificate_sha1):
 def sign_existing_copy(source, destination, certificate_sha1):
     """Use an existing OS signing identity; never create/unlock/trust a keychain."""
     value = existing_status(certificate_sha1)
-    if value['state'] != 'ready':
+    if value['state'] != 'certificate_available':
         raise RuntimeError('existing signing identity unavailable; no replacement identity')
     destination = pathlib.Path(destination)
     shutil.copyfile(source, destination)
@@ -381,7 +390,7 @@ def sign_existing_copy(source, destination, certificate_sha1):
     subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '-R',
         '='+value['designated_requirement'], str(destination)], check=True,
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=30)
-    return {**value, 'installed_sha256': sha(destination)}
+    return {**value, 'state': 'ready', 'private_key_access': 'verified', 'installed_sha256': sha(destination)}
 
 
 def save_installed_metadata(base, value):

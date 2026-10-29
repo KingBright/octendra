@@ -42,7 +42,7 @@ Octendra是一套面向 AI Agent 与人类运维者的远程操作与代码协�
 - 工具 schema 指纹与 Agent feature 上报，可以区分“服务器已支持”与“当前 ChatGPT 会话实际暴露了什么”。
 - 可选 compact 文本响应，同时保留完整 structured content。
 
-当前服务端目录包含 **27 个 code gateway 工具**。ChatGPT 某个已存在会话仍可能因为宿主缓存旧 schema 而只看到其中一部分，这种差异会被单独报告，不会被解释成服务器没有升级。
+可用工具和数量以网关 `tools/list` 与 `devices_list.gateway.tool_count` 为准。ChatGPT 某个已存在会话仍可能因为宿主缓存旧 schema 而只看到其中一部分，这种差异会被单独报告，不会被解释成服务器没有升级。普通操作直接复用现有连接，无需填写任务授权版本或额外申请任务权限；写操作的确认由宿主 Agent 管理。
 
 ## 架构
 
@@ -118,7 +118,7 @@ Octendra 明确区分：**请求已接收、执行已完成、版本已安装、
 
 ## 当前版本
 
-Gateway/Agent 与 Android 当前源码版本为 **0.12.0**。代码、生成产物和现场部署分别验收；源码版本不证明设备已经升级。具体交付状态见[本次命名收口记录](docs/octendra-branding-20261020.md)，历史发布证据保留在 `docs/releases/`。
+Gateway/Agent 的源码版本以 [Cargo.toml](crates/octendra-code/Cargo.toml) 为准，Android 以 [version.properties](android/version.properties) 为准。代码、生成产物和现场部署分别验收；源码版本不证明设备已经升级。命名迁移历史见[命名收口记录](docs/octendra-branding-20261020.md)，历史发布证据保留在 `docs/releases/`。
 
 ## 开发与发布
 

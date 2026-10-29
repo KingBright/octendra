@@ -1,8 +1,8 @@
 {
-  "adapter_tools_sha256": "9a9188e1a97da8be7b0bc18b0544bf4a28f750ff0f1b036ab13f4f617889a430",
+  "adapter_tools_sha256": "7dc07c1bda71a43026b5dd9153d781f87223c51525d46e98a0a43b5c57c0d1b9",
   "boundary": "Adapter-sent catalog is not proof of final host exposure. No final host report means unknown.",
   "protocol": 1,
-  "server_tools_sha256": "9a9188e1a97da8be7b0bc18b0544bf4a28f750ff0f1b036ab13f4f617889a430",
+  "server_tools_sha256": "7dc07c1bda71a43026b5dd9153d781f87223c51525d46e98a0a43b5c57c0d1b9",
   "skill_revision": "1267168eacea3f31ff8247185d5d48c2d9d0ba8d038c759275bf97d544e7b208",
   "tools": [
     {
@@ -27,12 +27,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "capability_version": {
             "maximum": 9223372036854775807,
             "minimum": 1,
@@ -167,7 +161,6 @@
             "type": "string"
           },
           "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
             "type": "string"
           }
         },
@@ -206,12 +199,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "capability_version": {
             "maximum": 9223372036854775807,
             "minimum": 1,
@@ -236,7 +223,6 @@
             "type": "string"
           },
           "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
             "type": "string"
           }
         },
@@ -332,7 +318,6 @@
         "additionalProperties": false,
         "properties": {
           "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
             "maximum": 9223372036854775807,
             "minimum": 1,
             "type": "integer"
@@ -353,7 +338,6 @@
             "type": "string"
           },
           "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
             "type": "string"
           }
         },
@@ -390,12 +374,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "known_tools_sha256": {
             "type": "string"
           },
@@ -406,10 +384,6 @@
               "full",
               "compact"
             ],
-            "type": "string"
-          },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
             "type": "string"
           }
         },
@@ -443,12 +417,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "desired_version": {
             "type": "string"
           },
@@ -459,10 +427,6 @@
               "full",
               "compact"
             ],
-            "type": "string"
-          },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
             "type": "string"
           }
         },
@@ -496,12 +460,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "device_id": {
             "type": "string"
           },
@@ -518,10 +476,6 @@
             "type": "string"
           },
           "root": {
-            "type": "string"
-          },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
             "type": "string"
           }
         },
@@ -558,12 +512,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "cursor": {
             "type": "string"
           },
@@ -585,10 +533,6 @@
               "full",
               "compact"
             ],
-            "type": "string"
-          },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
             "type": "string"
           },
           "workspace_id": {
@@ -627,12 +571,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "context_lines": {
             "maximum": 5,
             "minimum": 0,
@@ -670,10 +608,6 @@
               "full",
               "compact"
             ],
-            "type": "string"
-          },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
             "type": "string"
           },
           "workspace_id": {
@@ -715,12 +649,6 @@
         "properties": {
           "allow_partial": {
             "type": "boolean"
-          },
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
           },
           "max_bytes": {
             "maximum": 1048576,
@@ -771,10 +699,6 @@
             ],
             "type": "string"
           },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
-            "type": "string"
-          },
           "workspace_id": {
             "type": "string"
           }
@@ -812,12 +736,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "limit": {
             "maximum": 300,
             "minimum": 1,
@@ -839,10 +757,6 @@
             "maximum": 10000000,
             "minimum": 1,
             "type": "integer"
-          },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
-            "type": "string"
           },
           "workspace_id": {
             "type": "string"
@@ -881,12 +795,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "files": {
             "items": {
               "additionalProperties": false,
@@ -954,10 +862,6 @@
             ],
             "type": "string"
           },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
-            "type": "string"
-          },
           "workspace_id": {
             "type": "string"
           }
@@ -995,12 +899,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "idempotency_key": {
             "type": "string"
           },
@@ -1025,10 +923,6 @@
               "full",
               "compact"
             ],
-            "type": "string"
-          },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
             "type": "string"
           },
           "workspace_id": {
@@ -1067,12 +961,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "change_set_id": {
             "type": "string"
           },
@@ -1086,10 +974,6 @@
               "full",
               "compact"
             ],
-            "type": "string"
-          },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
             "type": "string"
           },
           "workspace_id": {
@@ -1136,12 +1020,6 @@
             ],
             "type": "string"
           },
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "idempotency_key": {
             "type": "string"
           },
@@ -1165,10 +1043,6 @@
               "full",
               "compact"
             ],
-            "type": "string"
-          },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
             "type": "string"
           },
           "workspace_id": {
@@ -1208,12 +1082,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "cursor": {
             "maximum": 100000000,
             "minimum": 0,
@@ -1248,10 +1116,6 @@
           },
           "staged": {
             "type": "boolean"
-          },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
-            "type": "string"
           },
           "workspace_id": {
             "type": "string"
@@ -1296,12 +1160,6 @@
               "maintenance_task"
             ],
             "type": "string"
-          },
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
           },
           "cols": {
             "maximum": 500,
@@ -1359,10 +1217,6 @@
             "description": "Use device-local OS sudo credentials; noninteractive shell only. Never send a password.",
             "type": "boolean"
           },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
-            "type": "string"
-          },
           "timeout_seconds": {
             "maximum": 86400,
             "minimum": 1,
@@ -1410,12 +1264,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "cursor": {
             "maximum": 100000000,
             "minimum": 0,
@@ -1440,10 +1288,6 @@
               "full",
               "compact"
             ],
-            "type": "string"
-          },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
             "type": "string"
           },
           "terminal_id": {
@@ -1486,12 +1330,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "idempotency_key": {
             "type": "string"
           },
@@ -1502,10 +1340,6 @@
               "full",
               "compact"
             ],
-            "type": "string"
-          },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
             "type": "string"
           },
           "terminal_id": {
@@ -1552,12 +1386,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "idempotency_key": {
             "type": "string"
           },
@@ -1568,10 +1396,6 @@
               "full",
               "compact"
             ],
-            "type": "string"
-          },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
             "type": "string"
           },
           "terminal_id": {
@@ -1614,12 +1438,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "cursor": {
             "type": "string"
           },
@@ -1649,10 +1467,6 @@
               "full",
               "compact"
             ],
-            "type": "string"
-          },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
             "type": "string"
           },
           "terminal_cursor": {
@@ -1700,12 +1514,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "expected_version": {
             "type": "string"
           },
@@ -1754,10 +1562,6 @@
           "sha256": {
             "type": "string"
           },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
-            "type": "string"
-          },
           "workspace_id": {
             "type": "string"
           }
@@ -1796,12 +1600,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "expected_version": {
             "type": "string"
           },
@@ -1823,10 +1621,6 @@
               "full",
               "compact"
             ],
-            "type": "string"
-          },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
             "type": "string"
           },
           "workspace_id": {
@@ -1881,12 +1675,6 @@
           "after_event": {
             "type": "string"
           },
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "cursor": {
             "type": "string"
           },
@@ -1912,10 +1700,6 @@
               "full",
               "compact"
             ],
-            "type": "string"
-          },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
             "type": "string"
           },
           "terminal_cursor": {
@@ -1960,12 +1744,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "idempotency_key": {
             "type": "string"
           },
@@ -1979,10 +1757,6 @@
               "full",
               "compact"
             ],
-            "type": "string"
-          },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
             "type": "string"
           }
         },
@@ -2021,12 +1795,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "file": {
             "additionalProperties": false,
             "properties": {
@@ -2063,10 +1831,6 @@
               "compact"
             ],
             "type": "string"
-          },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
-            "type": "string"
           }
         },
         "required": [
@@ -2101,12 +1865,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "bundle_path": {
             "type": "string"
           },
@@ -2168,10 +1926,6 @@
             ],
             "type": "string"
           },
-          "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
-            "type": "string"
-          },
           "workspace_id": {
             "type": "string"
           }
@@ -2210,12 +1964,6 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "authorization_version": {
-            "description": "Deprecated compatibility field; new operations use the connection's current permissions. Does not grant or renew authorization.",
-            "maximum": 9223372036854775807,
-            "minimum": 1,
-            "type": "integer"
-          },
           "capability_version": {
             "maximum": 9223372036854775807,
             "minimum": 1,
@@ -2321,7 +2069,6 @@
             "type": "string"
           },
           "task_id": {
-            "description": "Optional correlation label for one authorized cross-device task; it never authorizes or replays work.",
             "type": "string"
           }
         },
@@ -2349,5 +2096,5 @@
     "host_tools": "x-octendra-host-tools",
     "request_id": "x-octendra-request-id"
   },
-  "version": "0.12.3"
+  "version": "0.12.4"
 }

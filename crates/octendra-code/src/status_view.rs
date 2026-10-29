@@ -17,6 +17,52 @@ fn text(value: &Value) -> String {
         escape(&value.to_string())
     }
 }
+fn operation_status(item: &Value) -> (&'static str, &'static str) {
+    match item["state"].as_str().unwrap_or("") {
+        "completed" | "succeeded" => (
+            "操作已返回",
+            "结果以原操作回执为准；业务是否完成需结合实际结果判断。",
+        ),
+        "failed" | "operation_failed" | "process_failed" => (
+            "操作失败",
+            "查看原回执中的具体原因，修正后继续；保留原操作编号。",
+        ),
+        "cancelled" | "process_cancelled" => ("操作已取消", "清理是否完成以原操作回执为准。"),
+        "process_timed_out" => ("执行超时", "查看原操作的退出状态和输出，再决定如何修正。"),
+        "output_incomplete" => (
+            "输出待补全",
+            "通过 terminal_read 读取原终端保留的输出，无需重跑命令。",
+        ),
+        _ if item["stale"] == true => (
+            "状态暂未更新",
+            "连接恢复后查询原操作；执行结果尚未确认时不要重复提交命令。",
+        ),
+        "queued" => ("排队中", "操作已接收，等待设备处理；无需重复提交。"),
+        "dispatched" | "awaiting_device_result" => {
+            ("已发送到设备", "等待原操作回执；无需重复提交。")
+        }
+        "waiting_device" => (
+            "等待设备恢复连接",
+            "设备恢复连接后继续处理原操作，无需重复提交。",
+        ),
+        "paused" => (
+            "传输已暂停",
+            "连接恢复后通过 transfer_resume 继续同一操作。",
+        ),
+        "awaiting_source" => (
+            "等待文件来源恢复",
+            "通过 transfer_resume 为原操作补充有效文件来源。",
+        ),
+        "running" | "process_running" => (
+            "执行中",
+            "继续观察原操作。文件字节传输结束后仍需等待校验和最终结果。",
+        ),
+        _ => (
+            "执行结果待确认",
+            "查询原操作及进程回执，确认结果后再决定下一步；不要重复执行命令。",
+        ),
+    }
+}
 /// Freshness clocks are not task changes. State/stale/error/permission fields
 /// stay in the validator, so a 304 never masks an actual outcome change.
 pub(crate) fn revision(snapshot: &Value) -> String {
@@ -73,14 +119,15 @@ pub(crate) fn render(snapshot: &Value) -> String {
     html.push_str("<h2>任务与真实操作</h2><p class=muted>请求及操作回执自动关联；已有任务限制保持原绑定，状态页不会启动或续接操作。</p><div class=grid>");
     if let Some(items) = snapshot["operations"].as_array() {
         for item in items {
+            let (state, next) = operation_status(item);
             html.push_str(&format!(
-                "<section class=card data-operation='{}' data-view='{}'><h3>{} · {}</h3><p class=state>{}</p><dl>",
+                "<section class=card data-operation='{}' data-view='{}'><h3>{} · {}</h3><p class=state>{state}</p><p>{next}</p><dl>",
                 text(&item["operation_id"]), revision(item),
                 text(&item["device_name"]),
-                text(&item["tool"]),
-                text(&item["state"])
+                text(&item["tool"])
             ));
             for (label, value) in [
+                ("原始状态", &item["state"]),
                 ("操作", &item["operation_id"]),
                 ("工作区", &item["workspace_id"]),
                 ("目录", &item["working_directory"]),
@@ -127,6 +174,27 @@ pub(crate) fn render(snapshot: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn recovery_guidance_preserves_unknown_outcomes_and_confirmed_results() {
+        assert_eq!(
+            operation_status(&json!({"state":"running","stale":true})).0,
+            "状态暂未更新"
+        );
+        assert_eq!(
+            operation_status(&json!({"state":"completed","stale":true})).0,
+            "操作已返回"
+        );
+        assert!(
+            operation_status(&json!({"state":"paused"}))
+                .1
+                .contains("同一操作")
+        );
+        assert!(
+            operation_status(&json!({"state":"stale_or_unknown"}))
+                .1
+                .contains("不要重复执行命令")
+        );
+    }
     #[test]
     fn conditional_revision_preserves_stale_errors_and_real_progress() {
         let first = json!({"observed_at":10,"operations":[{"state":"running","stale":false,"heartbeat_at":10,"last_confirmed_event":{"stage":"started","at":10},"last_progress_at":8}]});

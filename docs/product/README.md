@@ -32,17 +32,21 @@ python3 scripts/product-backlog.py --render --check
 
 ## 稳定构建与发布入口
 
-默认从 `scripts/iteration-code.py` 进入。它根据变更路径自动选择 `docs / release_python / runtime` 三档门禁，记录统一 iteration report；只有 runtime 变化才创建固定源码快照并调用 `release-code.py` 的完整 Rust/Python/workspace + 双平台 release 流水线。验证通过后默认直接 commit + push `main`，再按显式配置调用 `publish-code.py`。
+在唯一主工作区的 `main` 直接修改，完成本次改动所需验证后提交并推送。普通任务复用连接和设备的现有授权；宿主 Agent 负责操作确认，Octendra 不增加任务审批、限时任务授权或手工任务 ID 步骤。
+
+正式构建复用 Mac Studio 的主工作区和 `~/rust-target`，通过现有入口产出固定 current 包：
 
 ```sh
-python3 scripts/iteration-code.py --report target/iteration-runs/<id>/iteration.json --commit-message 'feat(code): ...'
+python3 scripts/release-code.py --report target/iteration-runs/current-release.json --start --platforms macos linux windows linux-arm64
 ```
 
-获取进度使用同一个 report 的 `--status`，需要时附 `--publish-status-dir`；不要重新启动原 build/publish。底层 `source_snapshot.py`、`release-code.py` 和 `publish-code.py` 仍保留为可独立诊断的分层组件。同一报告不覆盖，同槽忙时返回原持有者，缓存复用不等于跳过测试。
+进度通过同一报告的 `--status` 查询；已有报告对应的操作继续观察，不重复启动。`source_snapshot.py` 仅用于读取输入身份和历史证据，常规构建不复制源码。需要绑定已推送的准确提交时，使用 `release-code.py --source-commit <完整 SHA>` 的固定输入入口。
+
+构建完成后，使用 `scripts/fleet-upgrade.py` 和显式部署配置，将验证过的本地包直接传到目标：先 Gateway，再 Agents。macOS 使用 `scripts/launch-code-upgrade.py --start`。复用现有安装器和设备系统签名，记录交付 hash、运行版本与实际操作结果；发现问题直接在 main 修正并继续交付。
 
 完整复盘和新纪律见 [`ITERATION-EFFICIENCY.md`](ITERATION-EFFICIENCY.md)。Agent/MCP 上下文与终端输出的固定优化契约见 [`TOKEN-EFFICIENCY.md`](TOKEN-EFFICIENCY.md)。
 
-源码必须有可追溯 Git 基线；固定源码归档不是长期替代 Git 的理由。发布配置、密码、运行数据库、缓存和大型临时二进制不应进入提交。功能范围先锁定、最终候选再改版本号，避免每个小补丁都触发无意义的全量重链接。下一轮功能优先级见 `NEXT.md`；实际状态以 `backlog.json` 为准。
+源码必须有可追溯 Git 基线；构建与部署直接关联已推送的提交。发布配置、密码、运行数据库、缓存和大型临时二进制不应进入提交。功能范围先锁定、最终候选再改版本号，避免每个小补丁都触发无意义的全量重链接。下一轮功能优先级见 `NEXT.md`；实际状态以 `backlog.json` 为准。
 
 ## 发布证据
 

@@ -249,7 +249,7 @@ async fn ordinary_mcp_status_is_read_only_and_browser_identity_is_not_execution_
     .unwrap();
     assert!(html.contains("连接与访问"));
     assert!(html.contains("无需额外限时授权或手填任务 ID"));
-    assert!(html.contains("高级设置"));
+    assert!(html.contains("连接诊断"));
     assert!(html.contains("不代表某个 MCP 连接"));
     assert!(!html.contains("name=task_id"));
     assert!(!html.contains(&f.cookie));

@@ -142,7 +142,7 @@ def perform_upgrade(args, base):
                 raise RuntimeError('instance device identity changed; no enrollment or fallback')
         signing = (macos_code_identity.existing_status(existing_certificate) if existing_certificate
                    else macos_code_identity.status(signing_base))
-        if signing.get('state') != 'ready':
+        if signing.get('state') not in ('ready', 'certificate_available'):
             raise RuntimeError('local signing identity is not ready')
         signing_receipt = {key: signing[key] for key in
                            ('state', 'certificate_name', 'certificate_sha1', 'code_identifier', 'designated_requirement')}
@@ -169,7 +169,7 @@ def perform_upgrade(args, base):
             signed_candidate = pathlib.Path(file.name)
         signed = (macos_code_identity.sign_existing_copy(args.candidate, signed_candidate, existing_certificate)
                   if existing_certificate else macos_code_identity.sign_copy(args.candidate, signed_candidate, signing_base))
-        record['signing'].update(installed_sha256=signed['installed_sha256'])
+        record['signing'].update(state='ready', private_key_access='verified', installed_sha256=signed['installed_sha256'])
         version = subprocess.check_output([str(signed_candidate), '--version'], text=True, timeout=10).strip()
         if version != 'octendra-code ' + args.version:
             raise RuntimeError('signed candidate version mismatch')
