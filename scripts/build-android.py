@@ -23,7 +23,7 @@ def main():
         parser.error('Build first, run real Android acceptance, then use scripts/publish-android.py --acceptance RECEIPT. Build success alone cannot publish.')
     sdk=pathlib.Path(os.environ.get('ANDROID_HOME',str(pathlib.Path.home()/'Library/Android/sdk')))
     env=os.environ.copy(); env['ANDROID_HOME']=str(sdk); env['ANDROID_SDK_ROOT']=str(sdk)
-    build_revision=release_current.snapshot_evidence(None, ROOT)['snapshot_id']
+    build_revision=release_current.runtime_revision(release_current.snapshot_evidence(None, ROOT))
     env['OCTENDRA_BUILD_REVISION']=build_revision
     env.setdefault('JAVA_HOME','/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home')
     env['PATH']=str(pathlib.Path(env['JAVA_HOME'])/'bin')+os.pathsep+env.get('PATH','')

@@ -139,7 +139,7 @@ async fn login(router: &Router, password: &str) -> Value {
         .split(';')
         .next()
         .unwrap();
-    let nonce = cookie.strip_prefix("octendra_oauth=").unwrap();
+    let nonce = cookie.split_once('=').unwrap().1;
     let (status, _, _) = request(
         router,
         "POST",

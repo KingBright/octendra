@@ -336,12 +336,36 @@ def preflight_agents(devices, manifest):
 
 def launch_command(device,destination,manifest,version):
     filename, sha = candidate_artifact(device, manifest)
-    if platform(device)=='macos':
-        return shlex.join(['python3',destination+'/launch-code-upgrade.py','--candidate',destination+'/'+filename,'--sha256',sha,'--version',version,'--start'])
-    if platform(device)=='linux':
+    target_platform=platform(device)
+    if target_platform=='macos':
+        args=['python3',destination+'/launch-code-upgrade.py','--candidate',destination+'/'+filename,'--sha256',sha,'--version',version,'--start']
+    elif target_platform=='linux':
         unit='octendra-code-upgrade-'+version.replace('.','-')
         args=['systemd-run','--user','--unit',unit,'--collect','--working-directory',destination,'python3',destination+'/upgrade-code-agent-linux.py','--candidate',destination+'/'+filename,'--sha256',sha,'--version',version,'--result',destination+'/upgrade-result.json']
-        return shlex.join(args)
+    if target_platform in ('macos','linux'):
+        # Bind the selected installed instance; do not accidentally operate on
+        # a leftover legacy configuration after a brand migration.
+        code=("from pathlib import Path\nimport json,hashlib,os,subprocess\n"
+              f"h=Path({home(device)!r});base=(h/'.local/share/octendra/agent').resolve();args={args!r}\n"
+              "config=base/'config/agent.json'\n"
+              "if config.is_file():\n"
+              f" assert json.loads(config.read_text())['device_id']=={device['device_id']!r}, 'installed device identity differs'\n"
+              " binary=(base/'bin/octendra-code').resolve(strict=True)\n")
+        if target_platform=='macos':
+            code+=(" definition=(h/'Library/LaunchAgents/fun.hackerlife.octendra.agent.plist').resolve(strict=True)\n"
+                   " metadata=json.loads((base/'signing/installed.json').read_text())\n"
+                   f" binding_path=Path({destination!r})/'instance-binding.json'\n"
+                   " if not binding_path.exists():\n"
+                   "  binding={'schema':1,'base':str(base),'binary':str(binary),'config':str(config),"
+                   "'service_definition':str(definition),'service_label':'fun.hackerlife.octendra.agent',"
+                   f"'device_id':{device['device_id']!r},'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),"
+                   "'definition_sha256':hashlib.sha256(definition.read_bytes()).hexdigest(),'signing_certificate_sha1':metadata['certificate_sha1']}\n"
+                   "  with os.fdopen(os.open(binding_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w') as stream:json.dump(binding,stream)\n"
+                   " args+=['--instance-binding',str(binding_path)]\n")
+        else:
+            code+=" args+=['--binary-path',str(binary),'--config-path',str(config),'--service-name','octendra-agent.service']\n"
+        code+="subprocess.run(args,check=True)\n"
+        return 'python3 -c '+shlex.quote(code)
     return ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File '+ps_quote(destination+'\\launch-code-upgrade-windows.ps1')+
             ' -Updater '+ps_quote(destination+'\\upgrade-code-agent-windows.ps1')+' -Candidate '+ps_quote(destination+'\\octendra-code-windows-amd64.exe')+
             ' -Sha256 '+sha+' -Version '+version+' -Result '+ps_quote(destination+'\\upgrade-result.json'))
@@ -493,7 +517,7 @@ def main():
             remote_bundle='.octendra-release-staging-'+args.version+'/'+bundle.name
             imported=client.tool('file_upload',{'workspace_id':ws,'path':remote_bundle,'expected_version':'absent','sha256':bundle_sha,'max_bytes':268435456,'idempotency_key':'fleet-'+args.version+'-bundle-import-'+ident,'file':{'file_id':exported['artifact_id'],'download_url':exported['download_url'],'file_name':bundle.name}},allow_incomplete=True)
             imported=verified_import(client,imported,exported,bundle,bundle_sha,args.version,ident)
-            h=home(device);destination=(h+'/.local/share/octendra-code/releases/'+args.version) if platform(device)!='windows' else (h+'\\.local\\share\\octendra-code\\releases\\'+args.version)
+            h=home(device);destination=(h+'/.local/share/octendra/agent/releases/'+args.version+'/package') if platform(device)!='windows' else (h+'\\.local\\share\\octendra\\agent\\releases\\'+args.version+'\\package')
             client.terminal(ws,extract_command(device,remote_bundle,destination,bundle_sha),'fleet-'+args.version+'-extract-'+ident,120)
             output=client.terminal(ws,launch_command(device,destination,manifest,args.version),'fleet-'+args.version+'-launch-'+ident,60)
             state['agents'][ident].update(state='upgrading',launch_output=output[-2048:]);save()

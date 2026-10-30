@@ -20,6 +20,22 @@ PLATFORMS = release_targets.PLATFORMS
 DEFAULT_PLATFORMS = release_targets.DEFAULT_PLATFORMS
 
 
+def runtime_revision(manifest):
+    """Runtime identity excludes verification/controller-only edits.
+
+    The complete snapshot remains the authority for tests and packaging. This
+    narrower identity only answers whether an installed runtime needs updating.
+    """
+    roots = {'crates', 'desktop-worker', 'skills', '.cargo', 'migrations', 'assets', '.sqlx', 'android'}
+    top = {'Cargo.toml', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml', 'build.rs'}
+    inputs = {}
+    for name, digest in manifest['source_inputs'].items():
+        parts = Path(name).parts
+        if (name in top or parts[0] in roots) and not any(part in {'tests', 'test', 'androidTest', 'benches'} for part in parts):
+            inputs[name] = digest
+    return source_snapshot.identity(inputs, [name for name in manifest['executable_files'] if name in inputs])
+
+
 @contextlib.contextmanager
 def admission():
     """Keep caller exceptions intact while checking the approved gate on exit."""
