@@ -33,14 +33,19 @@ def provision(adb, payload, timeout=30):
     # An interrupted caller observes the same in-flight request instead of resending.
     pending = before['state'] in {'receiving', 'applying'}
     complete = before.get('request_sha256') == request and before['state'] == 'configured'
-    if not pending and not complete:
-        result = subprocess.run(adb + ['exec-in', 'content', 'write', '--uri', uri],
+    submitted = not pending and not complete
+    if submitted:
+        # Shell-v2 forwards stdin correctly on physical phones; exec-in can
+        # close the provider pipe before Android's content command reads it.
+        result = subprocess.run(adb + ['shell', '-T', 'content', 'write', '--uri', uri],
                                 input=payload, capture_output=True, timeout=15)
         if result.returncode:
             raise RuntimeError('provision_write_failed; inspect provision status before retrying')
     deadline = time.monotonic() + timeout
     while True:
         current = observe()
+        if submitted and current['state'] == 'failed' and not current.get('request_sha256'):
+            raise RuntimeError(current.get('error_code') or 'configuration_failed_before_hash')
         if current.get('request_sha256') == request:
             if current['state'] == 'failed':
                 raise RuntimeError(current.get('error_code') or 'configuration_failed')
@@ -57,6 +62,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--serial', required=True)
     parser.add_argument('--config', type=Path, required=True)
+    parser.add_argument('--background', action='store_true',
+                        help='Allow this app to connect in the background using the authorized USB host')
     parser.add_argument('--adb', default=str(Path.home() / 'Library/Android/sdk/platform-tools/adb'))
     parser.add_argument('--apksigner', type=Path, default=Path.home() / 'Library/Android/sdk/build-tools/36.1.0/apksigner')
     parser.add_argument('--java-home', type=Path, default=Path('/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home'))
@@ -78,6 +85,10 @@ def main():
             activation.verify_signer(adb, activation.installed_apk(adb, android_identity.PACKAGE), args)
         except activation.ActivationError as error:
             raise RuntimeError(str(error)) from None
+        if args.background:
+            subprocess.run(adb + ['shell', 'dumpsys', 'deviceidle', 'whitelist',
+                                  '+' + android_identity.PACKAGE],
+                           capture_output=True, timeout=15, check=True)
         print(json.dumps(provision(adb, payload)))
 
 

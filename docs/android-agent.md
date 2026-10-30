@@ -27,10 +27,10 @@ Choose **导入配置并连接**, or enter `gateway_url` (HTTPS origin, includin
 An already authorized USB computer can configure the existing owner-signed APK without phone interaction:
 
 ```sh
-python3 scripts/provision-android.py --serial ACTUAL_USB_SERIAL --config /actual/private/android-device.json
+python3 scripts/provision-android.py --serial ACTUAL_USB_SERIAL --config /actual/private/android-device.json --background
 ```
 
-The installer verifies the existing owner certificate, streams the configuration over stdin to a shell-UID-only provider, then observes the original request by SHA-256. Status never exposes the token. A platform foreground requirement is reported separately from a running connection.
+The installer verifies the existing owner certificate, streams the configuration over the ADB shell-v2 stdin to a shell-UID-only provider, then observes the original request by SHA-256. `--background` exempts only this app from battery optimization before connecting, allowing background startup on supported Android systems. It does not grant accessibility or USB authorization. Status never exposes the token. A platform foreground requirement is reported separately from a running connection.
 
 Enable Octendra under Android Accessibility settings when UI observation/actions are needed. Files, commands and network recovery work independently. On some sideloaded installations, the phone's app settings require manually allowing restricted settings first. Grant notifications when Android requests them. Stop from the APK or its ongoing notification at any time. The configuration editor is FLAG_SECURE and password fields are redacted in structured observations. Different permissions are reported independently.
 
