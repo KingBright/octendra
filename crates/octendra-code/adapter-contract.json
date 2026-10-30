@@ -1,8 +1,8 @@
 {
-  "adapter_tools_sha256": "7dc07c1bda71a43026b5dd9153d781f87223c51525d46e98a0a43b5c57c0d1b9",
+  "adapter_tools_sha256": "b5a227d127eb4bbce757734dd05fe2f9a59fa3e4033e745a03cdb9e9f5d84c63",
   "boundary": "Adapter-sent catalog is not proof of final host exposure. No final host report means unknown.",
   "protocol": 1,
-  "server_tools_sha256": "7dc07c1bda71a43026b5dd9153d781f87223c51525d46e98a0a43b5c57c0d1b9",
+  "server_tools_sha256": "b5a227d127eb4bbce757734dd05fe2f9a59fa3e4033e745a03cdb9e9f5d84c63",
   "skill_revision": "1267168eacea3f31ff8247185d5d48c2d9d0ba8d038c759275bf97d544e7b208",
   "tools": [
     {
@@ -652,7 +652,7 @@
           },
           "max_bytes": {
             "maximum": 1048576,
-            "minimum": 1024,
+            "minimum": 4,
             "type": "integer"
           },
           "requests": {

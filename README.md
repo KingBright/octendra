@@ -122,7 +122,7 @@ Gateway/Agent 的源码版本以 [Cargo.toml](crates/octendra-code/Cargo.toml) �
 
 ## 开发与发布
 
-仓库固定 Rust `1.94.1`。
+仓库固定 Rust `1.99.1`。
 
 ```bash
 cargo fmt --all

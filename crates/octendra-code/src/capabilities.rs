@@ -144,6 +144,14 @@ mod skill_recovery_tests {
     use super::*;
 
     #[test]
+    fn an_unseen_device_has_no_reported_wire_version() {
+        let state = compatibility(None);
+        assert_eq!(state["status"], "not_reported");
+        assert!(state["agent_wire_protocol"].is_null());
+        assert_eq!(compatibility(Some(1))["status"], "legacy_compatible");
+    }
+
+    #[test]
     fn restart_sync_uses_the_canonical_codex_directory_without_recreating_duplicates() {
         let home = tempfile::tempdir().unwrap();
         sync_embedded_skill_at(home.path()).unwrap();
@@ -169,7 +177,10 @@ mod skill_recovery_tests {
 }
 
 pub(crate) fn compatibility(agent_wire: Option<u32>) -> Value {
-    let wire = agent_wire.unwrap_or(1);
+    let Some(wire) = agent_wire else {
+        return json!({"status":"not_reported","agent_wire_protocol":null,"gateway_wire_protocol":WIRE_PROTOCOL,
+            "min_agent_wire_protocol":MIN_AGENT_WIRE_PROTOCOL,"max_agent_wire_protocol":WIRE_PROTOCOL});
+    };
     let status = if wire < MIN_AGENT_WIRE_PROTOCOL {
         "agent_too_old"
     } else if wire > WIRE_PROTOCOL {

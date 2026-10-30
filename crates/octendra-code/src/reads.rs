@@ -48,7 +48,7 @@ pub(crate) fn read(ws: &Workspace, args: &Value) -> Result<Value> {
         .get("allow_partial")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let mut remaining = files::number(args, "max_bytes", 16000, 1024, 1024 * 1024)?;
+    let mut remaining = files::number(args, "max_bytes", 16000, 4, 1024 * 1024)?;
     let directory = files::directory(ws)?;
     let mut snapshots: HashMap<String, std::result::Result<Snapshot, String>> = HashMap::new();
     let mut used = 0usize;

@@ -122,7 +122,7 @@ The current Gateway/Agent and Android source version is **0.12.0**. Source verif
 
 ## Development and release
 
-The workspace pins Rust `1.94.1`.
+The workspace pins Rust `1.99.1`.
 
 ```bash
 cargo fmt --all

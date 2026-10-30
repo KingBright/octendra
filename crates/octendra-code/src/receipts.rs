@@ -288,9 +288,9 @@ pub async fn invoke_durable(
             .await
     } {
         Ok(value) => value,
-        Err(error) => crate::diagnostics::error_with_request(
+        Err(error) => crate::diagnostics::error_with_source_request(
             tool,
-            &error.to_string(),
+            &error,
             request_id,
             None,
             "gateway_dispatch",

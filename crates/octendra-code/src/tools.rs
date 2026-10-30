@@ -21,6 +21,37 @@ pub fn scope(name: &str) -> Option<&'static str> {
 }
 static CATALOG: LazyLock<Vec<Tool>> = LazyLock::new(build_catalog);
 
+/// Schema-derived repair guidance. Never contains submitted values or unknown keys.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct ArgumentProblem {
+    pub field: String,
+    pub reason: &'static str,
+    pub expected: Value,
+}
+impl std::fmt::Display for ArgumentProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid_arguments: {} {}", self.field, self.reason)
+    }
+}
+impl std::error::Error for ArgumentProblem {}
+fn argument_problem(
+    schema: &Map<String, Value>,
+    path: &str,
+    reason: &'static str,
+) -> anyhow::Error {
+    let expected: Map<String, Value> =
+        ["type", "enum", "minimum", "maximum", "minItems", "maxItems"]
+            .into_iter()
+            .filter_map(|key| schema.get(key).map(|value| (key.into(), value.clone())))
+            .collect();
+    ArgumentProblem {
+        field: path.into(),
+        reason,
+        expected: Value::Object(expected),
+    }
+    .into()
+}
+
 pub fn catalog() -> Vec<Tool> {
     CATALOG.clone()
 }
@@ -130,17 +161,16 @@ fn validate_node(schema: &Map<String, Value>, value: &Value, path: &str) -> Resu
         }
         return Ok(());
     }
-    if let Some(choices) = schema.get("enum").and_then(Value::as_array) {
-        ensure!(
-            choices.contains(value),
-            "invalid_arguments: {path} is not an allowed value"
-        );
+    if let Some(choices) = schema.get("enum").and_then(Value::as_array)
+        && !choices.contains(value)
+    {
+        return Err(argument_problem(schema, path, "not_an_allowed_value"));
     }
     match schema.get("type").and_then(Value::as_str) {
         Some("object") => {
             let object = value
                 .as_object()
-                .with_context(|| format!("invalid_arguments: {path} expected object"))?;
+                .ok_or_else(|| argument_problem(schema, path, "expected_object"))?;
             let properties = schema
                 .get("properties")
                 .and_then(Value::as_object)
@@ -154,35 +184,46 @@ fn validate_node(schema: &Map<String, Value>, value: &Value, path: &str) -> Resu
                 let key = required
                     .as_str()
                     .context("invalid catalog required field")?;
-                ensure!(
-                    object.contains_key(key),
-                    "invalid_arguments: {path}.{key} is required"
-                );
+                if !object.contains_key(key) {
+                    let child = properties
+                        .get(key)
+                        .and_then(Value::as_object)
+                        .unwrap_or(schema);
+                    return Err(argument_problem(
+                        child,
+                        &format!("{path}.{key}"),
+                        "required",
+                    ));
+                }
             }
             for (key, item) in object {
                 let child = properties
                     .get(key)
                     .and_then(Value::as_object)
-                    .with_context(|| format!("invalid_arguments: {path}.{key} is unknown"))?;
+                    .ok_or_else(|| argument_problem(schema, path, "unknown_field"))?;
                 validate_node(child, item, &format!("{path}.{key}"))?;
             }
         }
         Some("array") => {
             let items = value
                 .as_array()
-                .with_context(|| format!("invalid_arguments: {path} expected array"))?;
+                .ok_or_else(|| argument_problem(schema, path, "expected_array"))?;
             let count = items.len() as u64;
-            ensure!(
-                schema
-                    .get("minItems")
+            if !(schema
+                .get("minItems")
+                .and_then(Value::as_u64)
+                .is_none_or(|n| count >= n)
+                && schema
+                    .get("maxItems")
                     .and_then(Value::as_u64)
-                    .is_none_or(|n| count >= n)
-                    && schema
-                        .get("maxItems")
-                        .and_then(Value::as_u64)
-                        .is_none_or(|n| count <= n),
-                "invalid_arguments: {path} array length outside allowed bounds"
-            );
+                    .is_none_or(|n| count <= n))
+            {
+                return Err(argument_problem(
+                    schema,
+                    path,
+                    "array_length_outside_bounds",
+                ));
+            }
             let child = schema
                 .get("items")
                 .and_then(Value::as_object)
@@ -191,29 +232,31 @@ fn validate_node(schema: &Map<String, Value>, value: &Value, path: &str) -> Resu
                 validate_node(child, item, &format!("{path}[{index}]"))?;
             }
         }
-        Some("string") => ensure!(
-            value.is_string(),
-            "invalid_arguments: {path} expected string"
-        ),
-        Some("boolean") => ensure!(
-            value.is_boolean(),
-            "invalid_arguments: {path} expected boolean"
-        ),
+        Some("string") => {
+            if !value.is_string() {
+                return Err(argument_problem(schema, path, "expected_string"));
+            }
+        }
+        Some("boolean") => {
+            if !value.is_boolean() {
+                return Err(argument_problem(schema, path, "expected_boolean"));
+            }
+        }
         Some("integer") => {
-            let number = value.as_u64().with_context(|| {
-                format!("invalid_arguments: {path} expected nonnegative integer")
-            })?;
-            ensure!(
-                schema
-                    .get("minimum")
+            let number = value
+                .as_u64()
+                .ok_or_else(|| argument_problem(schema, path, "expected_nonnegative_integer"))?;
+            if !(schema
+                .get("minimum")
+                .and_then(Value::as_u64)
+                .is_none_or(|n| number >= n)
+                && schema
+                    .get("maximum")
                     .and_then(Value::as_u64)
-                    .is_none_or(|n| number >= n)
-                    && schema
-                        .get("maximum")
-                        .and_then(Value::as_u64)
-                        .is_none_or(|n| number <= n),
-                "invalid_arguments: {path} integer outside allowed bounds"
-            );
+                    .is_none_or(|n| number <= n))
+            {
+                return Err(argument_problem(schema, path, "integer_outside_bounds"));
+            }
         }
         _ => bail!("unsupported catalog schema type"),
     }
@@ -395,7 +438,7 @@ fn build_catalog() -> Vec<Tool> {
     add(
         "code_read",
         "Batch-read needed ranges from request-local file snapshots. Long lines return UTF-8 fragments: continue with next_line/next_line_byte_offset and expected_version. allow_partial=true keeps successful ranges alongside per-range errors. Read known ranges directly.",
-        json!({"workspace_id":string(),"requests":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"object","properties":{"path":string(),"start_line":integer(1,10000000),"end_line":integer(1,10000000),"expected_version":string(),"line_byte_offset":integer(0,8388608)},"required":["path"],"additionalProperties":false}},"max_bytes":integer(1024,1048576),"allow_partial":{"type":"boolean"}}),
+        json!({"workspace_id":string(),"requests":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"object","properties":{"path":string(),"start_line":integer(1,10000000),"end_line":integer(1,10000000),"expected_version":string(),"line_byte_offset":integer(0,8388608)},"required":["path"],"additionalProperties":false}},"max_bytes":integer(4,1048576),"allow_partial":{"type":"boolean"}}),
         vec!["workspace_id", "requests"],
     );
     add(

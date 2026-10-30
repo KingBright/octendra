@@ -298,7 +298,7 @@ async fn invalid_approval_can_reauthorize_same_client_without_registration_or_sc
         .split(';')
         .next()
         .unwrap();
-    let nonce = cookie.strip_prefix("octendra_oauth=").unwrap();
+    let nonce = cookie.split_once('=').unwrap().1;
     sqlx::query("UPDATE kv SET expires=? WHERE kind='pending' AND key=?")
         .bind(octendra_code::now() - 1)
         .bind(hash(nonce))
@@ -539,7 +539,7 @@ impl Fixture {
             .split(';')
             .next()
             .unwrap();
-        let nonce = cookie.strip_prefix("octendra_oauth=").unwrap();
+        let nonce = cookie.split_once('=').unwrap().1;
         let (status, headers, _) = self
             .request(
                 "POST",
@@ -2184,4 +2184,62 @@ async fn refresh_commit_failure_leaves_original_retryable() {
         StatusCode::OK
     );
     assert_eq!(f.refresh(&client, &fresh).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn parallel_browser_authorizations_keep_independent_csrf_cookies() {
+    let f = Fixture::new().await;
+    let client = f.register("none", GPT).await;
+    let mut flows = Vec::new();
+    for _ in 0..2 {
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(random().as_bytes()));
+        let (status, headers, _) = f
+            .request(
+                "GET",
+                &authorization_path(&client, &challenge, Some(RESOURCE)),
+                Value::Null,
+                false,
+                &[],
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        flows.push(
+            headers["set-cookie"]
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    assert_ne!(
+        flows[0].split_once('=').unwrap().0,
+        flows[1].split_once('=').unwrap().0
+    );
+    let mut browser_cookies = flows.join("; ");
+    for cookie in flows {
+        let (name, nonce) = cookie.split_once('=').unwrap();
+        let (status, headers, _) = f
+            .request(
+                "POST",
+                "/oauth/approve",
+                json!({"nonce":nonce,"password":f.password}),
+                true,
+                &[("cookie", browser_cookies.clone())],
+            )
+            .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert!(
+            headers["set-cookie"]
+                .to_str()
+                .unwrap()
+                .starts_with(&format!("{name}=;"))
+        );
+        browser_cookies = browser_cookies
+            .split("; ")
+            .filter(|entry| !entry.starts_with(&format!("{name}=")))
+            .collect::<Vec<_>>()
+            .join("; ");
+    }
 }

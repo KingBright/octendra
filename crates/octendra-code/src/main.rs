@@ -23,6 +23,17 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Configure exact callback/origin presets; --check reports missing configuration without writing.
+    ConfigureClients {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long, value_enum, required = true)]
+        client: Vec<octendra_code::client_profiles::ClientProfile>,
+        #[arg(long)]
+        check: bool,
+        #[arg(long)]
+        probe: bool,
+    },
     /// Offline read-only projection of existing public OAuth client metadata.
     InspectOauthClients {
         #[arg(long)]
@@ -462,6 +473,20 @@ async fn main() -> Result<()> {
         Command::CheckOwnerPassword { .. } => unreachable!("offline check handled before logging"),
         Command::InspectOauthClients { .. } => {
             unreachable!("offline inspection handled before logging")
+        }
+        Command::ConfigureClients {
+            config,
+            client,
+            check,
+            probe,
+        } => {
+            let mut report = octendra_code::client_profiles::configure(&config, &client, check)?;
+            if probe {
+                let config: GatewayConfig = read_config(&config)?;
+                report["discovery"] =
+                    octendra_code::client_profiles::probe(&config.public_url).await?;
+            }
+            println!("{}", serde_json::to_string(&report)?);
         }
         Command::InitGateway {
             config,

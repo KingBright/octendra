@@ -434,9 +434,12 @@ async fn authorize(
     );
     response.headers_mut().insert(
         header::SET_COOKIE,
-        format!("octendra_oauth={nonce}; Secure; HttpOnly; SameSite=Lax; Path=/oauth; Max-Age=600")
-            .parse()
-            .map_err(internal)?,
+        format!(
+            "{}={nonce}; Secure; HttpOnly; SameSite=Lax; Path=/oauth; Max-Age=600",
+            approval_cookie(&nonce)
+        )
+        .parse()
+        .map_err(internal)?,
     );
     Ok(response)
 }
@@ -444,6 +447,9 @@ async fn authorize(
 struct Approval {
     nonce: String,
     password: String,
+}
+fn approval_cookie(nonce: &str) -> String {
+    format!("octendra_oauth_{}", &hash(nonce)[..16])
 }
 async fn approve(state: State<Auth>, headers: HeaderMap, form: Form<Approval>) -> Response {
     let auth = state.0.clone();
@@ -512,13 +518,21 @@ async fn approve_request(
     {
         return Err(invalid());
     }
-    let cookie = headers
+    let cookie_name = approval_cookie(&f.nonce);
+    let cookies = headers
         .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| {
-            s.split(';')
-                .find_map(|s| s.trim().strip_prefix("octendra_oauth="))
-        });
+        .and_then(|value| value.to_str().ok());
+    let cookie = cookies.and_then(|value| {
+        value
+            .split(';')
+            .filter_map(|part| part.trim().split_once('='))
+            .find_map(|(name, value)| (name == cookie_name).then_some(value))
+            .or_else(|| {
+                value
+                    .split(';')
+                    .find_map(|part| part.trim().strip_prefix("octendra_oauth="))
+            })
+    });
     if cookie.is_none_or(|c| !secret_eq(c, &f.nonce)) {
         return Err(invalid());
     }
@@ -566,7 +580,7 @@ async fn approve_request(
     );
     response.headers_mut().insert(
         header::SET_COOKIE,
-        "octendra_oauth=; Secure; HttpOnly; SameSite=Lax; Path=/oauth; Max-Age=0"
+        format!("{cookie_name}=; Secure; HttpOnly; SameSite=Lax; Path=/oauth; Max-Age=0")
             .parse()
             .map_err(internal)?,
     );

@@ -991,7 +991,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(max_ok["ranges"][0]["text"], "hello\n");
-        for bad_max in [json!(512), json!(1048577)] {
+        let small = read(&w, &json!({"requests":[{"path":"a"}],"max_bytes":4})).unwrap();
+        assert_eq!(small["ranges"][0]["text"], "hell");
+        assert_eq!(small["ranges"][0]["next_line_byte_offset"], 4);
+        for bad_max in [json!(3), json!(1048577)] {
             let error = read(
                 &w,
                 &json!({"requests":[{"path":"a","start_line":1,"end_line":1}],"max_bytes":bad_max}),

@@ -26,8 +26,24 @@ pub(crate) fn error_from_source(
     {
         error(tool, "local_permission_denied", operation, stage)
     } else {
-        error(tool, &source.to_string(), operation, stage)
+        let mut value = error(tool, &source.to_string(), operation, stage);
+        if let Some(problem) = source.downcast_ref::<crate::tools::ArgumentProblem>() {
+            value["argument_error"] =
+                serde_json::to_value(problem).expect("schema repair metadata");
+        }
+        value
     }
+}
+pub(crate) fn error_with_source_request(
+    tool: &str,
+    source: &anyhow::Error,
+    request_id: &str,
+    operation: Option<&str>,
+    stage: &str,
+) -> Value {
+    let mut value = error_from_source(tool, source, operation, stage);
+    value["request_id"] = json!(request_id);
+    value
 }
 pub(crate) fn error(tool: &str, message: &str, operation: Option<&str>, stage: &str) -> Value {
     let task_rejection = [
@@ -337,6 +353,32 @@ pub(crate) fn error_with_request(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn schema_errors_offer_repairs_without_argument_values() {
+        let args = serde_json::json!({"workspace_id":"fixture","requests":[{"path":"private-name"}],"max_bytes":1});
+        let error = crate::tools::validate("code_read", &args).unwrap_err();
+        let value = super::error_with_source_request(
+            "code_read",
+            &error,
+            "req_fixture",
+            None,
+            "gateway_dispatch",
+        );
+        assert_eq!(value["error_code"], "invalid_arguments");
+        assert!(
+            value["argument_error"]["field"]
+                .as_str()
+                .unwrap()
+                .ends_with(".max_bytes")
+        );
+        assert_eq!(value["argument_error"]["expected"]["minimum"], 4);
+        assert!(!value.to_string().contains("private-name"));
+        let args = serde_json::json!({"workspace_id":"fixture","private-secret-key":"private-secret-value"});
+        let error = crate::tools::validate("code_list", &args).unwrap_err();
+        let value = super::error_from_source("code_list", &error, None, "gateway_dispatch");
+        assert!(!value.to_string().contains("private-secret"));
+    }
+
     #[test]
     fn permission_words_in_unrelated_errors_do_not_claim_authorization_failure() {
         for message in [

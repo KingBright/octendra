@@ -15,6 +15,7 @@ mod submission_fence;
 pub use capabilities::release_manifest;
 pub mod adapter;
 mod change_review;
+pub mod client_profiles;
 pub mod computer_use;
 pub mod contract;
 mod delivery;
