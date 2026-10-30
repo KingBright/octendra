@@ -106,6 +106,7 @@ class AgentService : Service() {
         if (AccessService.instance != null) features += "android_accessibility_v1"
         if (AgentRuntime.bridge?.connected() == true) features += "android_shell_bridge_v1"
         return obj("version" to BuildConfig.VERSION_NAME, "wire_protocol" to 2, "platform" to "android", "arch" to Build.SUPPORTED_ABIS.firstOrNull(),
+            "build_revision" to BuildConfig.BUILD_REVISION.takeIf { it.isNotEmpty() },
             "home_dir" to exposedRoot(this, config).path, "session" to session, "roots" to arr(listOf(exposedRoot(this, config).path)),
             "allow_write" to true, "allow_exec" to true, "runtime_features" to obj("protocol" to 1, "names" to arr(features)),
             "active_operations" to arr(listOfNotNull(AgentRuntime.currentOperation)), "poll_wait_ms" to 20000)

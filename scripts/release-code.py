@@ -287,7 +287,8 @@ def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=N
                 directory.mkdir(exist_ok=False)
                 state['execution_root'] = str(checkout)
                 env = dict(os.environ, CARGO_TERM_COLOR='never', PYTHONUNBUFFERED='1',
-                           CARGO_BUILD_JOBS=str(min(4, max(1, os.cpu_count() or 1))))
+                           CARGO_BUILD_JOBS=str(min(4, max(1, os.cpu_count() or 1))),
+                           OCTENDRA_BUILD_REVISION=manifest['snapshot_id'])
                 if source_binding:
                     env.update(CARGO_TARGET_DIR=str((pathlib.Path.home()/'rust-target').resolve(strict=True)),
                                PYTHONDONTWRITEBYTECODE='1', GIT_CEILING_DIRECTORIES=str(checkout.parent))

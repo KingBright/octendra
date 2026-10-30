@@ -39,6 +39,12 @@ class OfflineFleetTests(unittest.TestCase):
     def test_offline_controller_is_not_contacted(self):
         self.assertEqual(fleet.rollout_targets([self.offline],'offline'),([],[self.offline]))
 
+    def test_original_deployment_picks_up_a_returning_device_only_once(self):
+        returning=dict(self.offline,online=True)
+        self.assertEqual(fleet.returning_targets([self.controller,self.offline],set(),'controller'),[])
+        self.assertEqual(fleet.returning_targets([self.controller,returning],set(),'controller'),[returning])
+        self.assertEqual(fleet.returning_targets([returning],{'offline'},'controller'),[])
+
     def test_only_online_scope_is_accepted_and_offline_is_reported_pending(self):
         with mock.patch.object(fleet,'accept_fleet',return_value=self.directory/'proof.json') as accept:
             self.assertTrue(self.finish(self.observation))

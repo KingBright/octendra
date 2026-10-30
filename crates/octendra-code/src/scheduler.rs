@@ -248,7 +248,7 @@ impl Drop for ActiveGuard {
 /// Stream permits are held for the body lifetime.
 pub(crate) struct TransferLimits {
     global: Arc<Semaphore>,
-    devices: HashMap<String, Arc<Semaphore>>,
+    devices: Mutex<HashMap<String, Arc<Semaphore>>>,
     operations: KeyedLocks,
     pub allocation: AsyncMutex<()>,
 }
@@ -261,9 +261,11 @@ impl TransferLimits {
     pub fn new<'a>(devices: impl Iterator<Item = &'a str>) -> Self {
         Self {
             global: Arc::new(Semaphore::new(32)),
-            devices: devices
-                .map(|id| (id.to_owned(), Arc::new(Semaphore::new(16))))
-                .collect(),
+            devices: Mutex::new(
+                devices
+                    .map(|id| (id.to_owned(), Arc::new(Semaphore::new(16))))
+                    .collect(),
+            ),
             operations: KeyedLocks::default(),
             allocation: AsyncMutex::new(()),
         }
@@ -276,8 +278,10 @@ impl TransferLimits {
             .context("transfer operation busy")?;
         let device = self
             .devices
-            .get(device)
-            .context("unknown transfer device")?
+            .lock()
+            .map_err(|_| anyhow::anyhow!("device transfer limits unavailable"))?
+            .entry(device.to_owned())
+            .or_insert_with(|| Arc::new(Semaphore::new(16)))
             .clone()
             .try_acquire_owned()
             .context("device transfer capacity reached")?;

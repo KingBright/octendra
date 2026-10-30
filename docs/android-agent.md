@@ -1,4 +1,4 @@
-# Android controlled-device agent 0.1.0
+# Android controlled-device agent
 
 This is a separate, configurable APK for controlling an owner's Android phone through the existing Octendra Code gateway. It is not the Weavelo phone-to-desktop client. Minimum Android 11 (API 30); target API 36. One pure-DEX APK serves arm64, ARM and x86 Android runtimes. Kotlin implements Android lifecycle/platform APIs and the existing wire-2 contract; the existing Rust gateway and desktop agents are not rewritten.
 
@@ -20,15 +20,23 @@ octendra-code enroll \
   --allow-write --allow-exec --shell /system/bin/sh
 ```
 
-The CLI writes a private device configuration. Reload the gateway configuration using the deployment's existing controlled service restart procedure. Version 0.10.24 holds registrations in memory; merely writing a registration file is not live enrollment. This Android addition does not itself restart or upgrade a production gateway.
+The CLI writes a private device configuration. A gateway started with its configuration path automatically loads valid device and client changes without restarting connections or queues. Listener, public identity and storage changes still require the existing service restart procedure; invalid partial saves retain the last valid configuration.
 
-Import the generated JSON in the APK, or enter `gateway_url` (HTTPS origin, including port), `device_id` (UUID) and `device_token`. The APK derives its real shared-directory root and reports it to the gateway; the CLI's placeholder roots are not exposed as arbitrary Android filesystem roots. Configuration is encrypted with Android Keystore AES-GCM and excluded from Android backups. Do not send device tokens in chat or commit them.
+Choose **导入配置并连接**, or enter `gateway_url` (HTTPS origin, including port), `device_id` (UUID) and `device_token` and choose **保存并连接**. Both save the encrypted configuration, connect, enable boot recovery and permit the existing USB shell helper in one step. Stop or disable these features in the app at any time. The APK derives its real shared-directory root and reports it to the gateway; the CLI's placeholder roots are not exposed as arbitrary Android filesystem roots. Configuration is encrypted with Android Keystore AES-GCM and excluded from Android backups. Do not send device tokens in chat or commit them.
 
-Enable Octendra under Android Accessibility settings for UI observation/actions. On some sideloaded installations, the phone's app settings require manually allowing restricted settings first. Grant notifications, then choose **开启远程控制**. Stop from the APK or its ongoing notification at any time. The configuration Activity is FLAG_SECURE and password fields are redacted in structured observations. Different permissions are reported independently.
+An already authorized USB computer can configure the existing owner-signed APK without phone interaction:
+
+```sh
+python3 scripts/provision-android.py --serial ACTUAL_USB_SERIAL --config /actual/private/android-device.json
+```
+
+The installer verifies the existing owner certificate, streams the configuration over stdin to a shell-UID-only provider, then observes the original request by SHA-256. Status never exposes the token. A platform foreground requirement is reported separately from a running connection.
+
+Enable Octendra under Android Accessibility settings when UI observation/actions are needed. Files, commands and network recovery work independently. On some sideloaded installations, the phone's app settings require manually allowing restricted settings first. Grant notifications when Android requests them. Stop from the APK or its ongoing notification at any time. The configuration editor is FLAG_SECURE and password fields are redacted in structured observations. Different permissions are reported independently.
 
 ## From the existing ChatGPT connector
 
-No tool-catalog refresh is required. `devices_list` shows `platform=android` and actual `android_*` runtime features. Open the exact reported shared root once with `workspace_open`, then use existing tools. `terminal_exec` on this device is an **Android command dispatcher**, not a POSIX shell:
+No tool-catalog refresh is required. `devices_list` shows `platform=android` and actual `android_*` runtime features. Use `workspace_id="device-name:default"` directly, or reuse an existing workspace. `terminal_exec` on this device is an **Android command dispatcher**, not a POSIX shell:
 
 ```text
 android help
@@ -68,7 +76,7 @@ With an activated bridge, APK installation streams the APK into the platform pac
 
 The SQLite journal durably records each job fingerprint before any action. A duplicate operation is never re-executed. A process restart marks unfinished work `outcome_unknown`; it does not replay taps, submissions or installations. Saved receipts alone are retried when connectivity recovers. Device/origin and owner/workspace bindings prevent redirecting private data to a different registration. Up to 512 unacknowledged results are retained; new execution fails closed at that limit. Acknowledged operation fingerprints are retained for seven days; terminal output is bounded and pruned. Screenshot history is bounded, with old captures removed and a hard stop on excessive new captures. Shared user files are not silently deleted.
 
-Polling is serial for phone state changes, with independent heartbeat and receipt delivery. Idle receipt delivery waits on a signal rather than continuously querying SQLite. Foreground notification remains visible. Wake locks are bounded to active operations, not permanently held. Automatic boot reconnection is opt-in and still subject to Android/OEM rules. Lack of shell or accessibility never becomes a false claim of authority.
+Polling is serial for phone state changes, with independent heartbeat and receipt delivery. Idle receipt delivery waits on a signal rather than continuously querying SQLite. Foreground notification remains visible. Wake locks are bounded to active operations, not permanently held. Import/connect enables boot reconnection; it can be disabled in the app and is and still subject to Android/OEM rules. Lack of shell or accessibility never becomes a false claim of authority.
 
 Default-network loss and replacement cancel obsolete HTTP connections and wake connection/receipt retries. Late loss events from the old network do not tear down its replacement. `android status` reports boot opt-in, network monitoring and transport generation; `android reconnect` resets this Agent’s network connections while retaining its device identity, journal and operation fingerprints. Recovery resends saved receipts without replaying business actions. Boot recovery may require the first device unlock; restoring shell authority additionally requires the already-authorized computer and USB connection.
 
@@ -99,6 +107,6 @@ The publisher requires matching APK SHA-256 across build, packaging and successf
 
 ## Current release identity
 
-`android/version.properties` is the version source for Gradle, build receipts and APK verification. The current Android source declares 0.12.4 / 1204 with application ID `fun.hackerlife.octendra`. Build with the existing owner signing directory (`--signing-directory` when it is not at the canonical location); the builder selects the existing alias by the reviewed public certificate fingerprint and refuses to create a replacement identity. All signing environment variables use the `OCTENDRA_ANDROID_` prefix. The certificate and application ID remain the upgrade identity; a successful build does not establish physical-phone acceptance.
+`android/version.properties` is the version source for Gradle, build receipts and APK verification. The application ID is `fun.hackerlife.octendra`. Build with the existing owner signing directory (`--signing-directory` when it is not at the canonical location); the builder selects the existing alias by the reviewed public certificate fingerprint and refuses to create a replacement identity. All signing environment variables use the `OCTENDRA_ANDROID_` prefix. The certificate and application ID remain the upgrade identity; a successful build does not establish physical-phone acceptance.
 
 An upgrade reads the existing v1 encrypted configuration with its original Keystore key without rewriting credentials. A user-enabled session is restored after package replacement and when its activity becomes visible; a stopped session stays stopped, and boot still requires the existing boot opt-in. Connection logs contain only fixed channel/error codes and monotonic timings, never configuration, exception messages or response bodies.

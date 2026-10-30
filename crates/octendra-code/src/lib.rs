@@ -30,6 +30,7 @@ mod history_gateway;
 mod history_retention;
 mod job_dispatch;
 mod job_receipts;
+mod live_config;
 pub mod local_sudo;
 mod maintenance;
 pub mod maintenance_tasks;

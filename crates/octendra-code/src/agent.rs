@@ -924,6 +924,7 @@ impl Agent {
         let (skill_revision, skill_consistent) = self.startup_skill_status(skill_home);
         let hello = DeviceHello {
             version: env!("CARGO_PKG_VERSION").into(),
+            build_revision: crate::capabilities::build_revision().map(str::to_owned),
             wire_protocol: Some(crate::capabilities::WIRE_PROTOCOL),
             tool_schema_revision: Some(crate::capabilities::tool_schema_revision().to_owned()),
             skill_revision,

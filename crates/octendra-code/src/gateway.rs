@@ -27,7 +27,12 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::{io::AsyncWriteExt, sync::Notify, time::Instant};
 
 // Notifications are latency hints, not the source of truth. The durable queue is
@@ -74,7 +79,6 @@ impl ImportedHistoryAccess {
     }
 }
 
-#[derive(Clone)]
 pub struct Gateway {
     pub config: Arc<GatewayConfig>,
     pub store: Store,
@@ -83,9 +87,30 @@ pub struct Gateway {
     /// requests always retain their durable pre-dispatch recovery binding.
     pub audit_observations: bool,
     pub(crate) config_path: Option<PathBuf>,
-    signals: Arc<HashMap<String, DeviceSignals>>,
+    signals: Arc<Mutex<HashMap<String, Arc<DeviceSignals>>>>,
+    live_config: Option<Arc<crate::live_config::LiveConfig>>,
     pub(crate) observation_changed: Arc<Notify>,
     pub(crate) transfer_limits: Arc<crate::scheduler::TransferLimits>,
+}
+impl Clone for Gateway {
+    fn clone(&self) -> Self {
+        let config = self
+            .live_config
+            .as_ref()
+            .map(|live| live.snapshot())
+            .unwrap_or_else(|| self.config.clone());
+        Self {
+            config: config.clone(),
+            store: self.store.clone(),
+            auth: self.auth.with_config(config),
+            audit_observations: self.audit_observations,
+            config_path: self.config_path.clone(),
+            signals: self.signals.clone(),
+            live_config: self.live_config.clone(),
+            observation_changed: self.observation_changed.clone(),
+            transfer_limits: self.transfer_limits.clone(),
+        }
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Job {
@@ -99,6 +124,8 @@ pub struct Job {
 pub struct DeviceHello {
     #[serde(default)]
     pub version: String,
+    #[serde(default)]
+    pub build_revision: Option<String>,
     #[serde(default)]
     pub wire_protocol: Option<u32>,
     #[serde(default)]
@@ -150,6 +177,11 @@ impl PollRequest {
     fn valid(&self) -> bool {
         self.hello.session.len() == 64
             && self.hello.version.len() <= 64
+            && self
+                .hello
+                .build_revision
+                .as_ref()
+                .is_none_or(|id| id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
             && self
                 .hello
                 .wire_protocol
@@ -243,29 +275,7 @@ impl Gateway {
         Self::new_inner(config, Some(config_path)).await
     }
     async fn new_inner(config: GatewayConfig, config_path: Option<PathBuf>) -> Result<Self> {
-        crate::validate_url(&config.public_url)?;
-        ensure!(
-            !config.owner.is_empty() && !config.password_hash.is_empty(),
-            "owner and password required"
-        );
-        let mut ids = std::collections::HashSet::new();
-        for d in &config.devices {
-            uuid::Uuid::parse_str(&d.id)?;
-            ensure!(
-                ids.insert(&d.id) && d.token_hash.len() == 64,
-                "invalid or duplicate device identity"
-            );
-            ensure!(
-                d.scopes
-                    .iter()
-                    .all(|s| crate::SUPPORTED_SCOPES.split_whitespace().any(|x| x == s)),
-                "invalid device scope"
-            );
-        }
-        config.validate_oauth_policy()?;
-        if let Some(browser) = &config.forge_browser {
-            browser.validate()?;
-        }
+        crate::live_config::validate(&config)?;
         let store = Store::open(&config.state_dir).await?;
         store.install_gateway_schema().await?;
         let audit_observations = match std::env::var("OCTENDRA_OBSERVATION_AUDIT") {
@@ -275,14 +285,15 @@ impl Gateway {
             _ => anyhow::bail!("invalid OCTENDRA_OBSERVATION_AUDIT: expected minimal or full"),
         };
         let config = Arc::new(config);
-        let auth = Auth::new(config.clone(), store.clone());
-        let signals = Arc::new(
-            config
-                .devices
-                .iter()
-                .map(|device| (device.id.clone(), DeviceSignals::default()))
-                .collect(),
-        );
+        let live_config = config_path.as_ref().map(|path| {
+            Arc::new(crate::live_config::LiveConfig::new(
+                path.clone(),
+                config.clone(),
+            ))
+        });
+        let mut auth = Auth::new(config.clone(), store.clone());
+        auth.live_config = live_config.clone();
+        let signals = Arc::new(Mutex::new(HashMap::new()));
         let transfer_limits = Arc::new(crate::scheduler::TransferLimits::new(
             config.devices.iter().map(|d| d.id.as_str()),
         ));
@@ -293,14 +304,24 @@ impl Gateway {
             audit_observations,
             config_path,
             signals,
+            live_config,
             observation_changed: Arc::new(Notify::new()),
             transfer_limits,
         })
     }
     pub(crate) fn wake_device(&self, device: &str) {
-        if let Some(signals) = self.signals.get(device) {
+        if let Ok(signals) = self.device_signals(device) {
             signals.jobs.notify_waiters();
         }
+    }
+    fn device_signals(&self, device: &str) -> Result<Arc<DeviceSignals>> {
+        Ok(self
+            .signals
+            .lock()
+            .map_err(|_| anyhow::anyhow!("device signals unavailable"))?
+            .entry(device.to_owned())
+            .or_default()
+            .clone())
     }
     pub fn router(&self) -> Result<Router> {
         let authorities = self
@@ -315,7 +336,9 @@ impl Gateway {
             .with_stateful_mode(false)
             .with_json_response(true)
             .with_allowed_hosts(authorities)
-            .with_allowed_origins(self.config.browser_origins());
+            // The outer security_headers middleware validates the current exact
+            // origins, including changes made after this transport was created.
+            .disable_allowed_origins();
         let gateway = self.clone();
         let service = StreamableHttpService::new(
             move || Ok(crate::oauth_handoff::Wire(gateway.clone())),
@@ -391,8 +414,8 @@ impl Gateway {
             )
             .layer(DefaultBodyLimit::max(512 * 1024))
             .layer(middleware::from_fn_with_state(
-                self.config.clone(),
-                security_headers,
+                self.clone(),
+                security_headers_live,
             )))
     }
     pub(crate) async fn device(&self, headers: &HeaderMap) -> Result<String> {
@@ -410,7 +433,7 @@ impl Gateway {
             .context("invalid device credential")
     }
     pub async fn dispatch(&self, p: &Principal, name: &str, args: Value) -> Result<Value> {
-        self.dispatch_traced(p, name, args, None).await
+        self.clone().dispatch_traced(p, name, args, None).await
     }
     pub(crate) async fn dispatch_traced(
         &self,
@@ -553,12 +576,27 @@ impl Gateway {
                     .and_then(|o| o.hello.skill_revision.as_deref())
                     == Some(crate::capabilities::embedded_skill_revision())
                     && online.as_ref().and_then(|o| o.hello.skill_consistent) != Some(false);
-                let converged = is_online && version == desired && wire_ok && tool_ok && skill_ok;
+                let build_ok = crate::capabilities::build_revision().map(|expected| {
+                    online
+                        .as_ref()
+                        .and_then(|o| o.hello.build_revision.as_deref())
+                        == Some(expected)
+                });
+                let android = online
+                    .as_ref()
+                    .is_some_and(|o| o.hello.platform == "android");
+                let converged = is_online
+                    && version == desired
+                    && wire_ok
+                    && (android || (tool_ok && skill_ok))
+                    && build_ok != Some(false);
                 online_count += usize::from(is_online);
                 converged_count += usize::from(converged);
                 devices.push(json!({
                     "device_id":d.id,"name":d.name,"online":is_online,"version":version,
-                    "converged":converged,"compatibility":compatibility,"tool_schema_converged":tool_ok,"skill_converged":skill_ok,
+                    "converged":converged,"compatibility":compatibility,"tool_schema_converged":(!android).then_some(tool_ok),"skill_converged":(!android).then_some(skill_ok),
+                    "build_revision":online.as_ref().and_then(|o|o.hello.build_revision.as_deref()),"build_converged":build_ok,
+                    "release_lane":if android {"android_apk"} else {"desktop_bundle"},
                     "tool_schema_revision":online.as_ref().and_then(|o|o.hello.tool_schema_revision.as_deref()),
                     "skill_revision":online.as_ref().and_then(|o|o.hello.skill_revision.as_deref()),
                     "skill_consistent":online.as_ref().and_then(|o|o.hello.skill_consistent),
@@ -692,7 +730,7 @@ impl Gateway {
             }
             object.remove("authorization_version");
         }
-        let signals = self.signals.get(device).context("unknown device")?;
+        let signals = self.device_signals(device)?;
         let key = if scope == "code:read" && name != "workspace_open" && name != "file_download" {
             random()
         } else if let Some(k) = args.get("idempotency_key").and_then(Value::as_str) {
@@ -1735,7 +1773,7 @@ async fn poll(
     let Ok(value) = serde_json::to_string(&online) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    let Some(signals) = g.signals.get(&device) else {
+    let Ok(signals) = g.device_signals(&device) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let mut identity = json!({"online":online,"active":request.active_operations,
@@ -1929,7 +1967,7 @@ async fn receipt(
     {
         return crate::job_receipts::storage_response(&receipt.operation_id, &error);
     }
-    if let Some(signals) = g.signals.get(&device) {
+    if let Ok(signals) = g.device_signals(&device) {
         signals.results.notify_waiters();
     }
     g.observation_changed.notify_waiters();
@@ -2290,6 +2328,13 @@ fn security_rejection(status: StatusCode, code: &'static str) -> Response {
         .into_response()
 }
 
+async fn security_headers_live(
+    State(gateway): State<Gateway>,
+    request: Request,
+    next: Next,
+) -> Response {
+    security_headers(State(gateway.config), request, next).await
+}
 async fn security_headers(
     State(config): State<Arc<GatewayConfig>>,
     request: Request,
@@ -2299,6 +2344,9 @@ async fn security_headers(
         return security_rejection(StatusCode::BAD_REQUEST, "gateway_host_mismatch");
     }
     if let Some(origin) = request.headers().get(header::ORIGIN) {
+        if request.headers().get_all(header::ORIGIN).iter().count() != 1 {
+            return security_rejection(StatusCode::FORBIDDEN, "browser_origin_invalid");
+        }
         let Ok(origin) = origin.to_str() else {
             return security_rejection(StatusCode::FORBIDDEN, "browser_origin_invalid");
         };

@@ -353,7 +353,7 @@ sudo octendra-code reset-owner-password \
 
 命令只在原 JSON 字节中替换 `password_hash`，采用现有 Argon2 参数和新的随机盐。同目录临时文件同步后原子替换，保留文件属主、属组和 Unix mode；拒绝符号链接、硬链接、特殊文件及非私有权限。独占锁串行化重置命令，确认写入前再次检查内容、inode 和权限；若等待输入期间有其他修改则终止。操作期间也应协调暂停其他配置写入者；不合作的外部写入者不受该锁约束。
 
-OAuth 授权、设备凭据、权限、状态库和现有网页会话不变。命令不启动或重启服务；成功后由管理员使用该主机既有服务管理流程受控重启 Gateway 才会加载新密码。已经吊销的 OAuth 授权仍需用户重新授权。原初始化明文密码文件不被读取或更新，之后应由管理员通过自己的密码管理方式维护；不要删除配置并重跑 `init-gateway`。
+OAuth 授权、设备凭据、权限、状态库和现有网页会话不变。命令不启动或重启服务；成功后运行中的 Gateway 会自动加载有效的新密码配置。已经吊销的 OAuth 授权仍需用户重新授权。原初始化明文密码文件不被读取或更新，之后应由管理员通过自己的密码管理方式维护；不要删除配置并重跑 `init-gateway`。
 
 离线核对工具 `octendra-code check-owner-password --config PATH --password-file PATH`
 仅在 POSIX 主机本地读取两个既有文件，不登录、不联网、不写配置或授权。
@@ -466,43 +466,22 @@ MacBook agent.json -> 复制到 Linux
 正确做法：每台新设备执行一次 `enroll`，生成新的 device UUID、token、state path、roots 和 scopes。
 设备身份可独立撤销，也不会和另一台设备的在线 session 打架。
 
-### 6.2 不要直接原地改生产 gateway.json
+### 6.2 原子注册并即时生效
 
-生产配置通常是 service 用户只读文件，例如 mode `0400`。`enroll` 会原子重写传入的配置文件，
-直接以 root 对线上配置执行可能改变 owner/mode。安全流程是：
-
-1. 把线上 `gateway.json` 复制到 root-only staging 目录。
-2. 在 staging copy 上 enroll。
-3. 验证新的 Gateway config 和新 Agent config。
-4. 以正确 owner/mode 原子安装回线上路径。
-5. 重启 Gateway，让它重新加载设备注册表。
-6. 安全传输该设备自己的 `agent.json`。
-
-示例：
+`enroll` 保留已有 Gateway 配置的 owner/group 和私有 mode，原子写入新注册。运行中的 Gateway 自动加载有效的设备配置，无需重启已有连接。生成的 Agent 配置只交给对应设备。
 
 ```bash
 sudo install -d -m 0700 /root/octendra-enroll
-sudo cp /etc/octendra-code/gateway.json /root/octendra-enroll/gateway.json
-sudo chmod 0600 /root/octendra-enroll/gateway.json
-```
-
-假设新设备名为 `Linux-Workstation`：
-
-```bash
 sudo octendra-code enroll \
-  --gateway-config /root/octendra-enroll/gateway.json \
+  --gateway-config /etc/octendra-code/gateway.json \
   --agent-config /root/octendra-enroll/linux-workstation-agent.json \
   --name Linux-Workstation \
   --state-dir /home/YOUR_USER/.local/share/octendra-code/state \
   --root /home/YOUR_USER/Workspace \
-  --allow-write \
-  --allow-exec \
-  --shell /bin/bash
+  --allow-write --allow-exec --shell /bin/bash
 ```
 
-Linux 上建议显式传 `--shell /bin/bash`；CLI 默认 shell 是 `/bin/zsh`，并非所有 Linux 都安装 zsh。
-
-可以提供多个 `--root`，但只授权确实需要的目录。
+Linux 上显式指定目标设备已有的 shell。可以提供多个 `--root`。配置写入失败时查看原错误；不要通过重复 enroll 生成另一份设备身份。客户端预设和安卓一步接入见[快速接入](quick-setup.md)。
 
 ### 6.3 权限是逐设备授予的
 
@@ -517,27 +496,6 @@ Linux 上建议显式传 `--shell /bin/bash`；CLI 默认 shell 是 `/bin/zsh`�
 - 不要给不可信机器/用户开启 `--allow-exec`。
 - 生产密钥、SSH key、云凭据等不要因为“root 没包含那个目录”就误以为 shell 永远访问不到。
 - 最好使用专门的低权限账户运行 Agent。
-
-### 6.4 安装更新后的 Gateway 配置
-
-先保留可回滚备份，然后按服务用户恢复 owner/mode：
-
-```bash
-sudo cp -p /etc/octendra-code/gateway.json \
-  /etc/octendra-code/gateway.json.before-new-device
-
-sudo install \
-  -o octendra-code -g octendra-code -m 0400 \
-  /root/octendra-enroll/gateway.json \
-  /etc/octendra-code/gateway.json.new
-
-sudo mv /etc/octendra-code/gateway.json.new \
-  /etc/octendra-code/gateway.json
-
-sudo systemctl restart octendra-code-gateway.service
-```
-
-然后重新检查公网 `/healthz`。Gateway 当前不会自动热加载 enroll 后的配置，重启是注册生效边界。
 
 ## 7. 在 Linux 新设备上运行 Agent
 

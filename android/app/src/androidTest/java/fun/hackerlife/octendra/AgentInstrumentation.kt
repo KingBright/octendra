@@ -17,6 +17,16 @@ class AgentInstrumentation : Instrumentation() {
             val store = ConfigStore(targetContext); val old = store.read()
             try { store.write(c); check(store.read() == c); passed++
                 check(!java.io.File(targetContext.noBackupFilesDir, "gateway-config.enc").readText().contains(c.deviceToken)); passed++
+                val prefs = controls(targetContext)
+                val before = listOf("remote_enabled", "start_at_boot", "shell_enabled").associateWith { prefs.getBoolean(it, false) }
+                try {
+                    ManagedProvisioning.apply(targetContext, c.json().put("connect", false).put("start_at_boot", true).put("allow_exec", true))
+                    check(store.read() == c && prefs.getBoolean("start_at_boot", false) && prefs.getBoolean("shell_enabled", false)); passed++
+                    var rejected = false
+                    try { targetContext.contentResolver.openFileDescriptor(android.net.Uri.parse("content://${BuildConfig.APPLICATION_ID}.bridge/provision"), "w")?.close() }
+                    catch (_: SecurityException) { rejected = true }
+                    check(rejected); passed++
+                } finally { prefs.edit().also { edit -> before.forEach { (key, value) -> edit.putBoolean(key, value) } }.commit() }
             } finally { if (old != null) store.write(old) else store.erase() }
             val db = Journal(targetContext, c)
             val job = obj("id" to UUID.randomUUID().toString(), "device_id" to c.deviceId, "owner" to "fixture", "tool" to "terminal_exec", "arguments" to obj("command" to "android status"))

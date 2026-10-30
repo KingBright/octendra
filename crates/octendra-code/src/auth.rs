@@ -48,11 +48,21 @@ fn internal(_: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
         Json(json!({"error":"server_error"})),
     )
 }
-#[derive(Clone)]
 pub struct Auth {
     pub config: Arc<GatewayConfig>,
     pub store: Store,
     rate: Arc<Mutex<HashMap<String, (i64, u32)>>>,
+    pub(crate) live_config: Option<Arc<crate::live_config::LiveConfig>>,
+}
+impl Clone for Auth {
+    fn clone(&self) -> Self {
+        let config = self
+            .live_config
+            .as_ref()
+            .map(|live| live.snapshot())
+            .unwrap_or_else(|| self.config.clone());
+        self.with_config(config)
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Principal {
@@ -186,6 +196,15 @@ impl Auth {
             config,
             store,
             rate: Arc::new(Mutex::new(HashMap::new())),
+            live_config: None,
+        }
+    }
+    pub(crate) fn with_config(&self, config: Arc<GatewayConfig>) -> Self {
+        Self {
+            config,
+            store: self.store.clone(),
+            rate: self.rate.clone(),
+            live_config: self.live_config.clone(),
         }
     }
     fn limit(&self, key: &str, limit: u32) -> bool {
@@ -258,6 +277,7 @@ impl Auth {
         config.public_url = public_url.into();
         Self {
             config: Arc::new(config),
+            live_config: None,
             ..self.clone()
         }
     }

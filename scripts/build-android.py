@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build on an owner's development machine; signing secrets never enter source or command arguments."""
 import argparse, hashlib, json, os, pathlib, shutil, subprocess, time
+import release_current
 import android_identity
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -22,7 +23,9 @@ def main():
         parser.error('Build first, run real Android acceptance, then use scripts/publish-android.py --acceptance RECEIPT. Build success alone cannot publish.')
     sdk=pathlib.Path(os.environ.get('ANDROID_HOME',str(pathlib.Path.home()/'Library/Android/sdk')))
     env=os.environ.copy(); env['ANDROID_HOME']=str(sdk); env['ANDROID_SDK_ROOT']=str(sdk)
-    env.setdefault('JAVA_HOME','/Library/Java/JavaVirtualMachines/ibm-semeru-open-17.jdk/Contents/Home')
+    build_revision=release_current.snapshot_evidence(None, ROOT)['snapshot_id']
+    env['OCTENDRA_BUILD_REVISION']=build_revision
+    env.setdefault('JAVA_HOME','/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home')
     env['PATH']=str(pathlib.Path(env['JAVA_HOME'])/'bin')+os.pathsep+env.get('PATH','')
     identity=android_identity.release_identity(ROOT)
     try:
@@ -54,7 +57,7 @@ def main():
     android_identity.verify_apk(badging,verify,identity)
     declared=[p for p in (ROOT/'android').rglob('*') if p.is_file() and not any(part in {'build','.gradle','.kotlin','.idea'} for part in p.relative_to(ROOT/'android').parts) and p.name!='local.properties']
     sources={str(p.relative_to(ROOT)):digest(p) for p in sorted(declared)}
-    report={**identity,'source_commit':subprocess.run(['git','rev-parse','HEAD'],cwd=ROOT,check=True,capture_output=True,text=True).stdout.strip(),'apk_sha256':digest(apk),'bytes':apk.stat().st_size,'built_at':int(time.time()),
+    report={**identity,'build_revision':build_revision,'source_commit':subprocess.run(['git','rev-parse','HEAD'],cwd=ROOT,check=True,capture_output=True,text=True).stdout.strip(),'apk_sha256':digest(apk),'bytes':apk.stat().st_size,'built_at':int(time.time()),
       'source_hashes':sources,'signing_certificate_sha256':android_identity.OWNER_CERT_SHA256,'signature_verified':True,
       'badging':badging,'runtime_acceptance':'separate receipt required','signing_material_in_package':False}
     reports=ROOT/'android/app/build/reports'; reports.mkdir(parents=True,exist_ok=True)

@@ -94,10 +94,10 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 ### ChatGPT Code Gateway
 
-首次搭建 Gateway、配置 Cloudflare/公网入口或向现有 Gateway 添加新设备时，先阅读 [Code Gateway 从零部署与新设备接入](docs/code-gateway-deployment.md)；协议、OAuth/MCP 和运行机制详见 [ChatGPT Code Gateway](docs/chatgpt-code-gateway.md)，Grok 与 Grok Bot 接入见 [Grok MCP](docs/grok-mcp.md)。正常协作流程是：
+首次搭建 Gateway、配置 Cloudflare/公网入口或向现有 Gateway 添加新设备时，先阅读 [Code Gateway 从零部署与新设备接入](docs/code-gateway-deployment.md)；协议、OAuth/MCP 和运行机制详见 [ChatGPT Code Gateway](docs/chatgpt-code-gateway.md)，Grok 与 Grok Bot 接入见 [Grok MCP](docs/grok-mcp.md)。简化配置见[快速接入](docs/quick-setup.md)。正常协作流程是：
 
-1. `devices_list`：明确选择授权设备，不做隐式 failover。
-2. `workspace_open`：打开一次并复用设备绑定的 Workspace。
+1. 目标已知时直接使用 `workspace_id="设备名:/绝对路径"` 或 `设备名:default`；未知时用 `devices_list` 发现设备。
+2. Workspace 自动打开并复用；已有 Workspace ID 可直接继续。
 3. 路径未知时再搜索；路径和范围已知时直接批量读取。
 4. 使用版本检查编辑，随后查看完整变更集。
 5. 测试通过持久终端运行，观察原任务，不为“看结果”重新执行命令。

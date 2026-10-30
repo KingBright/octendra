@@ -78,6 +78,7 @@ async fn current_hello(gateway: &Gateway, principal: &Principal, root: &str) -> 
         .unwrap();
     json!({
         "version":env!("CARGO_PKG_VERSION"),
+        "build_revision":devices["gateway"]["build_revision"],
         "wire_protocol":devices["gateway"]["wire_protocol"],
         "tool_schema_revision":devices["gateway"]["tool_schema_revision"],
         "skill_revision":devices["gateway"]["skill_revision"],

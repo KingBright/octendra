@@ -94,10 +94,10 @@ See [Windows Installation and Operations](docs/windows.md) for Task Scheduler se
 
 ### ChatGPT code gateway
 
-Start with [ChatGPT Code Gateway](docs/chatgpt-code-gateway.md). The normal flow is:
+Start with [ChatGPT Code Gateway](docs/chatgpt-code-gateway.md). See [Quick setup](docs/quick-setup.md) for client presets and one-step enrollment. The normal flow is:
 
-1. `devices_list` to choose an explicitly authorized device.
-2. `workspace_open` once, then reuse that device-bound workspace.
+1. With a known target use `workspace_id="device-name:/absolute/root"` or `device-name:default`; use `devices_list` for discovery.
+2. Workspaces open and reuse automatically; existing workspace IDs continue to work.
 3. Search only when the path/range is unknown; batch known reads.
 4. Apply version-checked edits and inspect the complete change review.
 5. Run tests in a durable terminal and observe the original operation instead of rerunning it.
@@ -118,7 +118,7 @@ Octendra treats an acknowledgement, an execution result, an installation, and an
 
 ## Current release
 
-The current Gateway/Agent and Android source version is **0.12.0**. Source verification, built artifacts, and deployed runtimes are separate acceptance stages. See [this naming change](docs/octendra-branding-20261020.md) for delivery status; historical release evidence remains in `docs/releases/`.
+Gateway/Agent source versions are defined by [Cargo.toml](crates/octendra-code/Cargo.toml); Android uses [version.properties](android/version.properties). Source verification, built artifacts, and deployed runtimes are separate acceptance stages. See [this naming change](docs/octendra-branding-20261020.md) for delivery status; historical release evidence remains in `docs/releases/`.
 
 ## Development and release
 

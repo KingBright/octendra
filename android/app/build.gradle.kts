@@ -18,6 +18,7 @@ android {
         targetSdk = 36
         versionCode = releaseVersion.getProperty("versionCode").toInt()
         versionName = releaseVersion.getProperty("versionName")
+        buildConfigField("String", "BUILD_REVISION", "\"" + providers.environmentVariable("OCTENDRA_BUILD_REVISION").getOrElse("") + "\"")
         testInstrumentationRunner = "fun.hackerlife.octendra.AgentInstrumentation"
     }
     signingConfigs {

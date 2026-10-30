@@ -35,6 +35,8 @@ const REQUIRED_LANES: [&str; 5] = ["read", "write", "transfer", "terminal", "con
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpgradeDirective {
     pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_revision: Option<String>,
     pub artifact: String,
     pub artifact_sha256: String,
     pub artifact_size: u64,
@@ -56,6 +58,8 @@ pub struct ArtifactMeta {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReleaseManifest {
     pub version: String,
+    #[serde(default)]
+    pub build_revision: Option<String>,
     pub artifacts: BTreeMap<String, ArtifactMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_name: Option<String>,
@@ -124,6 +128,7 @@ pub fn platform_artifact_name(platform: &str, arch: &str) -> Option<&'static str
     match (platform, arch) {
         ("macos", "aarch64" | "arm64") => Some("octendra-code-macos-arm64"),
         ("linux", "x86_64" | "amd64") => Some("octendra-code-linux-amd64"),
+        ("linux", "aarch64" | "arm64") => Some("octendra-code-linux-arm64"),
         ("windows", "x86_64" | "amd64") => Some("octendra-code-windows-amd64.exe"),
         _ => None,
     }
@@ -197,6 +202,10 @@ fn read_release_dir(dir: &Path) -> Option<ReleaseManifest> {
     };
     Some(ReleaseManifest {
         version,
+        build_revision: raw
+            .get("build_revision")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         artifacts,
         bundle_name,
         bundle_sha256,
@@ -206,7 +215,12 @@ fn read_release_dir(dir: &Path) -> Option<ReleaseManifest> {
 
 pub fn directive_for_device(g: &Gateway, hello: &DeviceHello) -> Option<UpgradeDirective> {
     let (dir, manifest) = load_active_release(g)?;
-    if hello.version == manifest.version {
+    if hello.version == manifest.version
+        && manifest
+            .build_revision
+            .as_ref()
+            .is_none_or(|id| hello.build_revision.as_ref() == Some(id))
+    {
         return None;
     }
     let artifact_name = platform_artifact_name(&hello.platform, &hello.arch)?;
@@ -216,6 +230,7 @@ pub fn directive_for_device(g: &Gateway, hello: &DeviceHello) -> Option<UpgradeD
     }
     Some(UpgradeDirective {
         version: manifest.version,
+        build_revision: manifest.build_revision,
         artifact: artifact_name.to_owned(),
         artifact_sha256: meta.sha256.clone(),
         artifact_size: meta.size,
@@ -254,6 +269,8 @@ pub(crate) fn admin_routes(g: Gateway) -> Router {
 #[derive(Deserialize)]
 struct DirectiveQuery {
     version: String,
+    #[serde(default)]
+    build_revision: Option<String>,
     platform: String,
     arch: String,
 }
@@ -268,6 +285,7 @@ async fn get_directive(
     };
     let dummy_hello = DeviceHello {
         version: q.version,
+        build_revision: q.build_revision,
         wire_protocol: Some(crate::capabilities::WIRE_PROTOCOL),
         tool_schema_revision: None,
         skill_revision: None,
@@ -762,7 +780,12 @@ pub fn check_and_spawn_agent_upgrade(agent: &Agent, client: &reqwest::Client, he
     let Ok(directive) = serde_json::from_str::<UpgradeDirective>(raw) else {
         return;
     };
-    if directive.version == env!("CARGO_PKG_VERSION") {
+    if directive.version == env!("CARGO_PKG_VERSION")
+        && directive
+            .build_revision
+            .as_deref()
+            .is_none_or(|revision| Some(revision) == crate::capabilities::build_revision())
+    {
         return;
     }
     if upgrade_flag()
@@ -1970,6 +1993,7 @@ mod tests {
     #[test]
     fn poison_version_guard_blocks_immediate_retry_and_allows_new_sha() {
         let directive = UpgradeDirective {
+            build_revision: None,
             version: "0.11.1".into(),
             artifact: "octendra-code-macos-arm64".into(),
             artifact_sha256: "a".repeat(64),

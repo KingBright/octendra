@@ -218,6 +218,12 @@ def rollout_targets(devices, controller_id):
     return ordered,deferred
 
 
+def returning_targets(devices, launched, controller_id):
+    """One original deployment observes offline targets and launches each at most once."""
+    return rollout_targets([d for d in devices if d['device_id'] not in launched
+                            and d.get('online') and not d.get('converged')], controller_id)[0]
+
+
 def finish_observed_fleet(config,package,directory,version,state,fleet):
     """Accept the actual reachable scope; never label offline devices as upgraded."""
     excluded=fleet.get('excluded_devices',[])
@@ -409,10 +415,13 @@ def accept_existing_transfer(client, spec, report):
 def main():
     p=argparse.ArgumentParser();p.add_argument('--version');p.add_argument('--package',type=pathlib.Path);p.add_argument('--config',type=pathlib.Path);p.add_argument('--report-dir',type=pathlib.Path,required=True)
     p.add_argument('--acceptance-script',type=pathlib.Path,help='Explicit verified validator update; keep the immutable package unchanged and record both identities')
+    p.add_argument('--wait-online-seconds',type=int,default=86400,
+                   help='Keep this deployment active for returning devices (default one day; 0 observes the current online scope only)')
     p.add_argument('--acceptance-only',type=pathlib.Path,metavar='ORIGINAL_TRANSFER_JSON',
                    help='Observe/resume only the specified existing transfer; no login, producer, upgrade or fleet deployment')
     p.add_argument('--access-token-stdin',action='store_true',help='Borrow an already authorized bearer from stdin; never register, approve, refresh or revoke its grant')
     args=p.parse_args()
+    if not 0 <= args.wait_online_seconds <= 604800:p.error('wait-online-seconds must be 0..604800')
     if args.acceptance_only:
         if any((args.version,args.package,args.config,args.acceptance_script)) or not args.access_token_stdin:
             p.error('acceptance-only requires --access-token-stdin and excludes deployment inputs')
@@ -457,7 +466,7 @@ def main():
         # Version convergence cannot substitute for a known matching architecture.
         # Check before acceptance or any Agent bundle export/staging.
         preflight_agents(devices, manifest)
-        if finish_observed_fleet(config,package,directory,args.version,state,fleet):return
+        if (fleet.get('desktop_converged') or args.wait_online_seconds == 0) and finish_observed_fleet(config,package,directory,args.version,state,fleet):return
         controller_id=controller_device_id(config)
         local_candidates=[d for d in devices if d['online'] and platform(d) in ('macos','linux')
                           and any(str(bundle).startswith(root.rstrip('/')+'/') for root in (d.get('capabilities') or {}).get('roots',[]))]
@@ -475,9 +484,11 @@ def main():
         for device in deferred:
             state['agents'][device['device_id']]={'name':device['name'],'platform':platform(device),'state':'waiting_online'}
         save()
-        for device in ordered:
+        launched=set()
+        def deploy(device):
             ident=device['device_id'];state['agents'][ident]={'name':device['name'],'platform':platform(device),'state':'already_converged' if device['converged'] else 'staging'};save()
-            if device['converged']: continue
+            if device['converged']: return False
+            launched.add(ident) # An ambiguous transfer/launch is observed, never submitted twice.
             ws=open_workspace(client,ident,root_path(device),'fleet-'+args.version+'-'+ident)
             remote_bundle='.octendra-release-staging-'+args.version+'/'+bundle.name
             imported=client.tool('file_upload',{'workspace_id':ws,'path':remote_bundle,'expected_version':'absent','sha256':bundle_sha,'max_bytes':268435456,'idempotency_key':'fleet-'+args.version+'-bundle-import-'+ident,'file':{'file_id':exported['artifact_id'],'download_url':exported['download_url'],'file_name':bundle.name}},allow_incomplete=True)
@@ -489,13 +500,25 @@ def main():
             if ident==controller_id:
                 state.update(state='handoff_pending',phase='controller_handoff',
                     next_action='controller updater is independent; let this invoking terminal exit, then rerun the same fleet command after the controller reconnects')
-                save();print(json.dumps({'state':state['state'],'version':args.version,'all_converged':False,'report':str(directory/'fleet.json')}));return
-        deadline=time.monotonic()+900
+                save();print(json.dumps({'state':state['state'],'version':args.version,'all_converged':False,'report':str(directory/'fleet.json')}));return True
+            return False
+        for device in ordered:
+            if deploy(device):return
+        deadline=time.monotonic()+max(900,args.wait_online_seconds)
         while time.monotonic()<deadline:
             fleet=desktop_scope(client.tool('fleet_status',{'desired_version':args.version}));state['fleet']=fleet;save()
-            if finish_observed_fleet(config,package,directory,args.version,state,fleet):return
+            if args.wait_online_seconds:
+                for device in returning_targets(fleet['devices'],launched,controller_id):
+                    candidate_artifact(device,manifest)
+                    if deploy(device):return
+            if (fleet.get('desktop_converged') or args.wait_online_seconds == 0) and finish_observed_fleet(config,package,directory,args.version,state,fleet):return
+            state.update(phase='waiting_for_devices',pending_device_ids=[d['device_id'] for d in fleet['devices'] if not d.get('converged')],
+                         next_action='original deployment is observing reconnects; do not start a second updater')
+            save()
             time.sleep(3)
-        else: raise RuntimeError('fleet did not converge; inspect fleet.json without replaying upgrades')
+        else:
+            if finish_observed_fleet(config,package,directory,args.version,state,fleet):return
+            raise RuntimeError('fleet did not converge; inspect fleet.json without replaying upgrades')
     except Exception as error:
         state.update(state='needs_recovery',phase='finished',error_type=type(error).__name__,next_action='inspect fleet.json and original operation/updater receipts; do not replay blindly');save();raise
     finally: client.close()

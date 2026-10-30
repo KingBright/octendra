@@ -543,7 +543,9 @@ async fn main() -> Result<()> {
                 allow_exec,
                 shell,
             )?;
-            println!("Enrolled device {id}; reload gateway configuration before connecting.");
+            println!(
+                "Enrolled device {id}; the running gateway loads it automatically. Start the agent with its generated configuration."
+            );
         }
         Command::RegisterOauthClient {
             gateway_config,

@@ -41,6 +41,7 @@ class MainActivity : Activity() {
     private lateinit var capabilities: TextView
     private lateinit var toggle: Button
     private lateinit var shell: CheckBox
+    private lateinit var boot: CheckBox
     private val handler = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
     private val refresh = object : Runnable { override fun run() { redraw(); handler.postDelayed(this, 1000) } }
@@ -72,13 +73,10 @@ class MainActivity : Activity() {
         token = field("设备令牌", "独立、可撤销的设备令牌", true)
         name = field("本机备注", Build.MODEL)
         configFields = (configStart until body.childCount).map { body.getChildAt(it) }
-        button("导入设备配置 JSON") { picker(11, "application/json") }
-        button("保存配置") { guarded { save(); toast("已加密保存到此手机") } }
+        button("导入配置并连接") { picker(11, "application/json") }
+        button("保存并连接") { guarded { connectCurrent(); toast("已保存，正在连接") } }
         toggle = button("开启远程控制") {
-            if (AgentRuntime.running) stopRemote() else AlertDialog.Builder(this)
-                .setTitle("开启远程控制？")
-                .setMessage("你授权的服务将能够读取共享文件，并在启用无障碍后读取屏幕、截图、点击和输入文字。shell 权限需要另外允许并激活。\n\n连接期间会显示常驻通知。随时点击停止即可断开；不会绕过锁屏、安全窗口或系统授权。")
-                .setNegativeButton("取消", null).setPositiveButton("允许并开启") { _, _ -> guarded { save(); controls(this).edit().putBoolean("remote_enabled", true).apply(); startForegroundService(Intent(this, AgentService::class.java)); askNotifications() } }.show()
+            if (AgentRuntime.running) stopRemote() else guarded { connectCurrent() }
         }
         label("权限与能力", 19, true)
         button("启用读屏与操作：无障碍设置") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
@@ -98,7 +96,7 @@ class MainActivity : Activity() {
             val command = AgentRuntime.bridge?.activationCommand() ?: throw AgentError("请先开启远程控制并允许 shell")
             getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("ADB 激活命令（不含令牌）", command)); toast("已复制，请在已授权电脑上执行")
         } }
-        val boot = CheckBox(this).apply {
+        boot = CheckBox(this).apply {
             text = "重启后尝试恢复已开启的连接"; textSize = 14f
             isChecked = controls(this@MainActivity).getBoolean("start_at_boot", false)
             setOnCheckedChangeListener { _, value -> controls(this@MainActivity).edit().putBoolean("start_at_boot", value).apply() }
@@ -150,6 +148,14 @@ class MainActivity : Activity() {
         ConfigStore(this).write(config)
     }
     private fun stopRemote() { controls(this).edit().putBoolean("remote_enabled", false).apply(); stopService(Intent(this, AgentService::class.java)); AgentRuntime.changed() }
+    private fun connectCurrent() {
+        save()
+        val config = ConfigStore(this).read() ?: throw AgentError("missing_configuration")
+        ManagedProvisioning.apply(this, config.json())
+        shell.isChecked = controls(this).getBoolean("shell_enabled", false)
+        boot.isChecked = controls(this).getBoolean("start_at_boot", false)
+        askNotifications()
+    }
     private fun askNotifications() { if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 40) }
     private fun picker(code: Int, mime: String) { startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).setType(mime).addCategory(Intent.CATEGORY_OPENABLE), code) }
     @Deprecated("Platform callback retained to avoid an extra activity framework dependency")
@@ -160,32 +166,14 @@ class MainActivity : Activity() {
         io.submit {
             try {
                 if (requestCode == 11) {
-                    demand(!AgentRuntime.running, "请先停止连接，再导入配置")
                     val text = contentResolver.openInputStream(uri)?.use { String(Transport.bounded(it, 8192), Charsets.UTF_8) } ?: throw AgentError("无法读取配置")
                     val imported = org.json.JSONObject(text)
-                    val store = ConfigStore(this)
-                    val source = store.read()
-                    val migration = ConfigMigration.requested(source, imported)
-                    if (migration == null) {
-                        val c = GatewayConfig.parse(imported)
-                        store.write(c)
-                        runOnUiThread { showConfig(c); toast("配置已导入并加密保存") }
-                    } else {
-                        val expectedSource = source ?: throw AgentError("migration_source_missing")
-                        runOnUiThread { guarded {
-                            demand(!AgentRuntime.running, "请先停止连接，再迁移配置")
-                            AlertDialog.Builder(this).setTitle("迁移现有连接？")
-                                .setMessage("从 ${expectedSource.gatewayUrl}\n到 ${migration.gatewayUrl}\n\n保留共享文件、本机操作历史和此设备的身份。现有设备令牌将用于新服务。仅在新旧服务均由你信任的同一所有者管理时继续。")
-                                .setNegativeButton("取消", null).setPositiveButton("迁移并保留数据") { _, _ ->
-                                    io.submit {
-                                        try {
-                                            demand(!AgentRuntime.running, "请先停止连接，再迁移配置")
-                                            store.migrate(migration, expectedSource)
-                                            runOnUiThread { showConfig(migration); toast("已迁移连接，共享文件和操作历史已保留") }
-                                        } catch (e: Exception) { runOnUiThread { showError(e) } }
-                                    }
-                                }.show()
-                        } }
+                    val c = ManagedProvisioning.apply(this, imported)
+                    runOnUiThread {
+                        showConfig(c); setConfigEditing(false)
+                        shell.isChecked = controls(this).getBoolean("shell_enabled", false)
+                        boot.isChecked = controls(this).getBoolean("start_at_boot", false)
+                        askNotifications(); toast("配置已加密保存，正在连接")
                     }
                 } else if (requestCode == 12) {
                     val c = ConfigStore(this).read() ?: throw AgentError("请先保存配置")

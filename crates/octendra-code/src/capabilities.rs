@@ -14,6 +14,10 @@ pub(crate) const WIRE_PROTOCOL: u32 = 2;
 pub(crate) const MIN_AGENT_WIRE_PROTOCOL: u32 = 1;
 pub(crate) const MIN_GATEWAY_WIRE_PROTOCOL: u32 = 2;
 
+pub(crate) fn build_revision() -> Option<&'static str> {
+    option_env!("OCTENDRA_BUILD_REVISION")
+}
+
 pub(crate) fn tool_schema_revision() -> &'static str {
     CATALOG_SHA.as_str()
 }
@@ -300,6 +304,7 @@ pub(crate) fn gateway_manifest(known: Option<&str>) -> Value {
     let mut manifest = serde_json::Map::new();
     for (key, value) in [
         ("version", json!(env!("CARGO_PKG_VERSION"))),
+        ("build_revision", json!(build_revision())),
         ("wire_protocol", json!(WIRE_PROTOCOL)),
         ("skill_revision", json!(embedded_skill_revision())),
         ("min_agent_wire_protocol", json!(MIN_AGENT_WIRE_PROTOCOL)),
