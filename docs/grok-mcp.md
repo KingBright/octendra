@@ -35,6 +35,13 @@ http://localhost:8787/callback
 Add `https://cursor.com` and `https://www.cursor.com` to `allowed_origins`.
 Inspect the actual registration if a newer client sends different metadata.
 
+The HTTPS callback at `www.cursor.com` redirects with HTTP 308 to
+`https://cursor.com/agents/mcp/oauth/callback`. Add that exact canonical URL to
+`redirect_uris` too, so the authorization page's `form-action` policy permits
+both steps. `allowed_origins` alone does not configure form redirects. After
+changing this policy, start a fresh authorization page; an already open page
+retains its original policy.
+
 ## Standard HTTPS alongside an existing public port
 
 Some hosted client environments can reach port 443 but cannot complete TLS on
