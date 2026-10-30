@@ -36,7 +36,7 @@ Enable Octendra under Android Accessibility settings when UI observation/actions
 
 ## From the existing ChatGPT connector
 
-No tool-catalog refresh is required. `devices_list` shows `platform=android` and actual `android_*` runtime features. Use `workspace_id="device-name:default"` directly, or reuse an existing workspace. `terminal_exec` on this device is an **Android command dispatcher**, not a POSIX shell:
+No tool-catalog refresh is required. `devices_list` shows `platform=android` and actual `android_*` runtime features. Reuse an existing workspace, or call `workspace_open` once with the phone's device ID and reported root. This APK persists workspace ownership locally and requires that registration before commands; desktop workspace shortcuts do not replace it. `terminal_exec` on this device is an **Android command dispatcher**, not a POSIX shell:
 
 ```text
 android help
