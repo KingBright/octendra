@@ -365,6 +365,12 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::with_aliases(vec![]).await
+    }
+    async fn with_aliases(public_url_aliases: Vec<String>) -> Self {
+        Self::with_policy(public_url_aliases, vec![GPT.into()]).await
+    }
+    async fn with_policy(public_url_aliases: Vec<String>, redirect_uris: Vec<String>) -> Self {
         use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
         let dir = tempfile::tempdir().unwrap();
         let password = random();
@@ -374,6 +380,7 @@ impl Fixture {
             .unwrap()
             .to_string();
         let g = Gateway::new(GatewayConfig {
+            public_url_aliases,
             forge_browser: None,
             public_url: ORIGIN.into(),
             bind: "127.0.0.1:0".into(),
@@ -383,7 +390,7 @@ impl Fixture {
             devices: vec![],
             // Spark DCR callbacks are accepted through the bounded Google
             // Account Linking callback family, so they need not be prelisted.
-            redirect_uris: vec![GPT.into()],
+            redirect_uris,
             allowed_origins: vec![
                 "https://chatgpt.com".into(),
                 "https://gemini.google.com".into(),
@@ -423,7 +430,6 @@ impl Fixture {
         let mut req = Request::builder()
             .method(method)
             .uri(path)
-            .header("host", "mcp.example.com:8443")
             .header(
                 "content-type",
                 if form {
@@ -433,6 +439,12 @@ impl Fixture {
                 },
             )
             .header("accept", "application/json, text/event-stream");
+        if !headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+        {
+            req = req.header("host", "mcp.example.com:8443");
+        }
         for (name, value) in headers {
             req = req.header(*name, value);
         }
@@ -477,6 +489,18 @@ impl Fixture {
         resource: Option<&str>,
         scope: &str,
     ) -> Value {
+        self.code_at_public_url(client, resource, scope, ORIGIN)
+            .await
+    }
+    async fn code_at_public_url(
+        &self,
+        client: &Value,
+        resource: Option<&str>,
+        scope: &str,
+        public_url: &str,
+    ) -> Value {
+        let origin = url::Url::parse(public_url).unwrap();
+        let host = origin[url::Position::BeforeHost..url::Position::AfterPort].to_string();
         let verifier = random();
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
         let callback = client["redirect_uris"][0].as_str().unwrap();
@@ -486,11 +510,15 @@ impl Fixture {
                 &authorization_path_scoped(client, &challenge, resource, scope),
                 json!({}),
                 false,
-                &[],
+                &[("host", host.clone())],
             )
             .await;
         assert_eq!(status, StatusCode::OK);
         let csp = headers["content-security-policy"].to_str().unwrap();
+        if callback.starts_with("cursor:") {
+            assert!(csp.split_whitespace().any(|source| source == "cursor:"));
+            assert!(!csp.split_whitespace().any(|source| source == "null"));
+        }
         assert_eq!(
             csp.split_whitespace()
                 .any(|source| source == "https://gemini.google.com"),
@@ -518,7 +546,11 @@ impl Fixture {
                 "/oauth/approve",
                 json!({"nonce":nonce,"password":self.password}),
                 true,
-                &[("cookie", cookie.into()), ("origin", ORIGIN.into())],
+                &[
+                    ("cookie", cookie.into()),
+                    ("origin", public_url.into()),
+                    ("host", host),
+                ],
             )
             .await;
         assert_eq!(status, StatusCode::SEE_OTHER);
@@ -542,10 +574,10 @@ impl Fixture {
         }
         let location = url::Url::parse(headers["location"].to_str().unwrap()).unwrap();
         let query: std::collections::HashMap<_, _> = location.query_pairs().into_owned().collect();
-        assert_eq!(query["iss"], ORIGIN);
+        assert_eq!(query["iss"], public_url);
         assert_eq!(query["state"], "fixture-state");
         json!({"grant_type":"authorization_code","client_id":client["client_id"],"code":query["code"],
-            "code_verifier":verifier,"redirect_uri":callback,"resource":RESOURCE})
+            "code_verifier":verifier,"redirect_uri":callback,"resource":format!("{public_url}/mcp")})
     }
     async fn authenticated(
         &self,
@@ -656,6 +688,285 @@ async fn status_page_uses_owner_password_cookie_and_gateway_truth() {
     assert!(!page.contains("href='/status/forge/'"));
     assert!(!page.contains("device_token"));
     assert!(!page.contains("command_preview"));
+}
+
+#[tokio::test]
+async fn cursor_registration_requires_exact_opt_in_for_all_installed_callbacks() {
+    let callbacks = [
+        "cursor://anysphere.cursor-mcp/oauth/callback",
+        "https://www.cursor.com/agents/mcp/oauth/callback",
+        "http://localhost:8787/callback",
+    ];
+    let registration = json!({"client_name":"Cursor","token_endpoint_auth_method":"none","redirect_uris":callbacks,"grant_types":["authorization_code","refresh_token"],"response_types":["code"]});
+    let unconfigured = Fixture::new().await;
+    assert_eq!(
+        unconfigured
+            .request("POST", "/oauth/register", registration.clone(), false, &[])
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let f = Fixture::with_policy(vec![], callbacks.iter().map(|uri| (*uri).into()).collect()).await;
+    let (status, _, client) = f
+        .request("POST", "/oauth/register", registration, false, &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(client["redirect_uris"], json!(callbacks));
+    for callback in callbacks {
+        let mut selected = client.clone();
+        selected["redirect_uris"] = json!([callback]);
+        let code = f.code(&selected).await;
+        let (status, _, token) = f.authenticated(&selected, "/oauth/token", code).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            f.mcp(&token, "tools/list", json!({})).await.0,
+            StatusCode::OK
+        );
+    }
+    for callback in [
+        "cursor://other-app/oauth/callback",
+        "cursor://anysphere.cursor-mcp/oauth/callback/extra",
+        "http://localhost:8788/callback",
+        "http://localhost:8787/callback?next=evil",
+    ] {
+        let mut config = (*f.g.config).clone();
+        config.redirect_uris = vec![callback.into()];
+        assert!(config.validate_oauth_policy().is_err());
+        assert_eq!(
+            f.request(
+                "POST",
+                "/oauth/register",
+                json!({"redirect_uris":[callback]}),
+                false,
+                &[]
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+}
+
+#[tokio::test]
+async fn public_url_alias_preserves_discovery_oauth_mcp_and_legacy_tokens() {
+    const ALIAS: &str = "https://mcp.example.com";
+    const ALIAS_RESOURCE: &str = "https://mcp.example.com/mcp";
+    let f = Fixture::with_aliases(vec![ALIAS.into()]).await;
+    let legacy_client = f.register("none", GPT).await;
+    let legacy = f.login(&legacy_client).await;
+    let alias_headers = [("host", "mcp.example.com".into())];
+    for (host, origin) in [("mcp.example.com:8443", ORIGIN), ("mcp.example.com", ALIAS)] {
+        let headers = [("host", host.into())];
+        let (status, _, metadata) = f
+            .request(
+                "GET",
+                "/.well-known/oauth-authorization-server",
+                Value::Null,
+                false,
+                &headers,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(metadata["issuer"], origin);
+        for (field, path) in [
+            ("authorization_endpoint", "authorize"),
+            ("registration_endpoint", "register"),
+            ("token_endpoint", "token"),
+            ("revocation_endpoint", "revoke"),
+        ] {
+            assert_eq!(metadata[field], format!("{origin}/oauth/{path}"));
+        }
+        let (status, _, metadata) = f
+            .request(
+                "GET",
+                "/.well-known/oauth-protected-resource",
+                Value::Null,
+                false,
+                &headers,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(metadata["resource"], format!("{origin}/mcp"));
+        assert_eq!(metadata["authorization_servers"], json!([origin]));
+        let (status, challenge, _) = f.request("GET", "/mcp", Value::Null, false, &headers).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(
+            challenge["www-authenticate"]
+                .to_str()
+                .unwrap()
+                .contains(&format!(
+                    "resource_metadata=\"{origin}/.well-known/oauth-protected-resource\""
+                ))
+        );
+    }
+    let client = f.register("none", GPT).await;
+    let code = f
+        .code_at_public_url(&client, Some(ALIAS_RESOURCE), "code:read", ALIAS)
+        .await;
+    // A wrong endpoint must not consume the valid alias grant.
+    assert_eq!(
+        f.request("POST", "/oauth/token", code.clone(), true, &[])
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (status, _, token) = f
+        .request("POST", "/oauth/token", code, true, &alias_headers)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(token["resource"], ALIAS_RESOURCE);
+    let auth = format!("Bearer {}", token["access_token"].as_str().unwrap());
+    let mcp_headers = [
+        ("host", "mcp.example.com".into()),
+        ("authorization", auth.clone()),
+        ("origin", ALIAS.into()),
+    ];
+    let (status, _, tools) = f
+        .request(
+            "POST",
+            "/mcp",
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}),
+            false,
+            &mcp_headers,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{tools}");
+    assert!(
+        tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "devices_list")
+    );
+    assert_eq!(
+        f.mcp(&token, "tools/list", json!({})).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let legacy_on_alias = [
+        ("host", "mcp.example.com".into()),
+        (
+            "authorization",
+            format!("Bearer {}", legacy["access_token"].as_str().unwrap()),
+        ),
+    ];
+    assert_eq!(
+        f.request("GET", "/mcp", Value::Null, false, &legacy_on_alias)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let refresh = json!({"grant_type":"refresh_token","client_id":client["client_id"],"refresh_token":token["refresh_token"],"resource":ALIAS_RESOURCE});
+    assert_eq!(
+        f.request("POST", "/oauth/token", refresh.clone(), true, &[])
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (status, _, refreshed) = f
+        .request("POST", "/oauth/token", refresh, true, &alias_headers)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(refreshed["resource"], ALIAS_RESOURCE);
+    let revoke = json!({"client_id":client["client_id"],"token":refreshed["refresh_token"]});
+    assert_eq!(
+        f.request("POST", "/oauth/revoke", revoke, true, &alias_headers)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let revoked = [
+        ("host", "mcp.example.com".into()),
+        (
+            "authorization",
+            format!("Bearer {}", refreshed["access_token"].as_str().unwrap()),
+        ),
+    ];
+    assert_eq!(
+        f.request("GET", "/mcp", Value::Null, false, &revoked)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        f.mcp(&legacy, "tools/list", json!({})).await.0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn public_url_alias_never_comes_from_unconfigured_or_forwarded_hosts() {
+    let f = Fixture::with_aliases(vec!["https://mcp.example.com".into()]).await;
+    for headers in [
+        vec![("host", "untrusted.example.com".into())],
+        vec![("host", "mcp.example.com.evil.test".into())],
+        vec![("host", "user@mcp.example.com".into())],
+        vec![
+            ("host", "mcp.example.com".into()),
+            ("host", "untrusted.example.com".into()),
+        ],
+    ] {
+        let (status, _, metadata) = f
+            .request(
+                "GET",
+                "/.well-known/oauth-authorization-server",
+                Value::Null,
+                false,
+                &headers,
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(metadata["error"], "gateway_host_mismatch");
+    }
+    let (_, _, metadata) = f
+        .request(
+            "GET",
+            "/.well-known/oauth-authorization-server",
+            Value::Null,
+            false,
+            &[
+                ("host", "mcp.example.com:8443".into()),
+                ("x-forwarded-host", "mcp.example.com".into()),
+            ],
+        )
+        .await;
+    assert_eq!(metadata["issuer"], ORIGIN);
+    let (_, _, metadata) = f
+        .request(
+            "GET",
+            "/.well-known/oauth-authorization-server",
+            Value::Null,
+            false,
+            &[("host", "MCP.EXAMPLE.COM:443".into())],
+        )
+        .await;
+    assert_eq!(metadata["issuer"], "https://mcp.example.com");
+    let old = Fixture::new().await;
+    let (status, _, metadata) = old
+        .request(
+            "GET",
+            "/.well-known/oauth-authorization-server",
+            Value::Null,
+            false,
+            &[("host", "mcp.example.com".into())],
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(metadata["error"], "gateway_host_mismatch");
+    for alias in [
+        "https://*.example.com",
+        "http://mcp.example.com",
+        "https://mcp.example.com/path",
+        "https://user:password@mcp.example.com",
+        "https://mcp.example.com?next=evil",
+        "https://mcp.example.com/",
+    ] {
+        let mut config = (*f.g.config).clone();
+        config.public_url_aliases = vec![alias.into()];
+        assert!(config.validate_oauth_policy().is_err(), "{alias}");
+    }
+    let config: GatewayConfig =
+        serde_json::from_value(serde_json::to_value(&*old.g.config).unwrap()).unwrap();
+    assert!(config.public_url_aliases.is_empty());
 }
 
 #[tokio::test]

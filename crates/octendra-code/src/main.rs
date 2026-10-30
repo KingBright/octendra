@@ -483,6 +483,7 @@ async fn main() -> Result<()> {
                 .hash_password(password.as_bytes(), &salt)?
                 .to_string();
             let c = GatewayConfig {
+                public_url_aliases: vec![],
                 forge_browser: None,
                 public_url,
                 bind,

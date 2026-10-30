@@ -23,6 +23,7 @@ impl Fixture {
             scopes: vec!["code:read".into(), "terminal:exec".into()],
         };
         let gateway = Gateway::new(GatewayConfig {
+            public_url_aliases: vec![],
             public_url: "https://fixture.invalid".into(),
             bind: "127.0.0.1:0".into(),
             state_dir: dir.path().join("state"),

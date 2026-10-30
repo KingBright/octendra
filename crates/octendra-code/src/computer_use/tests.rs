@@ -21,6 +21,7 @@ async fn typed_gateway_ack_to_four_k_existing_chunk_artifact_and_close() {
     .with_store(agent.store.clone());
     let gateway_state = tempfile::tempdir().unwrap();
     let mut gateway = Gateway::new(GatewayConfig {
+        public_url_aliases: vec![],
         public_url: "https://offline.invalid".into(),
         bind: "127.0.0.1:0".into(),
         state_dir: gateway_state.path().join("gateway"),
@@ -244,6 +245,7 @@ async fn desktop_export_one_429_or_disconnect_delivers_terminal_and_retires_fram
         .with_store(agent.store.clone());
         let gateway_state = tempfile::tempdir().unwrap();
         let mut gateway = Gateway::new(GatewayConfig {
+            public_url_aliases: vec![],
             public_url: "https://offline.invalid".into(),
             bind: "127.0.0.1:0".into(),
             state_dir: gateway_state.path().join("gateway"),

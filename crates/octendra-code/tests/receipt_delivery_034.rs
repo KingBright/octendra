@@ -43,6 +43,7 @@ async fn check_delivery_loss(commit_before_error: bool) {
     .unwrap();
     Arc::make_mut(&mut a.config).gateway_url = format!("http://{address}");
     let g = Gateway::new(GatewayConfig {
+        public_url_aliases: vec![],
         forge_browser: None,
         allowed_origins: octendra_code::default_mcp_client_origins(),
         public_url: format!("https://{address}"),

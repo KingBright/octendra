@@ -26,6 +26,7 @@ async fn fixture() -> (
     .await
     .unwrap();
     let g = crate::gateway::Gateway::new(GatewayConfig {
+        public_url_aliases: vec![],
         forge_browser: None,
         public_url: "https://fixture.invalid".into(),
         bind: "127.0.0.1:0".into(),

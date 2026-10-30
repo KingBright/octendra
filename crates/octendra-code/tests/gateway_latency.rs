@@ -24,6 +24,7 @@ async fn local_relay_latency() {
     let credential = random();
     let device = uuid::Uuid::new_v4().to_string();
     let g = Gateway::new(GatewayConfig {
+        public_url_aliases: vec![],
         forge_browser: None,
         allowed_origins: octendra_code::default_mcp_client_origins(),
         public_url: "https://bench.example".into(),

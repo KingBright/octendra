@@ -1368,6 +1368,7 @@ mod tests {
             epoch: uuid::Uuid::new_v4(),
         };
         let g = Gateway::new(crate::GatewayConfig {
+            public_url_aliases: vec![],
             public_url: "https://offline.invalid".into(),
             bind: "127.0.0.1:0".into(),
             state_dir: dir.path().join("gateway"),

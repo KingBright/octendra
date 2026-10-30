@@ -4,6 +4,7 @@ use crate::{DeviceRegistration, GatewayConfig, history_retention::Policy};
 async fn fixture() -> (tempfile::TempDir, Gateway) {
     let dir = tempfile::tempdir().unwrap();
     let g = Gateway::new(GatewayConfig {
+        public_url_aliases: vec![],
         forge_browser: None,
         public_url: "https://fixture.invalid".into(),
         bind: "127.0.0.1:0".into(),

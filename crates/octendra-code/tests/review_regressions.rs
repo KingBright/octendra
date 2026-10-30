@@ -18,6 +18,7 @@ async fn gateway() -> (tempfile::TempDir, Gateway, String) {
     let dir = tempfile::tempdir().unwrap();
     let credential = random();
     let gateway = Gateway::new(GatewayConfig {
+        public_url_aliases: vec![],
         forge_browser: None,
         allowed_origins: octendra_code::default_mcp_client_origins(),
         public_url: "https://review.example".into(),

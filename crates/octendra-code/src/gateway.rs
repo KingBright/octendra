@@ -303,12 +303,18 @@ impl Gateway {
         }
     }
     pub fn router(&self) -> Result<Router> {
-        let u = crate::validate_url(&self.config.public_url)?;
-        let authority = u[url::Position::BeforeHost..url::Position::AfterPort].to_string();
+        let authorities = self
+            .config
+            .public_urls()
+            .map(|origin| {
+                let url = crate::validate_url(origin)?;
+                Ok(url[url::Position::BeforeHost..url::Position::AfterPort].to_string())
+            })
+            .collect::<Result<Vec<_>>>()?;
         let config = StreamableHttpServerConfig::default()
             .with_stateful_mode(false)
             .with_json_response(true)
-            .with_allowed_hosts([authority])
+            .with_allowed_hosts(authorities)
             .with_allowed_origins(self.config.browser_origins());
         let gateway = self.clone();
         let service = StreamableHttpService::new(
@@ -2289,16 +2295,7 @@ async fn security_headers(
     request: Request,
     next: Next,
 ) -> Response {
-    let Ok(url) = reqwest::Url::parse(&config.public_url) else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    let expected = url[url::Position::BeforeHost..url::Position::AfterPort].to_string();
-    if request
-        .headers()
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        != Some(expected.as_str())
-    {
+    if config.public_url_for_request(request.headers()).is_none() {
         return security_rejection(StatusCode::BAD_REQUEST, "gateway_host_mismatch");
     }
     if let Some(origin) = request.headers().get(header::ORIGIN) {

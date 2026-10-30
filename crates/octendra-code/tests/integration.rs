@@ -76,6 +76,7 @@ async fn gateway(dir: &std::path::Path) -> (Gateway, String, String) {
         .to_string();
     let token = random();
     let config = GatewayConfig {
+        public_url_aliases: vec![],
         forge_browser: None,
         allowed_origins: octendra_code::default_mcp_client_origins(),
         public_url: "https://mcp.example.com:8443".into(),

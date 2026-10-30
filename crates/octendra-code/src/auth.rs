@@ -246,6 +246,21 @@ impl Auth {
             .route("/oauth/revoke", post(revoke))
             .with_state(self.clone())
     }
+    fn at_public_endpoint(&self, headers: &HeaderMap) -> Self {
+        let public_url = self
+            .config
+            .public_url_for_request(headers)
+            .unwrap_or(&self.config.public_url);
+        if public_url == self.config.public_url {
+            return self.clone();
+        }
+        let mut config = (*self.config).clone();
+        config.public_url = public_url.into();
+        Self {
+            config: Arc::new(config),
+            ..self.clone()
+        }
+    }
     pub async fn principal(&self, headers: &HeaderMap) -> Option<Principal> {
         let token = headers
             .get(header::AUTHORIZATION)?
@@ -257,7 +272,13 @@ impl Auth {
             .get(&oauth_state_kind("access", token), &hash(token))
             .await
             .ok()??;
-        if access.resource != format!("{}/mcp", self.config.public_url)
+        if access.resource
+            != format!(
+                "{}/mcp",
+                self.config
+                    .public_url_for_request(headers)
+                    .unwrap_or(&self.config.public_url)
+            )
             || self
                 .store
                 .get::<bool>("revoked", &access.family)
@@ -272,7 +293,7 @@ impl Auth {
         }
         Some(access.principal)
     }
-    pub fn challenge(&self) -> Response {
+    pub fn challenge(&self, headers: &HeaderMap) -> Response {
         let mut r = (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error":"unauthorized"})),
@@ -280,7 +301,10 @@ impl Auth {
             .into_response();
         if let Ok(v) = format!(
             "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource\", scope=\"{}\"",
-            self.config.public_url, SCOPES
+            self.config
+                .public_url_for_request(headers)
+                .unwrap_or(&self.config.public_url),
+            SCOPES
         )
         .parse()
         {
@@ -291,17 +315,19 @@ impl Auth {
 }
 pub async fn require_auth(State(auth): State<Auth>, mut req: Request, next: Next) -> Response {
     let Some(principal) = auth.principal(req.headers()).await else {
-        return auth.challenge();
+        return auth.challenge(req.headers());
     };
     req.extensions_mut().insert(principal);
     next.run(req).await
 }
-async fn resource_metadata(State(a): State<Auth>) -> Json<Value> {
+async fn resource_metadata(State(a): State<Auth>, headers: HeaderMap) -> Json<Value> {
+    let a = a.at_public_endpoint(&headers);
     Json(
         json!({"resource":format!("{}/mcp",a.config.public_url),"resource_name":crate::branding::NAME,"resource_documentation":format!("{}/status",a.config.public_url),"authorization_servers":[a.config.public_url],"scopes_supported":crate::SUPPORTED_SCOPES.split_whitespace().collect::<Vec<_>>(),"bearer_methods_supported":["header"]}),
     )
 }
-async fn auth_metadata(State(a): State<Auth>) -> Json<Value> {
+async fn auth_metadata(State(a): State<Auth>, headers: HeaderMap) -> Json<Value> {
+    let a = a.at_public_endpoint(&headers);
     let u = &a.config.public_url;
     Json(
         json!({"issuer":u,"service_documentation":format!("{u}/status"),"authorization_endpoint":format!("{u}/oauth/authorize"),"token_endpoint":format!("{u}/oauth/token"),"registration_endpoint":format!("{u}/oauth/register"),"revocation_endpoint":format!("{u}/oauth/revoke"),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["none","client_secret_basic","client_secret_post"],"revocation_endpoint_auth_methods_supported":["none","client_secret_basic","client_secret_post"],"code_challenge_methods_supported":["S256"],"scopes_supported":crate::SUPPORTED_SCOPES.split_whitespace().collect::<Vec<_>>(),"authorization_response_iss_parameter_supported":true}),
@@ -336,7 +362,12 @@ struct Pending {
     grant: Grant,
     state: String,
 }
-async fn authorize(State(a): State<Auth>, Query(q): Query<Authorize>) -> HttpResult<Response> {
+async fn authorize(
+    State(a): State<Auth>,
+    headers: HeaderMap,
+    Query(q): Query<Authorize>,
+) -> HttpResult<Response> {
+    let a = a.at_public_endpoint(&headers);
     if !a.limit("authorize", 60) {
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
@@ -469,6 +500,7 @@ async fn approve_request(
     headers: HeaderMap,
     Form(f): Form<Approval>,
 ) -> HttpResult<Response> {
+    let a = a.at_public_endpoint(&headers);
     if !a.allow_owner_password_attempt() {
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
@@ -503,7 +535,9 @@ async fn approve_request(
         .await
         .map_err(internal)?
         .ok_or_else(invalid)?;
-    if !redirect_uri_allowed(&a.config, &pending.grant.redirect_uri) {
+    if !redirect_uri_allowed(&a.config, &pending.grant.redirect_uri)
+        || pending.grant.resource != format!("{}/mcp", a.config.public_url)
+    {
         return Err(invalid());
     }
     let code = oauth_random(pending.grant.client_id.starts_with("rh2_"));
@@ -563,6 +597,7 @@ fn client_response(result: HttpResult<Json<Value>>) -> Response {
     response
 }
 async fn token_inner(a: Auth, headers: &HeaderMap, f: TokenRequest) -> HttpResult<Json<Value>> {
+    let a = a.at_public_endpoint(headers);
     if !a.limit("token", 120) {
         return Err((
             StatusCode::TOO_MANY_REQUESTS,

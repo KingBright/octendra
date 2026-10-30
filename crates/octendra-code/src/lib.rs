@@ -114,6 +114,9 @@ pub struct GatewayConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forge_browser: Option<forge_browser::ForgeBrowserConfig>,
     pub public_url: String,
+    /// Other exact HTTPS origins serving this same Gateway and OAuth state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub public_url_aliases: Vec<String>,
     pub bind: String,
     pub state_dir: PathBuf,
     pub owner: String,
@@ -135,6 +138,17 @@ impl GatewayConfig {
     /// Check client-facing policy without starting a service or opening its database.
     pub fn validate_oauth_policy(&self) -> Result<()> {
         validate_url(&self.public_url)?;
+        ensure!(
+            self.public_url_aliases.len() <= 8,
+            "too many public URL aliases"
+        );
+        for alias in &self.public_url_aliases {
+            validate_url(alias).context("public URL alias must be an exact HTTPS origin")?;
+            ensure!(
+                !alias.contains('*'),
+                "wildcard public URL aliases are not allowed"
+            );
+        }
         ensure!(self.allowed_origins.len() <= 32, "too many browser origins");
         ensure!(self.redirect_uris.len() <= 64, "too many OAuth callbacks");
         for origin in &self.allowed_origins {
@@ -149,12 +163,14 @@ impl GatewayConfig {
                     && !uri
                         .bytes()
                         .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
-                    && (u.scheme() == "https" || native_oauth_callback(uri))
+                    && (u.scheme() == "https"
+                        || native_oauth_callback(uri)
+                        || installed_oauth_callback(uri))
                     && u.host_str().is_some()
                     && u.username().is_empty()
                     && u.password().is_none()
                     && u.fragment().is_none(),
-                "OAuth callback must be exact HTTPS or a native loopback callback without userinfo or fragment"
+                "OAuth callback must be exact HTTPS or a supported native callback without userinfo or fragment"
             );
         }
         Ok(())
@@ -162,9 +178,40 @@ impl GatewayConfig {
     pub(crate) fn browser_origins(&self) -> Vec<String> {
         let mut origins = self.allowed_origins.clone();
         origins.push(self.public_url.clone());
+        origins.extend(self.public_url_aliases.iter().cloned());
         origins.sort();
         origins.dedup();
         origins
+    }
+    pub(crate) fn public_urls(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.public_url.as_str())
+            .chain(self.public_url_aliases.iter().map(String::as_str))
+    }
+    /// Only an explicitly configured Host selects an alias. Never trust forwarded headers.
+    pub(crate) fn public_url_for_request(&self, headers: &axum::http::HeaderMap) -> Option<&str> {
+        let hosts = headers.get_all(axum::http::header::HOST);
+        if hosts.iter().count() != 1 {
+            return None;
+        }
+        let Some(authority) = hosts
+            .iter()
+            .next()
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.contains('@'))
+            .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
+        else {
+            return None;
+        };
+        if authority.port().is_some() && authority.port_u16().is_none() {
+            return None;
+        }
+        self.public_urls().find(|origin| {
+            reqwest::Url::parse(origin).is_ok_and(|url| {
+                url.host_str()
+                    .is_some_and(|host| host.eq_ignore_ascii_case(authority.host()))
+                    && url.port_or_known_default() == Some(authority.port_u16().unwrap_or(443))
+            })
+        })
     }
     pub(crate) fn authorization_csp(&self) -> String {
         self.authorization_csp_for_callback(None)
@@ -176,6 +223,7 @@ impl GatewayConfig {
             .redirect_uris
             .iter()
             .filter_map(|uri| reqwest::Url::parse(uri).ok())
+            .filter(|uri| matches!(uri.scheme(), "https" | "http"))
             .map(|uri| uri.origin().ascii_serialization())
             .collect();
         // A validated grant contributes its concrete callback origin, never
@@ -197,6 +245,14 @@ impl GatewayConfig {
             .any(|origin| origin == "https://gemini.google.com")
         {
             origins.push("https://oauth-redirect.googleusercontent.com".into());
+        }
+        if callback == Some("cursor://anysphere.cursor-mcp/oauth/callback")
+            && self
+                .redirect_uris
+                .iter()
+                .any(|uri| Some(uri.as_str()) == callback)
+        {
+            origins.push("cursor:".into());
         }
         origins.sort();
         origins.dedup();
@@ -242,6 +298,14 @@ pub(crate) fn google_oauth_callback(candidate: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"-_.~".contains(&b))
 }
 
+/// Installed Cursor/Grok Bot callbacks are opt-in through exact configuration,
+/// unlike the automatically accepted IP-loopback callback family below.
+fn installed_oauth_callback(candidate: &str) -> bool {
+    matches!(
+        candidate,
+        "cursor://anysphere.cursor-mcp/oauth/callback" | "http://localhost:8787/callback"
+    )
+}
 /// Bounded native OAuth redirects. The concrete URI is still bound to the
 /// registered client and every authorization/code exchange; PKCE is mandatory.
 pub(crate) fn native_oauth_callback(candidate: &str) -> bool {
@@ -430,6 +494,7 @@ mod private_file_tests {
         let project_root = dir.path().join("workspace");
         std::fs::create_dir_all(&project_root).unwrap();
         let gw = GatewayConfig {
+            public_url_aliases: vec![],
             forge_browser: None,
             public_url: "https://mcp.example.com:8443".into(),
             bind: "127.0.0.1:18787".into(),

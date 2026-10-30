@@ -13,6 +13,7 @@ async fn gateway() -> (tempfile::TempDir, Gateway, Principal, String) {
     let temp = tempfile::tempdir().unwrap();
     let device = uuid::Uuid::new_v4().to_string();
     let g = Gateway::new(GatewayConfig {
+        public_url_aliases: vec![],
         forge_browser: None,
         allowed_origins: octendra_code::default_mcp_client_origins(),
         public_url: "https://maintenance.fixture".into(),

@@ -5,6 +5,7 @@ use tower::ServiceExt;
 
 fn router() -> Router {
     let config = GatewayConfig {
+        public_url_aliases: vec![],
         public_url: "https://fixture.invalid:8443".into(),
         bind: "127.0.0.1:0".into(),
         state_dir: PathBuf::new(),

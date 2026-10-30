@@ -184,6 +184,7 @@ async fn concurrent_duplicate_mutation_returns_one_durable_result() {
 async fn gateway(agent: &Agent, dir: &std::path::Path, origin: String) -> (Gateway, String) {
     let other = random();
     let g = Gateway::new(GatewayConfig {
+        public_url_aliases: vec![],
         forge_browser: None,
         allowed_origins: octendra_code::default_mcp_client_origins(),
         public_url: origin,

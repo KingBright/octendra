@@ -14,6 +14,7 @@ async fn gateway(scopes: &[&str]) -> (tempfile::TempDir, Gateway, String) {
     let dir = tempfile::tempdir().unwrap();
     let device = uuid::Uuid::new_v4().to_string();
     let g = Gateway::new(GatewayConfig {
+        public_url_aliases: vec![],
         public_url: "https://authorization-fixture.invalid".into(),
         bind: "127.0.0.1:0".into(),
         state_dir: dir.path().join("state"),

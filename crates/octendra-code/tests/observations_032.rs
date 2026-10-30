@@ -17,6 +17,7 @@ async fn fixture() -> (tempfile::TempDir, Gateway, Principal, String) {
     let d = tempfile::tempdir().unwrap();
     let token = random();
     let g = Gateway::new(GatewayConfig {
+        public_url_aliases: vec![],
         forge_browser: None,
         allowed_origins: octendra_code::default_mcp_client_origins(),
         public_url: "https://fixture.example".into(),

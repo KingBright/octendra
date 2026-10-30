@@ -32,6 +32,7 @@ impl Fixture {
         let root = d.path().join("root");
         std::fs::create_dir(&root).unwrap();
         let g = Gateway::new(GatewayConfig {
+            public_url_aliases: vec![],
             forge_browser: None,
             allowed_origins: octendra_code::default_mcp_client_origins(),
             public_url: format!("https://{addr}"),

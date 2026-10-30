@@ -145,6 +145,7 @@ mod tests {
     async fn drains_are_owned_expiring_and_do_not_change_services() {
         let d = tempfile::tempdir().unwrap();
         let g = Gateway::new(crate::GatewayConfig {
+            public_url_aliases: vec![],
             forge_browser: None,
             allowed_origins: crate::default_mcp_client_origins(),
             public_url: "https://example.test".into(),
