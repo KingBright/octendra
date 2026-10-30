@@ -13,6 +13,10 @@ def main():
     p=argparse.ArgumentParser();p.add_argument('--serial',required=True);p.add_argument('--gateway-binary',required=True,type=pathlib.Path)
     p.add_argument('--adb',default=str(pathlib.Path.home()/'Library/Android/sdk/platform-tools/adb'));a=p.parse_args()
     if not re.fullmatch(r'emulator-\d+',a.serial):raise SystemExit('dedicated Android emulator required; physical phones are never test fixtures')
+    try:
+        from PIL import Image
+    except ImportError:
+        raise SystemExit('Android acceptance needs Pillow in the test Python environment; install it in a virtual environment first.') from None
     adb=[a.adb,'-s',a.serial]
     def run(args,**kwargs):return subprocess.run(args,check=True,capture_output=True,timeout=120,**kwargs)
     def shell(*args):return run(adb+['shell',*args],text=True).stdout.strip()
@@ -50,7 +54,8 @@ def main():
         run(adb+['install','-r','-t',str(ROOT/'android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk')])
         result=run(adb+['shell','am','instrument','-w',PACKAGE+'.test/fun.hackerlife.octendra.AgentInstrumentation'],text=True).stdout
         (base/'runtime-checks.txt').write_text(result)
-        checked('android_keystore_sqlite_runtime_checks','8 runtime checks passed' in result)
+        runtime_checks = re.search(r'(\d+) runtime checks passed', result)
+        checked('android_keystore_sqlite_runtime_checks',runtime_checks is not None and int(runtime_checks[1]) >= 10)
         run(adb+['shell','pm','grant',PACKAGE,'android.permission.POST_NOTIFICATIONS'])
         previous=shell('settings','get','secure','enabled_accessibility_services')
         services=[] if previous in ('','null') else previous.split(':')
@@ -143,7 +148,6 @@ def main():
         png=client.read_artifact(artifact);(base/'probe.png').write_bytes(png)
         checked('binary_screenshot_download_verified',png.startswith(b'\x89PNG\r\n\x1a\n') and hashlib.sha256(png).hexdigest()==artifact['sha256'])
         import io
-        from PIL import Image
         def content_extrema(raw):
             with Image.open(io.BytesIO(raw)) as image:
                 image.load();width,height=image.size
@@ -202,6 +206,19 @@ def main():
         checked('release_launch_requested_through_gateway',launched.get('accepted') is True)
         time.sleep(1)
         running=shell('pidof','fun.hackerlife.octendra');checked('signed_release_launch_smoke',bool(running))
+        # The status page is intentionally capturable; only the expanded secret
+        # editor is secure. Open that actual boundary through the existing agent.
+        editor_opened=False
+        for _ in range(5):
+            observation,_=cmd('observe')
+            edit=next((node for node in observation.get('nodes',[]) if node.get('text')=='编辑连接配置'),None)
+            if edit is not None and observation.get('package')=='fun.hackerlife.octendra':
+                opened,_=cmd('click',{'observation_id':observation['observation_id'],'node_id':edit['id']})
+                if opened.get('accepted') is True:
+                    editor_opened=True;break
+            time.sleep(.3)
+        checked('configuration_editor_opened_through_gateway',editor_opened)
+        time.sleep(.3)
         for _ in range(10):
             result,_=cmd('screenshot')
             if str(result.get('error','')).startswith('screenshot_denied') or result.get('package')=='fun.hackerlife.octendra':break

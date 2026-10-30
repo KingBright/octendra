@@ -59,7 +59,7 @@ def main():
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--adb', default=str(Path.home() / 'Library/Android/sdk/platform-tools/adb'))
     parser.add_argument('--apksigner', type=Path, default=Path.home() / 'Library/Android/sdk/build-tools/36.1.0/apksigner')
-    parser.add_argument('--java-home', type=Path, default=Path('/Library/Java/JavaVirtualMachines/ibm-semeru-open-17.jdk/Contents/Home'))
+    parser.add_argument('--java-home', type=Path, default=Path('/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home'))
     args = parser.parse_args()
     payload = args.config.read_bytes()
     if not 0 < len(payload) <= 8192 or not isinstance(json.loads(payload), dict):
