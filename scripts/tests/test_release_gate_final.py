@@ -26,7 +26,7 @@ class FinalGateTests(unittest.TestCase):
             (crate/'Cargo.toml').write_text('[package]\nversion="0.0.1"\n')
             checkout = root/'checkout'
             checkout.mkdir()
-            manifest = {'snapshot_id': 'a'*64, 'source_inputs': {}}
+            manifest = {'snapshot_id': 'a'*64, 'source_inputs': {}, 'executable_files': []}
             proof = {'state':'passed', 'functional_tests': {'passed':1, 'failed':0}}
 
             @contextlib.contextmanager

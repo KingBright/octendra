@@ -17,7 +17,11 @@ MANIFEST = 'source-snapshot.json'
 def verifier(root):
     spec = importlib.util.spec_from_file_location('snapshot_source_verifier', root/'scripts/check-code-source.py')
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Input inspection must not create bytecode inside an owned fixed source.
+    # Compile the same module bytes directly instead of mutating global Python
+    # bytecode policy or letting SourceFileLoader write a cache beside them.
+    path = root/'scripts/check-code-source.py'
+    exec(compile(path.read_bytes(), str(path), 'exec'), module.__dict__)
     return module
 
 
