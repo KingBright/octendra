@@ -193,15 +193,12 @@ impl GatewayConfig {
         if hosts.iter().count() != 1 {
             return None;
         }
-        let Some(authority) = hosts
+        let authority = hosts
             .iter()
             .next()
             .and_then(|value| value.to_str().ok())
             .filter(|value| !value.contains('@'))
-            .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
-        else {
-            return None;
-        };
+            .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())?;
         if authority.port().is_some() && authority.port_u16().is_none() {
             return None;
         }
