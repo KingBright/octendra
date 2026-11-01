@@ -20,6 +20,7 @@ internal class ShellProviderConnection(private val activation: String, private v
     private val managerType = Class.forName("android.app.IActivityManager")
     private val manager = Class.forName("android.app.ActivityManager").getMethod("getService").invoke(null)
     private var acquired = false
+    private var provider: Any? = null
     fun open(): ParcelFileDescriptor {
         val uid = Process.myUid()
         demand(uid == 2000 || uid == 0, "shell_uid_required")
@@ -34,6 +35,7 @@ internal class ShellProviderConnection(private val activation: String, private v
                 "app_peer_uid_mismatch")
             val provider = holder.javaClass.getField("provider").get(holder)
                 ?: throw AgentError("bridge_provider_missing")
+            this.provider = provider
             val uri = Uri.parse("content://$authority/connect/$activation")
             val method = Class.forName("android.content.IContentProvider").methods.firstOrNull { m ->
                 m.name == "openFile" && m.parameterTypes.count { it == Uri::class.java } == 1 &&
@@ -65,12 +67,24 @@ internal class ShellProviderConnection(private val activation: String, private v
             throw (e.targetException as? Exception ?: e)
         } catch (e: Exception) { close(); throw e }
     }
+    @android.annotation.TargetApi(34)
+    fun attachUi(service: IBinder) {
+        val provider = provider ?: throw AgentError("bridge_provider_missing")
+        val method = Class.forName("android.content.IContentProvider").methods.first { m ->
+            m.name == "call" && m.parameterTypes.size == 5 && m.parameterTypes[0].name == "android.content.AttributionSource"
+                && m.parameterTypes.last() == android.os.Bundle::class.java
+        }
+        val extras = android.os.Bundle().apply { putBinder("service",service) }
+        val result = method.invoke(provider,attribution(Process.myUid(),"com.android.shell"),authority,"ui",activation,extras) as? android.os.Bundle
+        demand(result?.getBoolean("attached") == true, "shell_ui_attach_rejected")
+    }
     @android.annotation.TargetApi(31)
     private fun attribution(uid: Int, packageName: String): Any =
         AttributionSource.Builder(uid).setPackageName(packageName).build()
     override fun close() {
         if (!acquired) return
         acquired = false
+        provider = null
         runCatching {
             managerType.getMethod("removeContentProviderExternalAsUser", String::class.java,
                 IBinder::class.java, Int::class.javaPrimitiveType).invoke(manager, authority, token, user)

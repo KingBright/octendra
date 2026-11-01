@@ -1,0 +1,15 @@
+Mika
+Copyright 2026 wangzan101
+Licensed under the Apache License, Version 2.0.
+
+Octendra adapts ShellContext.kt and selected virtual-display integration from
+wangzan101/Mika commit 29307104cdbb0c52754ee21da3a7b25ce28f937f (v0.1.30).
+Changes: Octendra package/UID checks, existing local Binder bridge, strict own-focus
+display creation and device-neutral observe/act adapters. Mika's AI/task runtime
+and network MCP server are not included.
+
+ShellContext contains portions adapted from scrcpy:
+Copyright (C) 2018 Genymobile
+Copyright (C) 2018-2024 Romain Vimont
+https://github.com/Genymobile/scrcpy
+Apache License, Version 2.0. Original source notices are retained in ShellUiContext.kt.

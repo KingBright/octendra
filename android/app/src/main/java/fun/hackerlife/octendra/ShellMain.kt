@@ -23,6 +23,7 @@ object ShellMain {
         var providerConnection: ShellProviderConnection? = null
         var pipeInput: InputStream? = null
         var pipeOutput: OutputStream? = null
+        var ui: ShellUiService? = null
         val worker = Executors.newSingleThreadExecutor()
         val active = AtomicReference<java.lang.Process?>()
         val busy = java.util.concurrent.Semaphore(1)
@@ -39,6 +40,14 @@ object ShellMain {
             val input = DataInputStream(pipeInput)
             val output = DataOutputStream(pipeOutput)
             ShellBridge.writeFrame(output, obj("protocol" to 1, "uid" to uid, "pid" to Process.myPid()))
+            if (android.os.Build.VERSION.SDK_INT >= 34 && uid == 2000) {
+                val service = ShellUiService(appUid)
+                try { bootstrap.attachUi(service); ui = service }
+                catch (error: Exception) {
+                    service.close()
+                    System.err.println("OCTENDRA_UI_UNAVAILABLE type=${error.javaClass.simpleName}")
+                }
+            }
             stage = "session"
             System.err.println("OCTENDRA_HELPER_CONNECTED")
             while (true) {
@@ -113,6 +122,7 @@ object ShellMain {
                 System.err.println("OCTENDRA_DEBUG_BOOTSTRAP: $diagnostic")
             }
         } finally {
+            runCatching { ui?.close() }
             runCatching { pipeInput?.close() }; runCatching { pipeOutput?.close() }; runCatching { descriptor?.close() }
             active.getAndSet(null)?.destroyForcibly(); worker.shutdownNow()
             runCatching { providerConnection?.close() }

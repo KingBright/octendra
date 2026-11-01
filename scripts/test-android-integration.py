@@ -4,13 +4,15 @@
 Requires the separate debug APK and its test APK built by build-android.py. The shipped
 release APK has neither fixture Activity, instrumentation, nor test CA configuration.
 """
-import argparse, hashlib, http.cookiejar, json, os, pathlib, re, shlex, socket, ssl, subprocess, sys, time, urllib.request, uuid
+import argparse, base64, hashlib, http.cookiejar, json, os, pathlib, re, shlex, socket, ssl, subprocess, sys, time, urllib.request, uuid
 from release_client import Client, NoRedirect
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 PACKAGE='fun.hackerlife.octendra.debug'
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('--serial',required=True);p.add_argument('--gateway-binary',required=True,type=pathlib.Path)
+    p.add_argument('--install-fixture-apk',type=pathlib.Path,default=ROOT/'android/app/build/outputs/apk/release/app-release.apk',
+                   help='Existing owner-signed APK used only to test file transfer/installation; not evidence that the tested debug source was signed.')
     p.add_argument('--adb',default=str(pathlib.Path.home()/'Library/Android/sdk/platform-tools/adb'));a=p.parse_args()
     if not re.fullmatch(r'emulator-\d+',a.serial):raise SystemExit('dedicated Android emulator required; physical phones are never test fixtures')
     try:
@@ -80,6 +82,8 @@ def main():
             if instrument.poll() is not None:raise RuntimeError('fixture instrumentation exited; inspect its log')
             time.sleep(1)
         checked('android_registered_online_via_tls',selected is not None)
+        registered=next(d for d in json.loads(cfg.read_text())['devices'] if d['id']==device)
+        checked('unified_ui_reuses_existing_device_scopes',not any(s.startswith('desktop:') for s in registered['scopes']))
         root=selected['capabilities']['roots'][0]
         ws=client.tool('workspace_open',{'device_id':device,'root':root,'idempotency_key':runid+'-workspace'})['workspace']['id']
         counter=0
@@ -156,6 +160,55 @@ def main():
                 return image.size,box,image.convert('RGB').crop(box).getextrema()
         normal_size,normal_box,normal_extrema=content_extrema(png)
         checked('ordinary_screen_has_visible_pixels',max(high for low,high in normal_extrema)>32)
+        # Shared UI tools use the real MCP boundary and native image blocks,
+        # without an Android command string, workspace or caller-managed lease.
+        def ui(name,arguments):
+            response=client.rpc('tools/call',{'name':name,'arguments':arguments})
+            value=response.get('structuredContent',{})
+            operation=value.get('operation_id');end=time.monotonic()+60
+            while value.get('pending'):
+                if not operation or time.monotonic()>end:raise AssertionError('ui_operation_observation_timeout')
+                response=client.rpc('tools/call',{'name':'operation_get','arguments':{'operation_id':operation,'wait_ms':5000}})
+                value=response.get('structuredContent',{})
+            images=[block for block in response.get('content',[]) if block.get('type')=='image']
+            if images:
+                image=images[0];raw=base64.b64decode(image['data'],validate=True)
+                with Image.open(io.BytesIO(raw)) as decoded:
+                    decoded.load()
+                    metadata=value.get('observation',value)['image']
+                    checked('unified_ui_native_image_dimensions',list(decoded.size)==[metadata['width'],metadata['height']],width=decoded.width,height=decoded.height)
+                checked('unified_ui_base64_not_repeated_as_text',all(image['data'] not in block.get('text','') for block in response.get('content',[])))
+                (base/'unified-ui.jpg').write_bytes(raw)
+            return value
+        observed=ui('ui_observe',{'device':device})
+        checked('unified_ui_observe_phone',observed.get('view')=='display:0' and len(observed.get('elements',[]))>=4)
+        checked('unified_ui_password_redaction','fixture-sensitive-value' not in json.dumps(observed))
+        editor=next(n for n in observed['elements'] if n.get('description')=='fixture-input')
+        filled=ui('ui_act',{'device':device,'observation_id':observed['observation_id'],
+            'action':{'type':'fill','target':{'ref':editor['ref']},'text':'统一界面'}})
+        checked('unified_ui_fill_replaces',any(n.get('text')=='统一界面' for n in filled.get('observation',{}).get('elements',[])))
+        observed=filled['observation'];editor=next(n for n in observed['elements'] if n.get('description')=='fixture-input')
+        insertion={'device':device,'observation_id':observed['observation_id'],'action':{'type':'type_text','target':{'ref':editor['ref']},'text':'中文🙂'},'idempotency_key':runid+'-ui-insert'}
+        inserted=ui('ui_act',insertion)
+        text=next(n.get('text','') for n in inserted.get('observation',{}).get('elements',[]) if n.get('description')=='fixture-input')
+        checked('unified_ui_unicode_insert_preserves_existing','统一界面' in text and '中文🙂' in text and len(text)==7)
+        duplicate=ui('ui_act',insertion)
+        checked('unified_ui_journal_deduplicates_input',duplicate.get('operation_id')==inserted.get('operation_id'))
+        observed=ui('ui_observe',{'device':device})
+        editor=next(n for n in observed['elements'] if n.get('description')=='fixture-input')
+        time.sleep(31)  # Prove thinking time does not expire a unified UI session.
+        long_think=ui('ui_act',{'device':device,'observation_id':observed['observation_id'],
+            'action':{'type':'fill','target':{'ref':editor['ref']},'text':'长思考后仍可操作'}})
+        checked('unified_ui_no_thirty_second_thinking_lease',any(n.get('text')=='长思考后仍可操作' for n in long_think.get('observation',{}).get('elements',[])))
+        observed=long_think['observation']
+        button=next(n for n in observed['elements'] if (n.get('text') or '').casefold()=='apply fixture text' and n.get('class')=='android.widget.Button')
+        left,top,right,bottom=button['bounds']
+        clicked=ui('ui_act',{'device':device,'observation_id':observed['observation_id'],
+            'action':{'type':'click','target':{'x':(left+right)/2,'y':(top+bottom)/2}}})
+        checked('unified_ui_scaled_image_click_has_real_effect',any(n.get('text')=='已确认：长思考后仍可操作' for n in clicked.get('observation',{}).get('elements',[])))
+        observed=ui('ui_observe',{'device':device});cmd('observe')
+        refused=ui('ui_act',{'device':device,'observation_id':observed['observation_id'],'action':{'type':'go_home'}})
+        checked('unified_ui_stale_returns_fresh_without_input',refused.get('error')=='stale_observation' and refused.get('input_sent') is False and bool(refused.get('observation',{}).get('observation_id')))
         try:
             imported=client.tool('file_upload',{'workspace_id':ws,'path':'roundtrip/probe.png','file':{'file_id':'fixture-'+runid,'download_url':artifact['download_url']},'sha256':artifact['sha256'],'idempotency_key':runid+'-upload'})
             checked('binary_file_upload_verified',imported.get('sha256')==artifact['sha256'] and imported.get('atomic') is True)
@@ -184,6 +237,63 @@ def main():
         (base/'helper-startup.txt').write_text(helper_diagnostic)
         checked('builtin_shell_bridge_activated',status.get('shell_connected') is True and status.get('shell_uid')==2000)
         identity,_=cmd('shell',{'command':'id'});checked('real_adb_shell_uid',identity.get('exit_code')==0 and 'uid=2000' in identity.get('output',''))
+        background=ui('ui_observe',{'device':device,'view':'background'})
+        checked('unified_ui_background_has_own_display',background.get('source',{}).get('kind')=='ai_display' and background['source']['display_id']>0)
+        background_view=background['view'];generation=background['source']['generation']
+        launched=ui('ui_act',{'device':device,'observation_id':background['observation_id'],'action':{'type':'launch_app','app':'com.android.settings'}})
+        checked('unified_ui_background_launch_accepted',launched.get('accepted') is True)
+        for _ in range(10):
+            background=ui('ui_observe',{'device':device,'view':background_view})
+            if background.get('package')=='com.android.settings':break
+            time.sleep(.3)
+        checked('unified_ui_background_semantic_tree',background.get('package')=='com.android.settings' and len(background.get('elements',[]))>3)
+        main,_=cmd('observe')
+        checked('unified_ui_background_did_not_move_main_app',main.get('package')==PACKAGE)
+        # Reading main must not invalidate a separate background observation.
+        row=next((n for n in background['elements'] if n.get('text')=='Network & internet'),None)
+        if row is None:row=next(n for n in background['elements'] if n.get('clickable') and n.get('enabled') and n.get('visible'))
+        def semantic_screen(value):return [(n.get('text'),n.get('description'),n.get('class')) for n in value.get('elements',[])]
+        before=semantic_screen(background)
+        offscreen=ui('ui_act',{'device':device,'observation_id':background['observation_id'],'action':{'type':'click','target':{'ref':row['ref']}}})
+        checked('unified_ui_display_observations_are_independent',offscreen.get('accepted') is True)
+        for _ in range(10):
+            after=ui('ui_observe',{'device':device,'view':background_view})
+            if semantic_screen(after)!=before:break
+            time.sleep(.2)
+        checked('unified_ui_background_click_has_real_effect',semantic_screen(after)!=before)
+        back_state=after
+        for _ in range(2):
+            back=ui('ui_act',{'device':device,'observation_id':back_state['observation_id'],'action':{'type':'navigate_back'}})
+            if back.get('error')!='stale_observation' or back.get('input_sent') is not False:break
+            back_state=back['observation']
+        checked('unified_ui_background_native_key_delivered',back.get('accepted') is True)
+        main,_=cmd('observe');checked('unified_ui_background_click_kept_main',main.get('package')==PACKAGE)
+        background=ui('ui_observe',{'device':device,'view':background_view})
+        protected=ui('ui_act',{'device':device,'observation_id':background['observation_id'],'action':{'type':'launch_app','app':PACKAGE}})
+        checked('unified_ui_main_app_not_stolen_by_background',protected.get('error')=='app_in_use_on_main' and protected.get('input_sent') is False)
+        report['unified_ui_background']={'view':background_view,'generation':generation,'main_app_preserved':True,'real_time_video_tested':False}
+        original=ui('ui_observe',{'device':device,'view':background_view})
+        uid=int(re.search(r'uid:(\d+)',shell('cmd','package','list','packages','-U',PACKAGE))[1])
+        helper_pids=[]
+        for line in shell('ps','-A','-o','PID,ARGS').splitlines():
+            match=re.fullmatch(r'\s*(\d+)\s+.*\bfun\.hackerlife\.octendra\.ShellMain\s+octendra-\d+-[a-f0-9]{32}\s+(\d+)\s*',line)
+            if match and int(match[2])==uid:helper_pids.append(match[1])
+        checked('unified_ui_recovery_helper_is_owned_fixture',len(helper_pids)==1)
+        shell('kill','-TERM',helper_pids[0])
+        for _ in range(20):
+            status,_=cmd('status')
+            if not status.get('shell_connected'):break
+            time.sleep(.1)
+        checked('unified_ui_helper_loss_observed',status.get('shell_connected') is False)
+        run(['python3',str(ROOT/'scripts/android-activate-shell.py'),'--adb',a.adb,'--serial',a.serial,'--package',PACKAGE,'--diagnostic-log',helper_log])
+        recovered=ui('ui_act',{'device':device,'observation_id':original['observation_id'],'action':{'type':'go_home'}})
+        checked('unified_ui_helper_recovery_never_replays_old_action',recovered.get('error')=='stale_observation' and recovered.get('input_sent') is False and
+                recovered.get('observation',{}).get('source',{}).get('generation') not in (None,generation))
+        reconnect,_=cmd('reconnect');checked('unified_ui_network_generation_recovered',reconnect.get('network_generation',0)>0)
+        duplicate=ui('ui_act',insertion)
+        checked('unified_ui_retry_after_reconnect_kept_original_operation',duplicate.get('operation_id')==inserted.get('operation_id'))
+        current=ui('ui_observe',{'device':device})
+        checked('unified_ui_retry_did_not_reinsert_text',any(n.get('text')=='长思考后仍可操作' for n in current.get('elements',[])))
         source='/data/local/tmp/octendra-counter-'+runid;repeatkey=runid+'-repeat'
         first,firstmeta=cmd('shell',{'command':'echo once >> '+source},key=repeatkey)
         second,secondmeta=cmd('shell',{'command':'echo once >> '+source},key=repeatkey)
@@ -193,7 +303,7 @@ def main():
         checked('shell_file_pull',pulled.get('exit_code')==0 and pulled.get('size')==5)
         text=client.tool('code_read',{'workspace_id':ws,'requests':[{'path':'fixtures/counter.txt','start_line':1,'end_line':3}]})
         checked('shared_file_text_read',text['ranges'][0]['text'].strip()=='once')
-        apk=ROOT/'android/app/build/outputs/apk/release/app-release.apk';apkhash=hashlib.sha256(apk.read_bytes()).hexdigest()
+        apk=a.install_fixture_apk.resolve(strict=True);apkhash=hashlib.sha256(apk.read_bytes()).hexdigest()
         remote_apk=root+'/fixtures/release.apk'
         run(adb+['shell','run-as',PACKAGE,'sh','-c',shlex.quote('cat > '+shlex.quote(remote_apk))],input=apk.read_bytes())
         installed,_=cmd('install',{'path':'fixtures/release.apk','sha256':apkhash})
@@ -202,6 +312,7 @@ def main():
         installed_hash,_=cmd('shell',{'command':'sha256sum '+shlex.quote(installed_path)})
         checked('installed_release_apk_bytes_match',installed_hash.get('exit_code')==0 and installed_hash.get('output','').split()[0]==apkhash)
         report['release_apk_tested_as_install_target']=True;report['release_apk_sha256']=apkhash
+        report['install_fixture_apk']=str(apk);report['install_fixture_is_debug_source_signing_evidence']=False
         launched,_=cmd('launch',{'package':'fun.hackerlife.octendra'})
         checked('release_launch_requested_through_gateway',launched.get('accepted') is True)
         time.sleep(1)

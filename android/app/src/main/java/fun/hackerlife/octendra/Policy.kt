@@ -79,10 +79,12 @@ object Policy {
         return u
     }
     fun error(t: Throwable): JSONObject {
-        val e = (t as? java.util.concurrent.ExecutionException)?.cause ?: t
+        var e = t
+        while ((e is java.util.concurrent.ExecutionException || e is java.lang.reflect.InvocationTargetException) && e.cause != null) e = e.cause!!
         val code = when (e) {
             is AgentError -> e.code
             is SecurityException -> "android_permission_denied"
+            is ReflectiveOperationException -> "android_api_unavailable"
             is HttpFailure -> "gateway_http_${e.status}"
             is org.json.JSONException -> "invalid_protocol_field"
             is android.system.ErrnoException -> "android_filesystem_errno_${e.errno}"

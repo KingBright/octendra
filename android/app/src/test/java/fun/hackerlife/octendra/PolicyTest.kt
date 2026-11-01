@@ -5,6 +5,15 @@ import org.junit.Assert.*
 import java.nio.file.Files
 
 class PolicyTest {
+    @Test fun wrappedPlatformErrorsRetainTheirActualBoundaryWithoutLeakingMessages() {
+        val denied = Policy.error(java.util.concurrent.ExecutionException(java.lang.reflect.InvocationTargetException(SecurityException("private input"))))
+        assertEquals("android_permission_denied",denied.getString("error"))
+        assertEquals("SecurityException",denied.getString("cause_type"))
+        assertFalse(denied.toString().contains("private input"))
+        val unsupported = Policy.error(java.lang.reflect.InvocationTargetException(NoSuchMethodException("private symbol")))
+        assertEquals("android_api_unavailable",unsupported.getString("error"))
+        assertFalse(unsupported.toString().contains("private symbol"))
+    }
     private fun denied(f: () -> Unit) { try { f(); fail("must reject") } catch (_: AgentError) {} }
     @Test fun originStrict() {
         assertEquals("https://example.com:8443", Policy.origin(" https://example.com:8443/ "))

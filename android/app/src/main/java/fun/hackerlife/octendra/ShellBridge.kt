@@ -38,6 +38,8 @@ class ShellBridge(private val context: Context) {
     @Volatile private var channel: Channel? = null
     @Volatile var socketName: String? = null; private set
     @Volatile var uid: Int? = null; private set
+    @Volatile private var ui: IUiShell? = null
+    private val uiReady = java.lang.Object()
     private val commandLock = Any()
     @Synchronized fun open() {
         if (socketName != null) return
@@ -61,6 +63,7 @@ class ShellBridge(private val context: Context) {
                 synchronized(this@ShellBridge) {
                     demand(channel === candidate && socketName == name && controls(context).getBoolean("shell_enabled", false), "activation_revoked")
                     candidate.authenticated = true; uid = peerUid
+                    synchronized(uiReady) { uiReady.notifyAll() }
                 }
                 AgentRuntime.changed()
             } catch (_: Exception) {
@@ -71,10 +74,33 @@ class ShellBridge(private val context: Context) {
     }
     @Synchronized private fun discard(candidate: Channel) {
         if (channel === candidate) {
-            channel = null; uid = null; socketName = null
+            channel = null; uid = null; socketName = null; ui = null
+            synchronized(uiReady) { uiReady.notifyAll() }
             if (controls(context).getBoolean("shell_enabled", false)) open()
         }
         candidate.close(); AgentRuntime.changed()
+    }
+    @Synchronized fun attachUi(name: String, peerUid: Int, binder: android.os.IBinder) {
+        demand(name == socketName && channel?.peerUid == peerUid && controls(context).getBoolean("shell_enabled",false), "activation_expired")
+        ui = IUiShell.Stub.asInterface(binder)
+        synchronized(uiReady) { uiReady.notifyAll() }
+    }
+    fun ui(): IUiShell? = ui?.takeIf { connected() && it.asBinder().isBinderAlive }
+    fun awaitUi(timeoutMs: Long = 2000): IUiShell? {
+        val deadline = android.os.SystemClock.elapsedRealtime()+timeoutMs
+        while (true) {
+            ui()?.let { return it }
+            if (!AgentRuntime.running || !controls(context).getBoolean("remote_enabled",false) ||
+                !controls(context).getBoolean("shell_enabled",false)) return null
+            val left = deadline-android.os.SystemClock.elapsedRealtime()
+            if (left <= 0) return ui()
+            // Do not call connected()/discard while holding this monitor:
+            // attachment and teardown already hold the bridge's own monitor.
+            synchronized(uiReady) {
+                val ready = ui?.asBinder()?.isBinderAlive == true && channel?.authenticated == true && channel?.closed == false
+                if (!ready) uiReady.wait(left)
+            }
+        }
     }
     fun connected(): Boolean {
         val current = channel ?: return false
@@ -137,7 +163,8 @@ class ShellBridge(private val context: Context) {
     }
     /** Deliberately not under commandLock: Stop interrupts in-flight reads. */
     @Synchronized fun close() {
-        socketName = null; uid = null
+        socketName = null; uid = null; ui = null
+        synchronized(uiReady) { uiReady.notifyAll() }
         val previous = channel; channel = null
         previous?.close(); AgentRuntime.changed()
     }

@@ -10,10 +10,13 @@ class Dispatcher(private val context: Context, private val config: GatewayConfig
     private val root = exposedRoot(context, config)
     private val files = FileTools(context, transport)
     private val packages = PackageActions(context)
+    private val ui = UiController(context, config)
+    fun close() { ui.close() }
     fun perform(job: JSONObject): JSONObject {
         demand(AgentRuntime.running && controls(context).getBoolean("remote_enabled", false), "stopped_locally")
         demand(job.getString("device_id") == config.deviceId, "wrong_device")
         val args = job.getJSONObject("arguments"); val owner = job.getString("owner"); val tool = job.getString("tool"); val id = Policy.uuid(job.getString("id"))
+        if (tool == "ui_observe" || tool == "ui_act") return ui.perform(job)
         if (tool == "workspace_open") {
             demand(args.getString("device_id") == config.deviceId && File(args.getString("root")).canonicalFile == root, "root_not_authorized")
             val ws = config.deviceId + ":" + UUID.randomUUID()
@@ -76,6 +79,7 @@ class Dispatcher(private val context: Context, private val config: GatewayConfig
         "network_monitoring" to AgentRuntime.networkMonitoring, "network_generation" to transport.generation,
         "shell_enabled_locally" to controls(context).getBoolean("shell_enabled", false), "shell_connected" to (AgentRuntime.bridge?.connected() == true),
         "shell_uid" to AgentRuntime.bridge?.uid, "shared_root" to root.path, "max_file_bytes" to Policy.MAX_FILE,
+        "background_ui_ready" to (AgentRuntime.bridge?.ui() != null),
         "permissions_are_independent" to true, "transfer_resume" to false, "continuous_recording" to false,
         "connection_diagnostics" to AgentRuntime.connectionDiagnostics?.let { JSONObject(it.snapshot()) })
     private fun command(text: String, id: String): JSONObject {

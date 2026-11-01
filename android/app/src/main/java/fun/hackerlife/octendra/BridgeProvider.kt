@@ -17,6 +17,15 @@ class BridgeProvider : ContentProvider() {
     private val provisioner = Executors.newSingleThreadExecutor()
     private val provisioning = AtomicBoolean(false)
     override fun onCreate() = true
+    override fun call(method: String, arg: String?, extras: android.os.Bundle?): android.os.Bundle {
+        val caller = Binder.getCallingUid()
+        if (method != "ui" || (caller != 2000 && caller != 0)) throw SecurityException("shell_uid_required")
+        val ctx = context ?: throw SecurityException("unavailable")
+        if (!controls(ctx).getBoolean("shell_enabled",false)) throw SecurityException("local_shell_consent_required")
+        val bridge = AgentRuntime.bridge ?: throw SecurityException("start_agent_first")
+        bridge.attachUi(arg ?: "",caller,extras?.getBinder("service") ?: throw SecurityException("ui_binder_required"))
+        return android.os.Bundle().apply { putBoolean("attached",true) }
+    }
     override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor {
         val caller = Binder.getCallingUid()
         if (caller != 2000 && caller != 0 && caller != Process.myUid()) throw SecurityException("shell_or_owner_uid_required")

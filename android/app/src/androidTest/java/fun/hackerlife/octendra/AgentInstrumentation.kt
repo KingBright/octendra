@@ -26,6 +26,10 @@ class AgentInstrumentation : Instrumentation() {
                     try { targetContext.contentResolver.openFileDescriptor(android.net.Uri.parse("content://${BuildConfig.APPLICATION_ID}.bridge/provision"), "w")?.close() }
                     catch (_: SecurityException) { rejected = true }
                     check(rejected); passed++
+                    rejected = false
+                    try { targetContext.contentResolver.call(android.net.Uri.parse("content://${BuildConfig.APPLICATION_ID}.bridge"),"ui","invalid",Bundle().apply { putBinder("service",android.os.Binder()) }) }
+                    catch (_: SecurityException) { rejected = true }
+                    check(rejected); passed++
                 } finally { prefs.edit().also { edit -> before.forEach { (key, value) -> edit.putBoolean(key, value) } }.commit() }
             } finally { if (old != null) store.write(old) else store.erase() }
             val db = Journal(targetContext, c)
@@ -40,6 +44,14 @@ class AgentInstrumentation : Instrumentation() {
                 val ws = c.deviceId + ":" + UUID.randomUUID(); db.putWorkspace(ws, "fixture", targetContext.filesDir)
                 denied = false; try { db.workspace(ws, "other") } catch (_: AgentError) { denied = true }; check(denied); passed++
             } finally { val path = db.databaseName; db.close(); targetContext.deleteDatabase(path) }
+            val random = java.util.Random(17)
+            val bitmap = android.graphics.Bitmap.createBitmap(IntArray(1280*1280) { random.nextInt() or (0xff shl 24) },1280,1280,android.graphics.Bitmap.Config.ARGB_8888)
+            try {
+                val image = UiImage.encode(bitmap)
+                val bytes = android.util.Base64.decode(image.getString("data"),android.util.Base64.NO_WRAP)
+                check(bytes.size <= 112*1024 && image.toString().toByteArray().size < 160*1024)
+                check(bytes[0] == 0xff.toByte() && bytes[1] == 0xd8.toByte()); passed++
+            } finally { bitmap.recycle() }
             report.putString("stream", "\nOctendra Android: $passed runtime checks passed\n")
             report.putInt("passed", passed); finish(Activity.RESULT_OK, report)
         } catch (e: Throwable) { report.putString("stream", "\nFAILED after $passed checks: ${e.javaClass.simpleName}: ${e.message}\n"); finish(Activity.RESULT_CANCELED, report) }

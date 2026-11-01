@@ -90,7 +90,7 @@ class AgentService : Service() {
             Log.i("OctendraConnection", "channel=lifecycle event=service_started")
             AgentRuntime.bridge = ShellBridge(this); updateBridge()
             val dispatcher = Dispatcher(this, config, db, net)
-            workers.submit { poll(net, db, dispatcher) }
+            workers.submit { try { poll(net, db, dispatcher) } finally { dispatcher.close() } }
             workers.submit { heartbeat(net) }
             workers.submit { receipts(net, db) }
             diagnosticsWorker.scheduleAtFixedRate({ diagnostics.reportStalls() }, 15, 15, TimeUnit.SECONDS)
@@ -102,9 +102,10 @@ class AgentService : Service() {
     }
     private fun updateBridge() { if (controls(this).getBoolean("shell_enabled", false)) AgentRuntime.bridge?.open() else AgentRuntime.bridge?.close() }
     private fun hello(): JSONObject {
-        val features = mutableListOf("android_commands_v1", "android_durable_receipts_v1", "android_files_v1", "android_network_recovery_v1")
+        val features = mutableListOf("android_commands_v1", "android_durable_receipts_v1", "android_files_v1", "android_network_recovery_v1", "unified_ui_v1")
         if (AccessService.instance != null) features += "android_accessibility_v1"
         if (AgentRuntime.bridge?.connected() == true) features += "android_shell_bridge_v1"
+        if (AgentRuntime.bridge?.ui() != null) features += "android_background_ui_v1"
         return obj("version" to BuildConfig.VERSION_NAME, "wire_protocol" to 2, "platform" to "android", "arch" to Build.SUPPORTED_ABIS.firstOrNull(),
             "build_revision" to BuildConfig.BUILD_REVISION.takeIf { it.isNotEmpty() },
             "home_dir" to exposedRoot(this, config).path, "session" to session, "roots" to arr(listOf(exposedRoot(this, config).path)),
