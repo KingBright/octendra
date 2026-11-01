@@ -1,5 +1,9 @@
 # One UI interface for computers and phones
 
+The next platform implementation and separate Octendra / Weavelo tasks are
+documented in [the platform plan](ui-platform-implementation-plan.md). That plan
+describes proposed work; the behavior below describes the current implementation.
+
 Use the same two tools on every device:
 
 ```json
