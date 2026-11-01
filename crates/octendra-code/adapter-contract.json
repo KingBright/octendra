@@ -1,10 +1,669 @@
 {
-  "adapter_tools_sha256": "b5a227d127eb4bbce757734dd05fe2f9a59fa3e4033e745a03cdb9e9f5d84c63",
+  "adapter_tools_sha256": "ced997a20d073eebc7cbe6de7bcea0e70d72e20bda43dca0194dae69d653972c",
   "boundary": "Adapter-sent catalog is not proof of final host exposure. No final host report means unknown.",
   "protocol": 1,
-  "server_tools_sha256": "b5a227d127eb4bbce757734dd05fe2f9a59fa3e4033e745a03cdb9e9f5d84c63",
+  "server_tools_sha256": "ced997a20d073eebc7cbe6de7bcea0e70d72e20bda43dca0194dae69d653972c",
   "skill_revision": "1267168eacea3f31ff8247185d5d48c2d9d0ba8d038c759275bf97d544e7b208",
   "tools": [
+    {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Observe a computer or phone using one interface. Select device by name or ID; view defaults to active. Returns an image, observation_id, element refs where supported, and actual capabilities/readiness. No workspace, task, session or lease setup. Coordinates refer to pixels in the returned image.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "device": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "response_mode": {
+            "default": "compact",
+            "description": "MCP envelope view; compact is the default. full restores diagnostic metadata.",
+            "enum": [
+              "full",
+              "compact"
+            ],
+            "type": "string"
+          },
+          "view": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "device"
+        ],
+        "type": "object"
+      },
+      "name": "ui_observe",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      }
+    },
+    {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "code:read",
+              "terminal:exec"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Act on a computer or phone observation. Send one semantic action; a fresh observation/image follows by default. Prefer returned element refs; otherwise use image-pixel x/y. type_text inserts, fill replaces. Unsupported actions report actual alternatives. Sessions and native leases are internal. On an uncertain outcome observe the original operation_id; never replay input.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "target": {
+                    "additionalProperties": false,
+                    "description": "Use either an element ref from this observation, or x/y in its returned image.",
+                    "oneOf": [
+                      {
+                        "required": [
+                          "ref"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "x",
+                          "y"
+                        ]
+                      }
+                    ],
+                    "properties": {
+                      "ref": {
+                        "type": "string"
+                      },
+                      "x": {
+                        "minimum": 0,
+                        "type": "number"
+                      },
+                      "y": {
+                        "minimum": 0,
+                        "type": "number"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "click",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "target"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "target": {
+                    "additionalProperties": false,
+                    "description": "Use either an element ref from this observation, or x/y in its returned image.",
+                    "oneOf": [
+                      {
+                        "required": [
+                          "ref"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "x",
+                          "y"
+                        ]
+                      }
+                    ],
+                    "properties": {
+                      "ref": {
+                        "type": "string"
+                      },
+                      "x": {
+                        "minimum": 0,
+                        "type": "number"
+                      },
+                      "y": {
+                        "minimum": 0,
+                        "type": "number"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "double_click",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "target"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "target": {
+                    "additionalProperties": false,
+                    "description": "Use either an element ref from this observation, or x/y in its returned image.",
+                    "oneOf": [
+                      {
+                        "required": [
+                          "ref"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "x",
+                          "y"
+                        ]
+                      }
+                    ],
+                    "properties": {
+                      "ref": {
+                        "type": "string"
+                      },
+                      "x": {
+                        "minimum": 0,
+                        "type": "number"
+                      },
+                      "y": {
+                        "minimum": 0,
+                        "type": "number"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "secondary_click",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "target"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "target": {
+                    "additionalProperties": false,
+                    "description": "Use either an element ref from this observation, or x/y in its returned image.",
+                    "oneOf": [
+                      {
+                        "required": [
+                          "ref"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "x",
+                          "y"
+                        ]
+                      }
+                    ],
+                    "properties": {
+                      "ref": {
+                        "type": "string"
+                      },
+                      "x": {
+                        "minimum": 0,
+                        "type": "number"
+                      },
+                      "y": {
+                        "minimum": 0,
+                        "type": "number"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "long_press",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "target"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "target": {
+                    "additionalProperties": false,
+                    "description": "Use either an element ref from this observation, or x/y in its returned image.",
+                    "oneOf": [
+                      {
+                        "required": [
+                          "ref"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "x",
+                          "y"
+                        ]
+                      }
+                    ],
+                    "properties": {
+                      "ref": {
+                        "type": "string"
+                      },
+                      "x": {
+                        "minimum": 0,
+                        "type": "number"
+                      },
+                      "y": {
+                        "minimum": 0,
+                        "type": "number"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "type_text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "target": {
+                    "additionalProperties": false,
+                    "description": "Use either an element ref from this observation, or x/y in its returned image.",
+                    "oneOf": [
+                      {
+                        "required": [
+                          "ref"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "x",
+                          "y"
+                        ]
+                      }
+                    ],
+                    "properties": {
+                      "ref": {
+                        "type": "string"
+                      },
+                      "x": {
+                        "minimum": 0,
+                        "type": "number"
+                      },
+                      "y": {
+                        "minimum": 0,
+                        "type": "number"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "fill",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "direction": {
+                    "description": "Content traversal direction; adapters map wheel/swipe direction.",
+                    "enum": [
+                      "up",
+                      "down",
+                      "left",
+                      "right"
+                    ],
+                    "type": "string"
+                  },
+                  "target": {
+                    "additionalProperties": false,
+                    "description": "Use either an element ref from this observation, or x/y in its returned image.",
+                    "oneOf": [
+                      {
+                        "required": [
+                          "ref"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "x",
+                          "y"
+                        ]
+                      }
+                    ],
+                    "properties": {
+                      "ref": {
+                        "type": "string"
+                      },
+                      "x": {
+                        "minimum": 0,
+                        "type": "number"
+                      },
+                      "y": {
+                        "minimum": 0,
+                        "type": "number"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "scroll",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "direction"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "from": {
+                    "additionalProperties": false,
+                    "description": "Use either an element ref from this observation, or x/y in its returned image.",
+                    "oneOf": [
+                      {
+                        "required": [
+                          "ref"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "x",
+                          "y"
+                        ]
+                      }
+                    ],
+                    "properties": {
+                      "ref": {
+                        "type": "string"
+                      },
+                      "x": {
+                        "minimum": 0,
+                        "type": "number"
+                      },
+                      "y": {
+                        "minimum": 0,
+                        "type": "number"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "to": {
+                    "additionalProperties": false,
+                    "description": "Use either an element ref from this observation, or x/y in its returned image.",
+                    "oneOf": [
+                      {
+                        "required": [
+                          "ref"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "x",
+                          "y"
+                        ]
+                      }
+                    ],
+                    "properties": {
+                      "ref": {
+                        "type": "string"
+                      },
+                      "x": {
+                        "minimum": 0,
+                        "type": "number"
+                      },
+                      "y": {
+                        "minimum": 0,
+                        "type": "number"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "drag",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "from",
+                  "to"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "key": {
+                    "description": "Logical key, e.g. Enter, Escape, ArrowDown, a.",
+                    "type": "string"
+                  },
+                  "modifiers": {
+                    "items": {
+                      "enum": [
+                        "shift",
+                        "ctrl",
+                        "alt",
+                        "meta"
+                      ],
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "type": {
+                    "const": "key",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "key"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "app": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "launch_app",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "app"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "center": {
+                    "additionalProperties": false,
+                    "description": "Use either an element ref from this observation, or x/y in its returned image.",
+                    "oneOf": [
+                      {
+                        "required": [
+                          "ref"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "x",
+                          "y"
+                        ]
+                      }
+                    ],
+                    "properties": {
+                      "ref": {
+                        "type": "string"
+                      },
+                      "x": {
+                        "minimum": 0,
+                        "type": "number"
+                      },
+                      "y": {
+                        "minimum": 0,
+                        "type": "number"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "scale": {
+                    "exclusiveMinimum": 0,
+                    "type": "number"
+                  },
+                  "type": {
+                    "const": "pinch",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "center",
+                  "scale"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
+                    "const": "navigate_back",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
+                    "const": "go_home",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
+                    "const": "app_switcher",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ],
+            "type": "object",
+            "x-ui-action": true
+          },
+          "device": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "observation_id": {
+            "type": "string"
+          },
+          "observe_after": {
+            "default": true,
+            "type": "boolean"
+          },
+          "response_mode": {
+            "default": "compact",
+            "description": "MCP envelope view; compact is the default. full restores diagnostic metadata.",
+            "enum": [
+              "full",
+              "compact"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "device",
+          "observation_id",
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "ui_act",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      }
+    },
     {
       "_meta": {
         "securitySchemes": [

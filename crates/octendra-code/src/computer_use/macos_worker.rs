@@ -613,6 +613,12 @@ impl InputBackend for MacInput<'_> {
         let mut pointer = s.pointer;
         let mut flags = s.flags();
         let event = match *action {
+            Action::Unicode { ref text, key_down } => {
+                let event = CGEvent::new_keyboard_event(s.source.clone(), 0, key_down)
+                    .map_err(|_| ErrorCode::OutcomeUnknown)?;
+                event.set_string(text);
+                Ok(event)
+            }
             Action::PointerMove { x, y } => {
                 let p = self.mapping.map(x, y)?;
                 pointer = CGPoint::new(
@@ -678,6 +684,17 @@ impl InputBackend for MacInput<'_> {
         // we cannot fence later physical input or prove application consumption.
         pending.event.post_to_pid(self.session.target.pid);
         match pending.action {
+            Action::Unicode { key_down, .. } => {
+                // Unicode uses native keycode zero (HID A); keep its matching
+                // release owned even if the pipe disappears between events.
+                if key_down {
+                    self.session.keys.insert(4);
+                    self.session.holds.posted(Control::Key(4));
+                } else {
+                    self.session.keys.remove(&4);
+                    self.session.holds.released(Control::Key(4));
+                }
+            }
             Action::PointerMove { .. } => self.session.pointer = pending.pointer,
             Action::KeyDown { usage } => {
                 self.session.keys.insert(usage);
@@ -701,6 +718,24 @@ impl InputBackend for MacInput<'_> {
     fn invalidated() -> ErrorCode {
         ErrorCode::OutcomeUnknown
     }
+}
+/// Keep each native keyboard string small without splitting a surrogate pair.
+fn unicode_chunks(text: &str) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut chunk = String::new();
+    let mut units = 0;
+    for character in text.chars() {
+        if units + character.len_utf16() > 20 {
+            chunks.push(std::mem::take(&mut chunk));
+            units = 0;
+        }
+        chunk.push(character);
+        units += character.len_utf16();
+    }
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+    chunks
 }
 struct Worker {
     approval: Approval,
@@ -960,6 +995,36 @@ impl Worker {
                 let mut renewals = Vec::new();
                 for a in &actions {
                     let emit = match a {
+                        Action::Unicode { text, key_down } => {
+                            if text.len() > 8192
+                                || !buttons.is_empty()
+                                || (*key_down && (!keys.is_empty() || text.is_empty()))
+                                || (!*key_down && (keys != BTreeSet::from([4]) || !text.is_empty()))
+                            {
+                                return Err(ErrorCode::InvalidActions);
+                            }
+                            if *key_down {
+                                keys.insert(4);
+                                renewals.push(Control::Key(4));
+                                let chunks = unicode_chunks(text);
+                                for (index, chunk) in chunks.iter().enumerate() {
+                                    events.push(Action::Unicode {
+                                        text: chunk.clone(),
+                                        key_down: true,
+                                    });
+                                    if index + 1 < chunks.len() {
+                                        events.push(Action::Unicode {
+                                            text: String::new(),
+                                            key_down: false,
+                                        });
+                                    }
+                                }
+                                false
+                            } else {
+                                keys.remove(&4);
+                                true
+                            }
+                        }
                         Action::PointerMove { x, y } => {
                             frame.mapping.map(*x, *y)?;
                             renewals.extend(buttons.iter().map(|b| Control::Button(*b as u8)));
@@ -1188,6 +1253,18 @@ pub async fn run(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn long_unicode_text_preserves_every_character_and_surrogate_pair() {
+        let text = format!("{}🙂中文{}", "a".repeat(19), "🧑‍💻".repeat(30));
+        let chunks = unicode_chunks(&text);
+        assert_eq!(chunks.concat(), text);
+        assert!(
+            chunks
+                .iter()
+                .all(|s| !s.is_empty() && s.encode_utf16().count() <= 20)
+        );
+        assert!(unicode_chunks("").is_empty());
+    }
     #[test]
     fn hid_mapping_is_explicit_and_rejects_unmapped_usages() {
         assert_eq!(mac_key(4), Some(0));

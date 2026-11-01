@@ -29,6 +29,7 @@ pub struct Agent {
     pub(crate) terminals: Terminals,
     #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
     pub(crate) desktop_workers: crate::computer_use::transport::NativeWorkers,
+    pub(crate) ui_access: Arc<tokio::sync::Mutex<()>>,
     scheduler: Arc<Scheduler>,
     pub(crate) active: Arc<ActiveJobs>,
     progress: Arc<crate::progress::Registry>,
@@ -253,6 +254,7 @@ impl Agent {
         Ok(Self {
             #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
             desktop_workers,
+            ui_access: Arc::default(),
             configured_directories,
             state_only,
             config: Arc::new(config),
@@ -503,6 +505,9 @@ impl Agent {
         self.require_job_policy(job)?;
         crate::tools::require_local_permissions(&self.config, &job.tool)?;
         let v = &job.arguments;
+        if matches!(job.tool.as_str(), "ui_observe" | "ui_act") {
+            return crate::ui::perform(self, job).await;
+        }
         #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
         if crate::tools::desktop_session_tool(&job.tool) {
             // Typed catalog admission is independent of shell/code permissions.

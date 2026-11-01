@@ -20,12 +20,14 @@ macro_rules! candidate_sql {
 ) jobs
 WHERE id NOT IN (SELECT value FROM json_each(?))
 AND EXISTS (SELECT 1 FROM (SELECT ? AS scopes) permission WHERE CASE
-    WHEN json_extract(request,'$.tool') IN ('devices_list','fleet_status','workspace_open','code_list','code_search','code_read','code_symbols','code_diff','operation_get','terminal_read','file_download','workspace_context','task_context','task_resume')
+    WHEN json_extract(request,'$.tool') IN ('devices_list','fleet_status','workspace_open','code_list','code_search','code_read','code_symbols','code_diff','operation_get','terminal_read','file_download','workspace_context','task_context','task_resume','ui_observe')
         THEN EXISTS (SELECT 1 FROM json_each(permission.scopes) WHERE value='code:read')
     WHEN json_extract(request,'$.tool') IN ('code_apply_edits','change_resume','workspace_gc','files_sync','file_upload','transfer_cancel','transfer_resume','outcome_resolve')
         THEN EXISTS (SELECT 1 FROM json_each(permission.scopes) WHERE value='code:write')
     WHEN json_extract(request,'$.tool') IN ('terminal_exec','terminal_input','terminal_cancel')
         THEN EXISTS (SELECT 1 FROM json_each(permission.scopes) WHERE value='terminal:exec')
+    WHEN json_extract(request,'$.tool')='ui_act'
+        THEN (SELECT count(DISTINCT value) FROM json_each(permission.scopes) WHERE value IN ('code:read','terminal:exec'))=2
     WHEN json_extract(request,'$.tool') IN ('desktop_observer','desktop_frame')
         THEN EXISTS (SELECT 1 FROM json_each(permission.scopes) WHERE value='desktop:observe')
     WHEN json_extract(request,'$.tool')='desktop_worker'
@@ -188,6 +190,38 @@ pub(crate) fn storage_error(stage: &'static str, error: &anyhow::Error) -> Respo
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn ui_tools_are_delivered_with_existing_connection_scopes() {
+        let (_dir, store) = fixture().await;
+        let observe = add(&store, "ui_observe").await;
+        let mut read = selection();
+        read.scopes = r#"["code:read"]"#;
+        assert_eq!(
+            claim(&store, &read, crate::now()).await.unwrap().unwrap().0,
+            observe
+        );
+        let act = add(&store, "ui_act").await;
+        assert!(claim(&store, &read, crate::now()).await.unwrap().is_none());
+        read.scopes = r#"["terminal:exec"]"#;
+        assert!(claim(&store, &read, crate::now()).await.unwrap().is_none());
+        assert_eq!(
+            claim(&store, &selection(), crate::now())
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+            act
+        );
+        sqlx::query("UPDATE jobs SET updated=? WHERE id=?")
+            .bind(crate::now() - 60)
+            .bind(&act)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        // Scope changes are rechecked on redelivery too.
+        assert!(claim(&store, &read, crate::now()).await.unwrap().is_none());
+    }
 
     #[tokio::test]
     async fn desktop_dispatch_requires_separate_scope_and_preserves_lane() {

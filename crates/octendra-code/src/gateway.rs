@@ -459,6 +459,8 @@ impl Gateway {
                 | "desktop_worker"
                 | "desktop_observer"
                 | "desktop_frame"
+                | "ui_observe"
+                | "ui_act"
         ) && let Some(object) = args.as_object_mut()
         {
             let dev_hint = object
@@ -501,6 +503,8 @@ impl Gateway {
                 | "desktop_worker"
                 | "desktop_observer"
                 | "desktop_frame"
+                | "ui_observe"
+                | "ui_act"
         ) && let Some(object) = args.as_object_mut()
             && object.get("idempotency_key").is_none()
         {
@@ -672,14 +676,24 @@ impl Gateway {
         };
         let device = if matches!(
             name,
-            "workspace_open" | "desktop_worker" | "desktop_observer" | "desktop_frame"
+            "workspace_open"
+                | "desktop_worker"
+                | "desktop_observer"
+                | "desktop_frame"
+                | "ui_observe"
+                | "ui_act"
         ) {
-            let raw = files::text(&args, "device_id")?;
+            let field = if matches!(name, "ui_observe" | "ui_act") {
+                "device"
+            } else {
+                "device_id"
+            };
+            let raw = files::text(&args, field)?;
             let reg = resolve_device(raw)?;
             if raw != reg.id
                 && let Some(object) = args.as_object_mut()
             {
-                object.insert("device_id".into(), json!(reg.id));
+                object.insert(field.into(), json!(reg.id));
             }
             reg.id.clone()
         } else {
@@ -871,6 +885,8 @@ impl Gateway {
                 ("change_resume", "change_set_resume_v1"),
                 ("workspace_gc", "workspace_gc_v1"),
                 ("desktop_observer", "desktop_observer_v1"),
+                ("ui_observe", "unified_ui_v1"),
+                ("ui_act", "unified_ui_v1"),
             ] {
                 if name == tool {
                     ensure!(
@@ -1427,6 +1443,7 @@ impl ServerHandler for Gateway {
                 .compact_legacy_terminal_result(&p, &tool, &compact_args, value)
                 .await;
         }
+        let images = crate::ui::mcp_images(&mut value);
         let structured = if compact {
             crate::token_output::compact_response(&tool, value.clone())
         } else {
@@ -1442,6 +1459,7 @@ impl ServerHandler for Gateway {
         } else {
             CallToolResult::success(vec![ContentBlock::text(text)])
         };
+        result.content.extend(images);
         if let Some(url) = value.get("download_url").and_then(Value::as_str) {
             let link = json!({"type":"resource_link","uri":url,"name":value.get("file_name").and_then(Value::as_str).unwrap_or("download.bin"),"mimeType":"application/octet-stream","size":value.get("size").and_then(Value::as_u64).unwrap_or(0)});
             if let Ok(link) = serde_json::from_value::<ContentBlock>(link) {

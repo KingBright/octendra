@@ -8,12 +8,12 @@ pub fn scope(name: &str) -> Option<&'static str> {
     match name {
         "devices_list" | "fleet_status" | "workspace_open" | "code_list" | "code_search"
         | "code_read" | "code_symbols" | "code_diff" | "operation_get" | "terminal_read"
-        | "file_download" | "workspace_context" | "task_context" | "task_resume" => {
+        | "file_download" | "workspace_context" | "task_context" | "task_resume" | "ui_observe" => {
             Some("code:read")
         }
         "code_apply_edits" | "change_resume" | "workspace_gc" | "files_sync" | "file_upload"
         | "transfer_cancel" | "transfer_resume" | "outcome_resolve" => Some("code:write"),
-        "terminal_exec" | "terminal_input" | "terminal_cancel" => Some("terminal:exec"),
+        "terminal_exec" | "terminal_input" | "terminal_cancel" | "ui_act" => Some("terminal:exec"),
         "desktop_worker" => Some("desktop:input"),
         "desktop_observer" | "desktop_frame" => Some("desktop:observe"),
         _ => None,
@@ -77,6 +77,9 @@ pub fn validate(name: &str, arguments: &Value) -> Result<()> {
         }
     }
     validate_node(&tool.input_schema, &compatible, "$")?;
+    if matches!(name, "ui_observe" | "ui_act") {
+        crate::ui::validate(name, arguments)?;
+    }
     if desktop_session_tool(name) {
         let a: crate::agent::DesktopJob = serde_json::from_value(arguments.clone())
             .map_err(|_| anyhow::anyhow!("invalid_arguments: desktop request envelope"))?;
@@ -136,6 +139,13 @@ pub fn validate(name: &str, arguments: &Value) -> Result<()> {
 }
 
 fn validate_node(schema: &Map<String, Value>, value: &Value, path: &str) -> Result<()> {
+    if schema.get("x-ui-action") == Some(&json!(true)) {
+        let action: octendra_desktop_protocol::ui::Action =
+            serde_json::from_value(value.clone())
+                .map_err(|_| anyhow::anyhow!("invalid_arguments: {path} UI action"))?;
+        ensure!(action.valid(), "invalid_arguments: {path} UI action");
+        return Ok(());
+    }
     if schema.get("x-desktop-request") == Some(&json!(true)) {
         let request: octendra_desktop_protocol::Request = serde_json::from_value(value.clone())
             .map_err(|_| anyhow::anyhow!("invalid_arguments: {path} desktop request"))?;
@@ -265,7 +275,9 @@ fn validate_node(schema: &Map<String, Value>, value: &Value, path: &str) -> Resu
 
 /// Complete OAuth requirements. Desktop worker uses one consent for its typed API.
 pub fn required_scopes(name: &str) -> Vec<&'static str> {
-    if name == "desktop_worker" {
+    if name == "ui_act" {
+        vec!["code:read", "terminal:exec"]
+    } else if name == "desktop_worker" {
         vec!["desktop:observe", "desktop:input"]
     } else {
         scope(name).into_iter().collect()
@@ -365,14 +377,27 @@ fn build_catalog() -> Vec<Tool> {
     let mut tools: Vec<Tool> = vec![];
     let mut add = |name: &str, description: &str, mut properties: Value, required: Vec<&str>| {
         properties["response_mode"] = json!({"type":"string","enum":["full","compact"],"default":"compact","description":"MCP envelope view; compact is the default. full restores diagnostic metadata."});
-        let read =
-            scope(name) == Some("code:read") && !matches!(name, "workspace_open" | "file_download");
+        let read = name == "ui_observe"
+            || (scope(name) == Some("code:read")
+                && !matches!(name, "workspace_open" | "file_download"));
         let value = json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"outputSchema":{"type":"object","additionalProperties":true},"_meta":{"securitySchemes":[{"type":"oauth2","scopes":required_scopes(name)}]},"annotations":{"readOnlyHint":read,"destructiveHint":!read&&name!="workspace_open","idempotentHint":read,"openWorldHint":matches!(name, "terminal_exec" | "terminal_input" | "terminal_cancel")}});
         // Catalog is composed entirely from static, server-controlled JSON.
         if let Ok(tool) = serde_json::from_value(value) {
             tools.push(tool);
         }
     };
+    add(
+        "ui_observe",
+        "Observe a computer or phone using one interface. Select device by name or ID; view defaults to active. Returns an image, observation_id, element refs where supported, and actual capabilities/readiness. No workspace, task, session or lease setup. Coordinates refer to pixels in the returned image.",
+        json!({"device":string(),"view":string(),"idempotency_key":string()}),
+        vec!["device"],
+    );
+    add(
+        "ui_act",
+        "Act on a computer or phone observation. Send one semantic action; a fresh observation/image follows by default. Prefer returned element refs; otherwise use image-pixel x/y. type_text inserts, fill replaces. Unsupported actions report actual alternatives. Sessions and native leases are internal. On an uncertain outcome observe the original operation_id; never replay input.",
+        json!({"device":string(),"observation_id":string(),"action":crate::ui::action_schema(),"observe_after":{"type":"boolean","default":true},"idempotency_key":string()}),
+        vec!["device", "observation_id", "action"],
+    );
     add(
         "desktop_worker",
         "Run one typed desktop operation using an explicitly authorized persistent owner/device/desktop capability. Each Open binds the current task and a short lease. Terminal/code permission does not grant desktop authority. Defaults unavailable.",

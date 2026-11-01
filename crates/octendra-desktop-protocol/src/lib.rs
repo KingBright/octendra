@@ -2,6 +2,7 @@
 //! Frame references carry metadata only; pixels need a bounded artifact transport.
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+pub mod ui;
 
 pub const PROTOCOL: u32 = 1;
 pub const MAX_ACTIONS: usize = 16;
@@ -160,6 +161,11 @@ pub enum Button {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
+    /// Native Unicode keyboard event, independent of the active keyboard layout.
+    Unicode {
+        text: String,
+        key_down: bool,
+    },
     PointerMove {
         x: f64,
         y: f64,
