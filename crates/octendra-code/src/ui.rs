@@ -173,7 +173,10 @@ struct Capture {
     image: image::Image,
 }
 fn actions_for(backend: &str) -> Vec<&'static str> {
-    if matches!(backend, "macos_pid_private_window_poc" | "apple_vz_guest_private_devices") {
+    if matches!(
+        backend,
+        "macos_pid_private_window_poc" | "apple_vz_guest_private_devices"
+    ) {
         vec![
             "click",
             "secondary_click",
@@ -215,7 +218,11 @@ pub(crate) async fn perform(agent: &Agent, job: &Job) -> Result<Value> {
         );
     }
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    if job.ui_context.as_ref().is_some_and(|context| context.is_full_vm()) {
+    if job
+        .ui_context
+        .as_ref()
+        .is_some_and(|context| context.is_full_vm())
+    {
         return macos_guest::perform(agent, job, args).await;
     }
     let _guard = agent.ui_access.lock().await;
