@@ -4,6 +4,7 @@ use crate::{DeviceRegistration, GatewayConfig, gateway::Gateway, hash, now, rand
 
 fn job(a: &Agent, tool: &str, arguments: Value) -> Job {
     Job {
+        ui_context: None,
         id: uuid::Uuid::new_v4().to_string(),
         device_id: a.config.device_id.clone(),
         owner: "fixture".into(),
@@ -169,6 +170,7 @@ async fn actual_poll_skips_backlog_for_same_root_aliases_and_then_drains_it() {
     let address = listener.local_addr().unwrap();
     Arc::make_mut(&mut a.config).gateway_url = format!("http://{address}");
     let g = Gateway::new(GatewayConfig {
+        ui_workspaces: vec![],
         public_url_aliases: vec![],
         forge_browser: None,
         allowed_origins: crate::default_mcp_client_origins(),

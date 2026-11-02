@@ -6,6 +6,7 @@ async fn fixture(state: &str) -> (tempfile::TempDir, Gateway, Principal, String)
     let dir = tempfile::tempdir().unwrap();
     let device = uuid::Uuid::new_v4().to_string();
     let g = Gateway::new(GatewayConfig {
+        ui_workspaces: vec![],
         public_url_aliases: vec![],
         forge_browser: None,
         allowed_origins: crate::default_mcp_client_origins(),
@@ -30,6 +31,7 @@ async fn fixture(state: &str) -> (tempfile::TempDir, Gateway, Principal, String)
     };
     let id = uuid::Uuid::new_v4().to_string();
     let job = Job {
+        ui_context: None,
         id: id.clone(),
         device_id: device.clone(),
         owner: p.owner.clone(),

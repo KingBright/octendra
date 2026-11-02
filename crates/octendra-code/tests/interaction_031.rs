@@ -49,6 +49,7 @@ async fn fixture() -> (tempfile::TempDir, Agent, String) {
 }
 fn job(a: &Agent, tool: &str, args: Value) -> Job {
     Job {
+        ui_context: None,
         id: uuid::Uuid::new_v4().to_string(),
         device_id: a.config.device_id.clone(),
         owner: "test".into(),
@@ -115,6 +116,7 @@ async fn readiness_endpoint_is_authenticated_scoped_and_does_not_refresh_online_
     let (d, a, _ws) = fixture().await;
     let other = uuid::Uuid::new_v4().to_string();
     let g = Gateway::new(GatewayConfig {
+        ui_workspaces: vec![],
         public_url_aliases: vec![],
         forge_browser: None,
         allowed_origins: octendra_code::default_mcp_client_origins(),

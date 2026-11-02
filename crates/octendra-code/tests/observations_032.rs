@@ -17,6 +17,7 @@ async fn fixture() -> (tempfile::TempDir, Gateway, Principal, String) {
     let d = tempfile::tempdir().unwrap();
     let token = random();
     let g = Gateway::new(GatewayConfig {
+        ui_workspaces: vec![],
         public_url_aliases: vec![],
         forge_browser: None,
         allowed_origins: octendra_code::default_mcp_client_origins(),
@@ -52,6 +53,7 @@ async fn fixture() -> (tempfile::TempDir, Gateway, Principal, String) {
 async fn insert(g: &Gateway, tool: &str, result: Option<Value>) -> String {
     let id = uuid::Uuid::new_v4().to_string();
     let j = Job {
+        ui_context: None,
         id: id.clone(),
         device_id: g.config.devices[0].id.clone(),
         owner: g.config.owner.clone(),

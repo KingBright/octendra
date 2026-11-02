@@ -76,6 +76,7 @@ async fn gateway(dir: &std::path::Path) -> (Gateway, String, String) {
         .to_string();
     let token = random();
     let config = GatewayConfig {
+        ui_workspaces: vec![],
         public_url_aliases: vec![],
         forge_browser: None,
         allowed_origins: octendra_code::default_mcp_client_origins(),
@@ -491,6 +492,7 @@ async fn device_binding_terminal_input_cancel_and_restart() {
     let a = Agent::new(ca.clone()).await.unwrap();
     let b = Agent::new(cb).await.unwrap();
     let job = |device: &str, tool: &str, args: Value| Job {
+        ui_context: None,
         id: uuid::Uuid::new_v4().to_string(),
         device_id: device.into(),
         owner: "owner".into(),
@@ -560,6 +562,7 @@ async fn device_binding_terminal_input_cancel_and_restart() {
     assert_eq!(cancelled["terminal"]["state"], "cancelled");
     let id = uuid::Uuid::new_v4().to_string();
     let interrupted = Job {
+        ui_context: None,
         id: id.clone(),
         device_id: ca.device_id.clone(),
         owner: "owner".into(),

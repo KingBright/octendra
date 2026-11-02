@@ -1817,6 +1817,7 @@ mod tests {
             .await
             .unwrap();
         let original = Job {
+            ui_context: None,
             id: uuid::Uuid::new_v4().to_string(),
             device_id: device.clone(),
             owner: "owner".into(),
@@ -1827,6 +1828,7 @@ mod tests {
         assert_eq!(first["state"], "completed");
         assert_eq!(first["change_set"]["change_set_id"], original.id);
         let resume = Job {
+            ui_context: None,
             id: uuid::Uuid::new_v4().to_string(),
             device_id: device,
             owner: "owner".into(),
@@ -1880,6 +1882,7 @@ mod tests {
         let sending = delivery.clone();
         let sender = tokio::spawn(async move { sending.run(&reqwest::Client::new()).await });
         let job = Job {
+            ui_context: None,
             id: uuid::Uuid::new_v4().to_string(),
             device_id: a.config.device_id.clone(),
             owner: "owner".into(),
@@ -1963,6 +1966,7 @@ mod tests {
         .await
         .unwrap();
         let job = Job {
+            ui_context: None,
             id: uuid::Uuid::new_v4().to_string(),
             device_id: device,
             owner: "owner".into(),

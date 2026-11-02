@@ -13,6 +13,7 @@ async fn gateway() -> (tempfile::TempDir, Gateway, Principal, String) {
     let temp = tempfile::tempdir().unwrap();
     let device = uuid::Uuid::new_v4().to_string();
     let g = Gateway::new(GatewayConfig {
+        ui_workspaces: vec![],
         public_url_aliases: vec![],
         forge_browser: None,
         allowed_origins: octendra_code::default_mcp_client_origins(),
@@ -161,6 +162,7 @@ async fn agent_maintenance_queries_are_readonly_and_owner_scoped() {
     .await
     .unwrap();
     let job = |owner: &str, tool: &str, arguments: Value| Job {
+        ui_context: None,
         id: uuid::Uuid::new_v4().to_string(),
         device_id: agent.config.device_id.clone(),
         owner: owner.into(),

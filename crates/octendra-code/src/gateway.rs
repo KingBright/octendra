@@ -114,6 +114,8 @@ impl Clone for Gateway {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Job {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_context: Option<crate::ui_workspace::ExecutionContext>,
     pub id: String,
     pub device_id: String,
     pub owner: String,
@@ -650,6 +652,7 @@ impl Gateway {
             };
             return Ok(json!({
                 "devices":devices,
+                "ui_workspaces":crate::ui_workspace::discovery(self).await?,
                 "gateway":gateway,
                 "capability_layers":{
                     "device_support":{"status":"reported_per_device","evidence":"devices[].capabilities and devices[].runtime_features"},
@@ -667,6 +670,11 @@ impl Gateway {
         if name == "task_context" {
             return crate::activity::task(self, p, &args).await;
         }
+        let ui_context = if matches!(name, "ui_observe" | "ui_act") {
+            Some(crate::ui_workspace::resolve(self, p, name, &mut args).await?)
+        } else {
+            None
+        };
         let resolve_device = |raw: &str| -> Result<&DeviceRegistration> {
             self.config
                 .devices
@@ -674,20 +682,13 @@ impl Gateway {
                 .find(|d| d.id == raw || d.name.eq_ignore_ascii_case(raw))
                 .context("unknown device")
         };
-        let device = if matches!(
+        let device = if let Some(context) = &ui_context {
+            context.execution_device_id.clone()
+        } else if matches!(
             name,
-            "workspace_open"
-                | "desktop_worker"
-                | "desktop_observer"
-                | "desktop_frame"
-                | "ui_observe"
-                | "ui_act"
+            "workspace_open" | "desktop_worker" | "desktop_observer" | "desktop_frame"
         ) {
-            let field = if matches!(name, "ui_observe" | "ui_act") {
-                "device"
-            } else {
-                "device_id"
-            };
+            let field = "device_id";
             let raw = files::text(&args, field)?;
             let reg = resolve_device(raw)?;
             if raw != reg.id
@@ -767,7 +768,13 @@ impl Gateway {
                 .and_then(Value::as_str)
                 .unwrap_or("")
         ));
-        let fingerprint = hash(serde_json::to_vec(&args)?);
+        let fingerprint = if let Some(context) = &ui_context {
+            hash(serde_json::to_vec(
+                &json!({"arguments":args,"execution_context":context}),
+            )?)
+        } else {
+            hash(serde_json::to_vec(&args)?)
+        };
         // Unknown outcomes remain guarded even when admission generated the retry key.
         let semantic = if scope != "code:read" {
             let mut semantic_args = args.clone();
@@ -785,6 +792,7 @@ impl Gateway {
         };
         let id = uuid::Uuid::new_v4().to_string();
         let job = Job {
+            ui_context: ui_context.clone(),
             id: id.clone(),
             device_id: device.into(),
             owner: p.owner.clone(),
@@ -822,6 +830,9 @@ impl Gateway {
             (id, false)
         } else {
             // Exact retries observe their saved job; only new admission is rejected.
+            if let Some(context) = &ui_context {
+                crate::ui_workspace::require_current(&self.config, context)?;
+            }
             // Include JSON escaping and the complete poll envelope in this budget.
             let features: Option<Value> = self.store.get("online", device).await?;
             let payload_supported = features
@@ -1300,6 +1311,9 @@ impl Gateway {
                 );
             }
             crate::transfers::decorate(self, &job, &mut result).await?;
+            if matches!(job.tool.as_str(), "ui_observe" | "ui_act") {
+                crate::ui_workspace::decorate(self, &job, &mut result).await?;
+            }
             if job.tool == "file_upload" && crate::durable_transfer::is_suspended(&result) {
                 result["source_authorization"] =
                     crate::transfers::source_authorization_status(self, id).await?;
@@ -1321,6 +1335,9 @@ impl Gateway {
             return Ok(result);
         }
         let mut pending = json!({"operation_id":id,"device_id":job.device_id,"state":state,"pending":true,"next_action":"operation_get","retry_after_ms":1000});
+        if matches!(job.tool.as_str(), "ui_observe" | "ui_act") {
+            crate::ui_workspace::decorate(self, &job, &mut pending).await?;
+        }
         if let Some(history) = &history {
             pending["history_migration"] = history.clone();
         }

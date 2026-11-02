@@ -35,6 +35,7 @@ impl Fixture {
             "terminal:exec".to_owned(),
         ];
         let g = Gateway::new(GatewayConfig {
+            ui_workspaces: vec![],
             public_url_aliases: vec![],
             forge_browser: None,
             public_url: "https://fixture.example".into(),
@@ -88,6 +89,7 @@ impl Fixture {
             uuid::Uuid::new_v4()
         );
         let job = Job {
+            ui_context: None,
             id: id.clone(),
             device_id: self.g.config.devices[device].id.clone(),
             owner: self.p.owner.clone(),

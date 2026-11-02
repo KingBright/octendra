@@ -18,6 +18,8 @@ use uuid::Uuid;
 pub(crate) struct Arguments {
     pub device: String,
     #[serde(default)]
+    pub context: Option<crate::ui_workspace::Selection>,
+    #[serde(default)]
     pub view: Option<String>,
     #[serde(default)]
     pub observation_id: Option<String>,
@@ -51,7 +53,8 @@ pub(crate) fn validate(name: &str, args: &Value) -> Result<()> {
                 .as_ref()
                 .is_some_and(|id| Uuid::parse_str(id).is_ok())
                 && args.action.as_ref().is_some_and(Action::valid)
-                && args.view.is_none(),
+                && args.view.is_none()
+                && args.context.is_none(),
             "invalid_arguments: observation_id/action"
         );
     } else {
@@ -156,6 +159,8 @@ struct Saved {
     mapping: desktop::FrameMapping,
     image_size: [u32; 2],
     tiles: Vec<String>,
+    #[serde(default)]
+    resource_revision: u64,
 }
 struct Capture {
     frame: desktop::FrameRef,
@@ -188,6 +193,21 @@ pub(crate) async fn perform(agent: &Agent, job: &Job) -> Result<Value> {
     validate(&job.tool, &job.arguments)?;
     let args: Arguments = serde_json::from_value(job.arguments.clone())?;
     ensure!(args.device == job.device_id, "ui_device_identity_mismatch");
+    if let Some(context) = &job.ui_context {
+        ensure!(
+            context.execution_device_id == job.device_id,
+            "ui_execution_context_mismatch"
+        );
+    } else if job.tool == "ui_observe"
+        && !matches!(args.context, Some(crate::ui_workspace::Selection::Host))
+    {
+        // Embedded/local adapters have no Gateway workspace registry. They must
+        // not turn an isolated/default observation into implicit host capture.
+        return Ok(
+            json!({"error":"ui_workspace_gateway_required","input_sent":false,
+            "next_action":"select_a_configured_gateway_workspace"}),
+        );
+    }
     let _guard = agent.ui_access.lock().await;
     let capability = agent.desktop_workers.capabilities().await;
     let supported = actions_for(&capability.backend);
@@ -207,7 +227,8 @@ pub(crate) async fn perform(agent: &Agent, job: &Job) -> Result<Value> {
             "supported_actions":supported}),
         );
     }
-    let key = crate::hash(format!("{}:{}", job.owner, job.device_id));
+    let prefix = crate::hash(format!("{}:{}", job.owner, job.device_id));
+    let key = format!("{prefix}:{}", args.observation_id.as_deref().unwrap_or(""));
     let identity = desktop::Identity {
         owner: job.owner.clone(),
         device_id: approved.device_id,
@@ -215,12 +236,14 @@ pub(crate) async fn perform(agent: &Agent, job: &Job) -> Result<Value> {
         task_id: Uuid::new_v4(),
     };
     let operation = Uuid::parse_str(&job.id)?;
+    let current_revision = resource_revision(agent, &approved.desktop_id).await?;
     let saved = if job.tool == "ui_act" {
         let saved = agent.store.get::<Saved>("ui_observation", &key).await?;
         match saved {
             Some(saved)
                 if Some(saved.id.as_str()) == args.observation_id.as_deref()
-                    && saved.surface == approved.desktop_id =>
+                    && saved.surface == approved.desktop_id
+                    && saved.resource_revision == current_revision =>
             {
                 Some(saved)
             }
@@ -231,7 +254,7 @@ pub(crate) async fn perform(agent: &Agent, job: &Job) -> Result<Value> {
                 if let Some(capture) = capture {
                     error["observation"] = save(
                         agent,
-                        &key,
+                        &prefix,
                         &identity,
                         capture,
                         &capability.backend,
@@ -269,8 +292,7 @@ pub(crate) async fn perform(agent: &Agent, job: &Job) -> Result<Value> {
     if let Some(saved) = &saved {
         // Consume before any input. A new request cannot replay an uncertain
         // action by changing observe_after or choosing another retry key.
-        let consumed = agent.store.take::<Saved>("ui_observation", &key).await?;
-        if consumed.as_ref().is_none_or(|s| s.id != saved.id) {
+        if !consume(agent, &key, saved).await? {
             return Ok(failure("stale_observation", &supported));
         }
     }
@@ -286,7 +308,7 @@ pub(crate) async fn perform(agent: &Agent, job: &Job) -> Result<Value> {
     if let Some(capture) = capture {
         let observation = save(
             agent,
-            &key,
+            &prefix,
             &identity,
             capture,
             &capability.backend,
@@ -308,7 +330,7 @@ pub(crate) async fn perform(agent: &Agent, job: &Job) -> Result<Value> {
         match observed {
             Ok((_, Some(capture))) => match save(
                 agent,
-                &key,
+                &prefix,
                 &identity,
                 capture,
                 &capability.backend,
@@ -403,7 +425,7 @@ async fn run(
 }
 async fn save(
     agent: &Agent,
-    key: &str,
+    prefix: &str,
     identity: &desktop::Identity,
     capture: Capture,
     backend: &str,
@@ -416,17 +438,62 @@ async fn save(
         mapping: capture.frame.mapping.clone(),
         image_size: capture.image.size,
         tiles: capture.image.tiles(),
+        resource_revision: resource_revision(agent, &identity.desktop_id).await?,
     };
     agent
         .store
-        .put("ui_observation", key, &saved, i64::MAX)
+        .put(
+            "ui_observation",
+            &format!("{prefix}:{id}"),
+            &saved,
+            i64::MAX,
+        )
         .await?;
+    sqlx::query("DELETE FROM kv WHERE kind='ui_observation' AND key IN (SELECT key FROM kv WHERE kind='ui_observation' AND key LIKE ? ORDER BY rowid DESC LIMIT -1 OFFSET 128)")
+        .bind(format!("{prefix}:%"))
+        .execute(&agent.store.pool).await?;
     Ok(
         json!({"observation_id":id,"device":identity.device_id,"view":identity.desktop_id,
         "image":capture.image.value(),"elements":[],"capabilities":{"backend":backend,"actions":actions,
             "coordinates":"image_pixels","semantic_elements":false,"background":false},
         "readiness":{"available":true},"observed_at_ms":crate::now_ms()}),
     )
+}
+
+fn resource_key(agent: &Agent, surface: &str) -> String {
+    crate::hash(format!("{}:{surface}", agent.config.device_id))
+}
+async fn resource_revision(agent: &Agent, surface: &str) -> Result<u64> {
+    Ok(agent
+        .store
+        .get("ui_resource_revision", &resource_key(agent, surface))
+        .await?
+        .unwrap_or(0))
+}
+/// Caller holds ui_access. Advance before sending input, including uncertain
+/// outcomes, while reads leave every other chat's observation intact.
+async fn consume(agent: &Agent, key: &str, saved: &Saved) -> Result<bool> {
+    if resource_revision(agent, &saved.surface).await? != saved.resource_revision {
+        return Ok(false);
+    }
+    let consumed = agent.store.take::<Saved>("ui_observation", key).await?;
+    if consumed.as_ref().is_none_or(|s| s.id != saved.id) {
+        return Ok(false);
+    }
+    let next = saved
+        .resource_revision
+        .checked_add(1)
+        .context("UI resource revision exhausted")?;
+    agent
+        .store
+        .put(
+            "ui_resource_revision",
+            &resource_key(agent, &saved.surface),
+            &next,
+            i64::MAX,
+        )
+        .await?;
+    Ok(true)
 }
 
 fn point(target: &Target, size: [u32; 2]) -> std::result::Result<[f64; 2], &'static str> {

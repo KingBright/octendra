@@ -16,6 +16,7 @@ async fn fixture() -> (tempfile::TempDir, Gateway, String, Principal, String) {
     let root = dir.path().join("root");
     std::fs::create_dir(&root).unwrap();
     let gateway = Gateway::new(GatewayConfig {
+        ui_workspaces: vec![],
         public_url_aliases: vec![],
         forge_browser: None,
         allowed_origins: octendra_code::default_mcp_client_origins(),

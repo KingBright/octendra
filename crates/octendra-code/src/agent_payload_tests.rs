@@ -26,6 +26,7 @@ async fn fixture() -> (
     .await
     .unwrap();
     let g = crate::gateway::Gateway::new(GatewayConfig {
+        ui_workspaces: vec![],
         public_url_aliases: vec![],
         forge_browser: None,
         public_url: "https://fixture.invalid".into(),
@@ -72,6 +73,7 @@ fn original(a: &Agent, ws: &Workspace, path: &str) -> Job {
     assert!(source.len() > crate::payload_budget::POLL_BYTES);
     eprintln!("real_source_size={}", source.len());
     Job {
+        ui_context: None,
         id: uuid::Uuid::new_v4().to_string(),
         device_id: a.config.device_id.clone(),
         owner: "owner".into(),

@@ -39,6 +39,7 @@ async fn fixture() -> Fixture {
         _ => unreachable!(),
     };
     let g = Gateway::new(GatewayConfig {
+        ui_workspaces: vec![],
         public_url_aliases: vec![],
         forge_browser: Some(ForgeBrowserConfig {
             app_addr,

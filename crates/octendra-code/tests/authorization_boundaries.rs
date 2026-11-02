@@ -14,6 +14,7 @@ async fn gateway(scopes: &[&str]) -> (tempfile::TempDir, Gateway, String) {
     let dir = tempfile::tempdir().unwrap();
     let device = uuid::Uuid::new_v4().to_string();
     let g = Gateway::new(GatewayConfig {
+        ui_workspaces: vec![],
         public_url_aliases: vec![],
         public_url: "https://authorization-fixture.invalid".into(),
         bind: "127.0.0.1:0".into(),
@@ -52,6 +53,7 @@ async fn job_count(g: &Gateway) -> i64 {
 async fn saved_job(g: &Gateway, device: &str, tool: &str, result: Value) -> String {
     let id = uuid::Uuid::new_v4().to_string();
     let job = Job {
+        ui_context: None,
         id: id.clone(),
         device_id: device.into(),
         owner: "fixture".into(),
@@ -264,6 +266,7 @@ async fn agent(write: bool, exec: bool) -> (tempfile::TempDir, Agent, PathBuf, P
 
 async fn execute(a: &Agent, tool: &str, args: Value) -> Value {
     a.execute(&Job {
+        ui_context: None,
         id: uuid::Uuid::new_v4().to_string(),
         device_id: a.config.device_id.clone(),
         owner: "fixture".into(),
@@ -564,6 +567,7 @@ async fn authorization_all_transfer_http_entries_recheck_scope_on_original_jobs(
 async fn authorization_resuming_persisted_upload_rechecks_current_local_write_flag() {
     let (_dir, a, _root, _outside) = agent(false, false).await;
     let job = Job {
+        ui_context: None,
         id: uuid::Uuid::new_v4().to_string(),
         device_id: a.config.device_id.clone(),
         owner: "fixture".into(),
@@ -676,6 +680,7 @@ async fn authorization_existing_download_link_is_revoked_by_current_device_scope
 async fn authorization_cached_local_workspace_response_clamps_current_agent_flags() {
     let (_dir, a, root, _outside) = agent(false, false).await;
     let job = Job {
+        ui_context: None,
         id: uuid::Uuid::new_v4().to_string(),
         device_id: a.config.device_id.clone(),
         owner: "fixture".into(),
@@ -800,6 +805,7 @@ async fn authorization_state_only_cannot_return_old_git_or_hydrate_payload_recei
     let config = state_only_config(dir.path());
     let a = Agent::new_state_only(config).await.unwrap();
     let job = Job {
+        ui_context: None,
         id: uuid::Uuid::new_v4().to_string(),
         device_id: a.config.device_id.clone(),
         owner: "fixture".into(),
@@ -830,6 +836,7 @@ async fn authorization_state_only_cannot_return_old_git_or_hydrate_payload_recei
     .await;
     assert_eq!(denied["error_code"], "state_only_tool_denied");
     let frame = Job {
+        ui_context: None,
         tool: "desktop_frame".into(),
         ..job
     };

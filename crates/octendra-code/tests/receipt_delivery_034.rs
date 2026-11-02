@@ -43,6 +43,7 @@ async fn check_delivery_loss(commit_before_error: bool) {
     .unwrap();
     Arc::make_mut(&mut a.config).gateway_url = format!("http://{address}");
     let g = Gateway::new(GatewayConfig {
+        ui_workspaces: vec![],
         public_url_aliases: vec![],
         forge_browser: None,
         allowed_origins: octendra_code::default_mcp_client_origins(),
@@ -88,6 +89,7 @@ async fn check_delivery_loss(commit_before_error: bool) {
     });
     let id = uuid::Uuid::new_v4().to_string();
     let j = Job {
+        ui_context: None,
         id: id.clone(),
         device_id: device.clone(),
         owner: "test".into(),

@@ -471,6 +471,7 @@ mod tests {
     async fn deterministic_agent_rejections_preserve_execution_state_and_retry_policy() {
         let dir = tempfile::tempdir().unwrap();
         let g = Gateway::new(crate::GatewayConfig {
+            ui_workspaces: vec![],
             public_url_aliases: vec![],
             forge_browser: None,
             public_url: "https://mcp.example.com".into(),

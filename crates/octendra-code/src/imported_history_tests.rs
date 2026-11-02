@@ -23,6 +23,7 @@ impl Fixture {
             scopes: vec!["code:read".into(), "terminal:exec".into()],
         };
         let gateway = Gateway::new(GatewayConfig {
+            ui_workspaces: vec![],
             public_url_aliases: vec![],
             public_url: "https://fixture.invalid".into(),
             bind: "127.0.0.1:0".into(),
@@ -41,7 +42,7 @@ impl Fixture {
         })
         .await
         .unwrap();
-        let original_request = serde_json::to_string(&Job { id: operation.clone(), device_id: old_device.clone(),
+        let original_request = serde_json::to_string(&Job { ui_context: None, id: operation.clone(), device_id: old_device.clone(),
             owner: "original-owner".into(), tool: "terminal_exec".into(),
             arguments: json!({"workspace_id":format!("{old_device}:{}",uuid::Uuid::new_v4()),"command":"printf historical"}) }).unwrap();
         let original_result = json!({"state":"exited","output":"historical output\n","exit_code":0,"output_complete":true}).to_string();

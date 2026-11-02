@@ -18,6 +18,7 @@ async fn fixture() -> (tempfile::TempDir, Gateway, String, tokio::net::TcpListen
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let credential = random();
     let g = Gateway::new(GatewayConfig {
+        ui_workspaces: vec![],
         public_url_aliases: vec![],
         forge_browser: None,
         allowed_origins: octendra_code::default_mcp_client_origins(),
@@ -40,6 +41,7 @@ async fn fixture() -> (tempfile::TempDir, Gateway, String, tokio::net::TcpListen
 }
 async fn job(g: &Gateway, tool: &str, arguments: Value) -> Job {
     let job = Job {
+        ui_context: None,
         id: uuid::Uuid::new_v4().to_string(),
         device_id: g.config.devices[0].id.clone(),
         owner: g.config.owner.clone(),

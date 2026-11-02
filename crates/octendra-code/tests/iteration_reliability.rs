@@ -16,6 +16,7 @@ use tower::ServiceExt;
 
 fn job(agent: &Agent, tool: &str, arguments: Value) -> Job {
     Job {
+        ui_context: None,
         id: uuid::Uuid::new_v4().to_string(),
         device_id: agent.config.device_id.clone(),
         owner: "test-owner".into(),
@@ -149,6 +150,7 @@ async fn progress_is_observable_device_scoped_and_rejects_invalid_values() {
     let (dir, agent, _) = fixture().await;
     let other = uuid::Uuid::new_v4().to_string();
     let g = Gateway::new(GatewayConfig {
+        ui_workspaces: vec![],
         public_url_aliases: vec![],
         forge_browser: None,
         allowed_origins: octendra_code::default_mcp_client_origins(),
@@ -178,6 +180,7 @@ async fn progress_is_observable_device_scoped_and_rejects_invalid_values() {
     let mut ids = Vec::new();
     for device in [&agent.config.device_id, &other] {
         let request = Job {
+            ui_context: None,
             id: uuid::Uuid::new_v4().to_string(),
             device_id: device.clone(),
             owner: "test-owner".into(),

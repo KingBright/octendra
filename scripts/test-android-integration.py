@@ -163,6 +163,9 @@ def main():
         # Shared UI tools use the real MCP boundary and native image blocks,
         # without an Android command string, workspace or caller-managed lease.
         def ui(name,arguments):
+            # This fixture accepts the phone's existing display adapter, not a
+            # provisioned isolated profile/VM. Select that boundary explicitly.
+            if name=='ui_observe':arguments={'context':'host',**arguments}
             response=client.rpc('tools/call',{'name':name,'arguments':arguments})
             value=response.get('structuredContent',{})
             operation=value.get('operation_id');end=time.monotonic()+60

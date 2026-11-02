@@ -1,9 +1,9 @@
 {
-  "adapter_tools_sha256": "ced997a20d073eebc7cbe6de7bcea0e70d72e20bda43dca0194dae69d653972c",
+  "adapter_tools_sha256": "b0e1282b9100f4f208d9550a2da815dd308a4c0c77ee3682a6b207f870e3da22",
   "boundary": "Adapter-sent catalog is not proof of final host exposure. No final host report means unknown.",
   "protocol": 1,
-  "server_tools_sha256": "ced997a20d073eebc7cbe6de7bcea0e70d72e20bda43dca0194dae69d653972c",
-  "skill_revision": "1267168eacea3f31ff8247185d5d48c2d9d0ba8d038c759275bf97d544e7b208",
+  "server_tools_sha256": "b0e1282b9100f4f208d9550a2da815dd308a4c0c77ee3682a6b207f870e3da22",
+  "skill_revision": "56eed1b4012e4784565337add252d7d0ec11f8a00514da76b6b25cf771a09dde",
   "tools": [
     {
       "_meta": {
@@ -22,10 +22,18 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Observe a computer or phone using one interface. Select device by name or ID; view defaults to active. Returns an image, observation_id, element refs where supported, and actual capabilities/readiness. No workspace, task, session or lease setup. Coordinates refer to pixels in the returned image.",
+      "description": "Observe a computer or phone using one interface. Select a device or named AI workspace. Defaults to its persistent isolated workspace; never falls back to the host. context=host explicitly selects the existing host session. Returns actual execution_context, image, observation_id and capabilities. No session or lease setup. Coordinates refer to image pixels.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "context": {
+            "default": "isolated",
+            "enum": [
+              "isolated",
+              "host"
+            ],
+            "type": "string"
+          },
           "device": {
             "type": "string"
           },
@@ -74,7 +82,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Act on a computer or phone observation. Send one semantic action; a fresh observation/image follows by default. Prefer returned element refs; otherwise use image-pixel x/y. type_text inserts, fill replaces. Unsupported actions report actual alternatives. Sessions and native leases are internal. On an uncertain outcome observe the original operation_id; never replay input.",
+      "description": "Act on a computer or phone observation, bound to its original execution_context and device. Send one semantic action; a fresh observation/image follows by default. Prefer element refs; otherwise use image-pixel x/y. type_text inserts, fill replaces. Unsupported actions report alternatives. On an uncertain outcome observe the original operation_id; never replay input.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

@@ -38,6 +38,7 @@ async fn fixture_with_flags(allow_write: bool, allow_exec: bool) -> Fixture {
         .map(str::to_owned)
         .collect();
     let g = Gateway::new(GatewayConfig {
+        ui_workspaces: vec![],
         public_url_aliases: vec![],
         forge_browser: None,
         public_url: "https://fixture.example".into(),

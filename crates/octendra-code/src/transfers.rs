@@ -1368,6 +1368,7 @@ mod tests {
             epoch: uuid::Uuid::new_v4(),
         };
         let g = Gateway::new(crate::GatewayConfig {
+            ui_workspaces: vec![],
             public_url_aliases: vec![],
             public_url: "https://offline.invalid".into(),
             bind: "127.0.0.1:0".into(),
@@ -1387,6 +1388,7 @@ mod tests {
         .await
         .unwrap();
         let observe = Job {
+            ui_context: None,
             id: uuid::Uuid::new_v4().to_string(),
             owner: identity.owner.clone(),
             device_id: identity.device_id.to_string(),
@@ -1415,6 +1417,7 @@ mod tests {
             .bind(serde_json::to_string(&observe).unwrap()).bind(json!({"frame_artifact":artifact}).to_string())
             .bind(now()).execute(&g.store.pool).await.unwrap();
         let export = Job {
+            ui_context: None,
             id: uuid::Uuid::new_v4().to_string(),
             owner: identity.owner.clone(),
             device_id: identity.device_id.to_string(),

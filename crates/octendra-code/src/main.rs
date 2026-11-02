@@ -508,6 +508,7 @@ async fn main() -> Result<()> {
                 .hash_password(password.as_bytes(), &salt)?
                 .to_string();
             let c = GatewayConfig {
+                ui_workspaces: vec![],
                 public_url_aliases: vec![],
                 forge_browser: None,
                 public_url,
@@ -628,7 +629,7 @@ async fn main() -> Result<()> {
                 ensure!(!c.roots.is_empty(), "no project roots");
             } else {
                 let c: GatewayConfig = read_config(&config)?;
-                c.validate_oauth_policy()?;
+                c.validate()?;
             }
             println!("Configuration valid; secrets not displayed.");
         }

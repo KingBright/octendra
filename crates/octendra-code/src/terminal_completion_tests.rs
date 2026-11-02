@@ -115,6 +115,7 @@ async fn command(f: &Fixture) -> String {
     let result = f
         .agent
         .execute(&Job {
+            ui_context: None,
             id: id.clone(),
             device_id: f.agent.config.device_id.clone(),
             owner: "fixture".into(),
@@ -218,6 +219,7 @@ async fn failed_final_state_write_does_not_emit_a_completion_hint() {
     let result = f
         .agent
         .execute(&Job {
+            ui_context: None,
             id: id.clone(),
             device_id: f.agent.config.device_id.clone(),
             owner: "fixture".into(),
@@ -245,6 +247,7 @@ async fn accepted_cancellation_wakes_heartbeat_and_is_not_projected_as_success()
     let id = uuid::Uuid::new_v4().to_string();
     f.agent
         .execute(&Job {
+            ui_context: None,
             id: id.clone(),
             device_id: f.agent.config.device_id.clone(),
             owner: "fixture".into(),

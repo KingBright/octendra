@@ -7,10 +7,29 @@ describes proposed work; the behavior below describes the current implementation
 Use the same two tools on every device:
 
 ```json
-{"tool":"ui_observe","arguments":{"device":"MacBook-M2-Max"}}
-{"tool":"ui_observe","arguments":{"device":"Android-Phone"}}
+{"tool":"ui_observe","arguments":{"device":"Mac Studio AI workspace"}}
+{"tool":"ui_observe","arguments":{"device":"Android-Phone","context":"host"}}
 {"tool":"ui_act","arguments":{"device":"Android-Phone","observation_id":"<returned UUID>","action":{"type":"click","target":{"ref":"n12"}}}}
 ```
+
+The gateway defaults to the selected device's configured persistent VM workspace.
+`devices_list.ui_workspaces` lists its name, actual host and execution device,
+stable context identity and current Agent connection state. The workspace name,
+host name or guest name resolve to that same configured guest. Missing workspaces
+return `ui_workspace_unavailable`; they never select the host or another device.
+Explicit `context:"host"` on `ui_observe` selects an existing host session,
+including the current Android display adapter. This mode is reported as
+`host_session` and is not full VM isolation. `ui_act` inherits the observation's
+execution context; it cannot switch contexts. Normal and recovered results keep
+the original `execution_context` and actual execution device.
+
+The gateway's optional private `ui_workspaces` configuration contains `id` (a
+UUID identifying this persistent guest), `name`, `host_device_id` and
+`execution_device_id`. Both devices must already be enrolled, and must differ.
+Change the context UUID when replacing a VM, not when reconnecting it. A changed
+binding rejects new input from the old observation. Exact admitted retries still
+observe the original operation. These bindings do not create, start or attest a
+VM; guest provisioning and real graphical/input acceptance remain O7 work.
 
 An observation includes an image, its exact width/height, optional semantic
 elements, a concrete `view` identity and the backend's supported actions.
@@ -48,14 +67,23 @@ observation without sending input. Current-focus text/keys do not compare
 unrelated pixels; explicit app launches use the live view binding and do not
 require an unchanged page. Android refs are revalidated against the
 actual node and can resolve a label's actionable ancestor. Observation records
-are scoped to the authenticated owner/device/view. An uncertain action is not
+on the native desktop adapter are scoped to the authenticated owner/device and
+immutable observation ID. It retains up to 128 independent observations per owner/device;
+another chat's observation does not overwrite yours. Cache eviction requests a
+fresh observation and does not impose a deadline on the Agent's task.
+Before native input, the adapter consumes that observation and advances the
+source's mutation revision. Earlier observations of that same source require
+refreshing; a second read alone does not invalidate them. Embedded/local native
+adapters without a gateway workspace binding refuse default isolation requests
+before opening a worker; host observation remains an explicit selection.
+An uncertain action is not
 replayed; inspect its original `operation_id` through `operation_get` and
 observe the UI. An input acknowledgement does not prove business success.
 
 ## Android background view
 
 ```json
-{"tool":"ui_observe","arguments":{"device":"Android-Phone","view":"background"}}
+{"tool":"ui_observe","arguments":{"device":"Android-Phone","context":"host","view":"background"}}
 {"tool":"ui_act","arguments":{"device":"Android-Phone","observation_id":"<returned UUID>","action":{"type":"launch_app","app":"com.android.settings"}}}
 ```
 

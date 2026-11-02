@@ -30,6 +30,7 @@ pub(crate) fn validate(config: &GatewayConfig) -> Result<()> {
     if let Some(browser) = &config.forge_browser {
         browser.validate()?;
     }
+    crate::ui_workspace::validate(config)?;
     Ok(())
 }
 

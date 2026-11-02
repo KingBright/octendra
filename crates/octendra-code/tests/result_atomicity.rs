@@ -16,6 +16,7 @@ async fn fixture() -> (tempfile::TempDir, Gateway, Principal, String) {
         "terminal:exec".into(),
     ];
     let g = Gateway::new(GatewayConfig {
+        ui_workspaces: vec![],
         public_url_aliases: vec![],
         forge_browser: None,
         public_url: "https://fixture.example".into(),
@@ -48,6 +49,7 @@ async fn fixture() -> (tempfile::TempDir, Gateway, Principal, String) {
 async fn completed(g: &Gateway, p: &Principal, device: &str) -> String {
     let id = uuid::Uuid::new_v4().to_string();
     let job = Job {
+        ui_context: None,
         id: id.clone(),
         device_id: device.into(),
         owner: p.owner.clone(),

@@ -59,6 +59,7 @@ mod transfer_receiver;
 mod transfer_watch;
 pub mod transfers;
 mod ui;
+pub mod ui_workspace;
 mod upgrade_identity;
 mod work_events;
 mod workspace_context;
@@ -114,6 +115,8 @@ pub struct DeviceRegistration {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GatewayConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ui_workspaces: Vec<ui_workspace::UiWorkspace>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forge_browser: Option<forge_browser::ForgeBrowserConfig>,
     pub public_url: String,
@@ -138,6 +141,10 @@ pub fn default_mcp_client_origins() -> Vec<String> {
     ]
 }
 impl GatewayConfig {
+    /// Same complete validation as service startup, without opening state or sockets.
+    pub fn validate(&self) -> Result<()> {
+        live_config::validate(self)
+    }
     /// Check client-facing policy without starting a service or opening its database.
     pub fn validate_oauth_policy(&self) -> Result<()> {
         validate_url(&self.public_url)?;
@@ -494,6 +501,7 @@ mod private_file_tests {
         let project_root = dir.path().join("workspace");
         std::fs::create_dir_all(&project_root).unwrap();
         let gw = GatewayConfig {
+            ui_workspaces: vec![],
             public_url_aliases: vec![],
             forge_browser: None,
             public_url: "https://mcp.example.com:8443".into(),

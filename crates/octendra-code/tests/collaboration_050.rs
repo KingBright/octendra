@@ -32,6 +32,7 @@ impl Fixture {
         let root = d.path().join("root");
         std::fs::create_dir(&root).unwrap();
         let g = Gateway::new(GatewayConfig {
+            ui_workspaces: vec![],
             public_url_aliases: vec![],
             forge_browser: None,
             allowed_origins: octendra_code::default_mcp_client_origins(),
@@ -126,6 +127,7 @@ impl Fixture {
     }
     async fn queued(&self, tool: &str) -> Job {
         let j = Job {
+            ui_context: None,
             id: uuid::Uuid::new_v4().to_string(),
             device_id: self.ws.device_id.clone(),
             owner: "owner".into(),
@@ -288,6 +290,7 @@ async fn operation_get_observes_terminal_exit_without_new_read_jobs() {
 async fn edit_journal_tracks_each_published_file_and_final_state() {
     let f = Fixture::new().await;
     let j = Job {
+        ui_context: None,
         id: uuid::Uuid::new_v4().to_string(),
         device_id: f.ws.device_id.clone(),
         owner: "owner".into(),
@@ -316,6 +319,7 @@ async fn edit_journal_tracks_each_published_file_and_final_state() {
     );
     let after =
         f.a.execute(&Job {
+            ui_context: None,
             id: uuid::Uuid::new_v4().to_string(),
             device_id: f.ws.device_id.clone(),
             owner: "owner".into(),

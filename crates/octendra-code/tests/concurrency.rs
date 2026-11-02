@@ -48,6 +48,7 @@ async fn fixture() -> (tempfile::TempDir, Agent, String) {
 }
 fn job(agent: &Agent, tool: &str, arguments: Value) -> Job {
     Job {
+        ui_context: None,
         id: uuid::Uuid::new_v4().to_string(),
         device_id: agent.config.device_id.clone(),
         owner: "fixture".into(),
@@ -184,6 +185,7 @@ async fn concurrent_duplicate_mutation_returns_one_durable_result() {
 async fn gateway(agent: &Agent, dir: &std::path::Path, origin: String) -> (Gateway, String) {
     let other = random();
     let g = Gateway::new(GatewayConfig {
+        ui_workspaces: vec![],
         public_url_aliases: vec![],
         forge_browser: None,
         allowed_origins: octendra_code::default_mcp_client_origins(),
@@ -225,6 +227,7 @@ async fn queued(
     updated: i64,
 ) -> Job {
     let job = Job {
+        ui_context: None,
         id: uuid::Uuid::new_v4().to_string(),
         device_id: device.into(),
         owner: "fixture".into(),

@@ -18,6 +18,7 @@ async fn gateway() -> (tempfile::TempDir, Gateway, String) {
     let dir = tempfile::tempdir().unwrap();
     let credential = random();
     let gateway = Gateway::new(GatewayConfig {
+        ui_workspaces: vec![],
         public_url_aliases: vec![],
         forge_browser: None,
         allowed_origins: octendra_code::default_mcp_client_origins(),
@@ -69,6 +70,7 @@ async fn post(
 async fn queued(gateway: &Gateway, state: &str) -> String {
     let id = uuid::Uuid::new_v4().to_string();
     let job = Job {
+        ui_context: None,
         id: id.clone(),
         device_id: gateway.config.devices[0].id.clone(),
         owner: "review".into(),

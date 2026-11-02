@@ -33,6 +33,7 @@ async fn desktop_observe_ack_full_frame_read_then_close_cleanup() {
     )
     .with_store(agent.store.clone());
     let job = |request| crate::gateway::Job {
+        ui_context: None,
         id: uuid::Uuid::new_v4().to_string(),
         owner: identity.owner.clone(),
         device_id: identity.device_id.to_string(),

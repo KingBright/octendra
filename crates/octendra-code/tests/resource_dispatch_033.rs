@@ -16,6 +16,7 @@ async fn fixture() -> (tempfile::TempDir, Gateway, String, Value) {
     let token = random();
     let device = uuid::Uuid::new_v4().to_string();
     let g = Gateway::new(GatewayConfig {
+        ui_workspaces: vec![],
         public_url_aliases: vec![],
         forge_browser: None,
         allowed_origins: octendra_code::default_mcp_client_origins(),
@@ -46,6 +47,7 @@ fn ws(g: &Gateway) -> String {
 }
 async fn queue(g: &Gateway, tool: &str, args: Value, age: i64) -> String {
     let j = Job {
+        ui_context: None,
         id: uuid::Uuid::new_v4().to_string(),
         device_id: g.config.devices[0].id.clone(),
         owner: "test".into(),

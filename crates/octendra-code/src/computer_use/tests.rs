@@ -21,6 +21,7 @@ async fn typed_gateway_ack_to_four_k_existing_chunk_artifact_and_close() {
     .with_store(agent.store.clone());
     let gateway_state = tempfile::tempdir().unwrap();
     let mut gateway = Gateway::new(GatewayConfig {
+        ui_workspaces: vec![],
         public_url_aliases: vec![],
         public_url: "https://offline.invalid".into(),
         bind: "127.0.0.1:0".into(),
@@ -125,6 +126,7 @@ async fn typed_gateway_ack_to_four_k_existing_chunk_artifact_and_close() {
     // The authorized export below retrieves the full indexed frame after ACK.
     // Avoid an extra full-frame hash/read within the same short execution lease.
     let export = crate::gateway::Job {
+        ui_context: None,
         id: Uuid::new_v4().to_string(),
         owner: id.owner.clone(),
         device_id: id.device_id.to_string(),
@@ -245,6 +247,7 @@ async fn desktop_export_one_429_or_disconnect_delivers_terminal_and_retires_fram
         .with_store(agent.store.clone());
         let gateway_state = tempfile::tempdir().unwrap();
         let mut gateway = Gateway::new(GatewayConfig {
+            ui_workspaces: vec![],
             public_url_aliases: vec![],
             public_url: "https://offline.invalid".into(),
             bind: "127.0.0.1:0".into(),
@@ -360,6 +363,7 @@ async fn desktop_export_one_429_or_disconnect_delivers_terminal_and_retires_fram
         .await
         .unwrap();
         let export = crate::gateway::Job {
+            ui_context: None,
             id: export_id,
             owner: id.owner.clone(),
             device_id: id.device_id.to_string(),
@@ -938,6 +942,7 @@ async fn agent_fixture(
 }
 fn job(id: &Identity, request: Request) -> crate::gateway::Job {
     crate::gateway::Job {
+        ui_context: None,
         id: Uuid::new_v4().to_string(),
         device_id: id.device_id.to_string(),
         owner: id.owner.clone(),

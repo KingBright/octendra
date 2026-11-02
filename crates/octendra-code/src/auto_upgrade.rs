@@ -1917,6 +1917,7 @@ mod tests {
         }
         let gateway = Gateway::new_with_config_path(
             crate::GatewayConfig {
+                ui_workspaces: vec![],
                 public_url_aliases: vec![],
                 forge_browser: None,
                 public_url: "https://fixture.invalid".into(),

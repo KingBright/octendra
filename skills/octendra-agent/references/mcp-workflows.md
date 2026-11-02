@@ -2,6 +2,24 @@
 
 Use these workflows when `octendra_*` MCP tools are available.
 
+## Computer and phone UI
+
+When the Code Gateway exposes `ui_observe` / `ui_act`, use those two tools for
+both computers and phones. Select a device or a named AI workspace from
+`devices_list.ui_workspaces`. Observation defaults to that device's persistent
+isolated VM; `ui_workspace_unavailable` means it has not been configured and
+must not trigger a fallback to the host or another device. Only use
+`context:"host"` on observation when the task explicitly targets the existing
+host session. This includes the current Android main/background display
+adapter, whose shared-kernel isolation is not a full VM.
+
+Keep the returned `execution_context`, `observation_id` and image coordinates.
+Input inherits that exact destination; a new device selection cannot move an
+old observation. No task/session/lease setup is needed. After an uncertain
+input, inspect the original `operation_id` with `operation_get`; do not replay.
+Agent connectivity and a configured VM binding alone do not prove graphical
+isolation or successful input. Check actual supported actions and results.
+
 ## Default Agent Tools
 
 The `agent` profile intentionally exposes 22 task-level tools. Legacy workspace-state polling is not part of this surface; normal waiting is centralized in Agent Work Context:

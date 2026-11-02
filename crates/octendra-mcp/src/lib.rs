@@ -1572,6 +1572,7 @@ impl OctendraMcpServer {
             Uuid::new_v4().to_string()
         };
         let job = octendra_code::gateway::Job {
+            ui_context: None,
             id: job_id,
             device_id,
             owner,

@@ -40,6 +40,7 @@ async fn fixture() -> (
         root: config.roots[0].clone(),
     };
     let job = Job {
+        ui_context: None,
         id: uuid::Uuid::new_v4().to_string(),
         device_id: config.device_id.clone(),
         owner: "fixture".into(),

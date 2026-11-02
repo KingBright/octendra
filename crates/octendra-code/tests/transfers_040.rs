@@ -49,6 +49,7 @@ impl Fixture {
         let root = dir.path().join("project");
         std::fs::create_dir(&root).unwrap();
         let g = Gateway::new(GatewayConfig {
+            ui_workspaces: vec![],
             public_url_aliases: vec![],
             forge_browser: None,
             allowed_origins: octendra_code::default_mcp_client_origins(),
@@ -121,6 +122,7 @@ impl Fixture {
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
         let j = Job {
+            ui_context: None,
             id: uuid::Uuid::new_v4().to_string(),
             device_id: self.ws.device_id.clone(),
             owner: "fixture".into(),
@@ -572,6 +574,7 @@ async fn workspace_context_is_scoped_and_has_a_stable_cursor() {
         .await
         .unwrap();
     let make = |args| Job {
+        ui_context: None,
         id: uuid::Uuid::new_v4().to_string(),
         device_id: f.ws.device_id.clone(),
         owner: "fixture".into(),

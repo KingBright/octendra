@@ -20,6 +20,7 @@ impl Fixture {
         let token = random();
         let device = uuid::Uuid::new_v4().to_string();
         let g = Gateway::new(GatewayConfig {
+            ui_workspaces: vec![],
             public_url_aliases: vec![],
             forge_browser: None,
             public_url: "https://poll-budget.example".into(),

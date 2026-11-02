@@ -41,6 +41,7 @@ fn saved(capture: &Capture) -> Saved {
         mapping: capture.frame.mapping.clone(),
         image_size: capture.image.size,
         tiles: capture.image.tiles(),
+        resource_revision: 0,
     }
 }
 fn action(value: Value) -> Action {
@@ -169,6 +170,103 @@ fn mcp_images_are_native_blocks_including_operation_recovery() {
         value["operations"][0]["observation"]["image"]["content_index"],
         1
     );
+}
+
+#[tokio::test]
+async fn observations_from_two_chats_remain_independent_and_cache_is_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut picture = capture();
+    let identity = picture.frame.binding.identity.clone();
+    let agent = Agent::new(crate::AgentConfig {
+        gateway_url: "https://fixture.invalid".into(),
+        device_id: identity.device_id.to_string(),
+        device_token: crate::random(),
+        state_dir: dir.path().join("state"),
+        roots: vec![dir.path().to_owned()],
+        allow_write: false,
+        allow_exec: false,
+        shell: "/bin/sh".into(),
+    })
+    .await
+    .unwrap();
+    let direct = crate::gateway::Job {
+        ui_context: None,
+        id: Uuid::new_v4().to_string(),
+        device_id: identity.device_id.to_string(),
+        owner: identity.owner.clone(),
+        tool: "ui_observe".into(),
+        arguments: json!({"device":identity.device_id}),
+    };
+    let refused = perform(&agent, &direct).await.unwrap();
+    assert_eq!(refused["error"], "ui_workspace_gateway_required");
+    assert_eq!(refused["input_sent"], false);
+    let prefix = crate::hash(format!("{}:{}", identity.owner, identity.device_id));
+    let first = save(&agent, &prefix, &identity, picture, "fixture", &[])
+        .await
+        .unwrap();
+    picture = capture();
+    let second = save(&agent, &prefix, &identity, picture, "fixture", &[])
+        .await
+        .unwrap();
+    let key = |value: &Value| format!("{prefix}:{}", value["observation_id"].as_str().unwrap());
+    let saved_first = agent
+        .store
+        .get::<Saved>("ui_observation", &key(&first))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(consume(&agent, &key(&first), &saved_first).await.unwrap());
+    assert!(
+        agent
+            .store
+            .take::<Saved>("ui_observation", &key(&first))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        agent
+            .store
+            .get::<Saved>("ui_observation", &key(&second))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let saved_second = agent
+        .store
+        .get::<Saved>("ui_observation", &key(&second))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!consume(&agent, &key(&second), &saved_second).await.unwrap());
+    let fresh = save(&agent, &prefix, &identity, capture(), "fixture", &[])
+        .await
+        .unwrap();
+    let saved_fresh = agent
+        .store
+        .get::<Saved>("ui_observation", &key(&fresh))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(consume(&agent, &key(&fresh), &saved_fresh).await.unwrap());
+    for _ in 0..128 {
+        save(&agent, &prefix, &identity, capture(), "fixture", &[])
+            .await
+            .unwrap();
+    }
+    assert!(
+        agent
+            .store
+            .get::<Saved>("ui_observation", &key(&second))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM kv WHERE kind='ui_observation'")
+        .fetch_one(&agent.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 128);
 }
 
 #[cfg(unix)]

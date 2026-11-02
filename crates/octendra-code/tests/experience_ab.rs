@@ -96,6 +96,7 @@ impl Harness {
         );
         let open = a
             .execute(&Job {
+                ui_context: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 device_id: device.clone(),
                 owner: "owner".into(),
@@ -114,6 +115,7 @@ impl Harness {
             ],
         };
         let g = Gateway::new(GatewayConfig {
+            ui_workspaces: vec![],
             public_url_aliases: vec![],
             forge_browser: None,
             public_url: "https://ab.example".into(),

@@ -251,6 +251,7 @@ mod tests {
     use super::*;
     fn job(content: String) -> Job {
         Job {
+            ui_context: None,
             id: uuid::Uuid::new_v4().to_string(),
             device_id: uuid::Uuid::new_v4().to_string(),
             owner: "test".into(),
