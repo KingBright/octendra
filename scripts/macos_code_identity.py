@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import pathlib
+import plistlib
 import re
 import secrets
 import shutil
@@ -332,12 +333,16 @@ def sign_copy(source, destination, base):
     password = paths["password"].read_text().strip()
     _security("unlock-keychain", "-p", password, paths["keychain"])
     _ensure_keychain_search_list(paths["keychain"])
-    with tempfile.NamedTemporaryFile(prefix=".octendra-requirement-", dir=destination.parent) as requirement_file:
+    with tempfile.NamedTemporaryFile(prefix=".octendra-requirement-", dir=destination.parent) as requirement_file, \
+            tempfile.NamedTemporaryFile(prefix=".octendra-entitlements-", dir=destination.parent) as entitlements_file:
         requirement_file.write(("designated => " + value["designated_requirement"] + "\n").encode())
         requirement_file.flush()
+        entitlements_file.write(plistlib.dumps({"com.apple.security.virtualization": True}))
+        entitlements_file.flush()
         subprocess.run(
             ["/usr/bin/codesign", "--force", "--sign", value["certificate_sha1"], "--keychain", str(paths["keychain"]),
              "--identifier", CODE_IDENTIFIER, "--requirements", requirement_file.name,
+             "--entitlements", entitlements_file.name,
              "--timestamp=none", str(destination)],
             check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=60,
         )
@@ -380,11 +385,15 @@ def sign_existing_copy(source, destination, certificate_sha1):
     destination = pathlib.Path(destination)
     shutil.copyfile(source, destination)
     os.chmod(destination, 0o755)
-    with tempfile.NamedTemporaryFile(prefix='.octendra-requirement-', dir=destination.parent) as requirement_file:
+    with tempfile.NamedTemporaryFile(prefix='.octendra-requirement-', dir=destination.parent) as requirement_file, \
+            tempfile.NamedTemporaryFile(prefix='.octendra-entitlements-', dir=destination.parent) as entitlements_file:
         requirement_file.write(('designated => '+value['designated_requirement']+'\n').encode())
         requirement_file.flush()
+        entitlements_file.write(plistlib.dumps({'com.apple.security.virtualization': True}))
+        entitlements_file.flush()
         subprocess.run(['/usr/bin/codesign', '--force', '--sign', value['certificate_sha1'],
             '--identifier', CODE_IDENTIFIER, '--requirements', requirement_file.name,
+            '--entitlements', entitlements_file.name,
             '--timestamp=none', str(destination)], check=True, stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE, text=True, timeout=60)
     subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '-R',

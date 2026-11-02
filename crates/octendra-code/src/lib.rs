@@ -32,6 +32,8 @@ mod job_dispatch;
 mod job_receipts;
 mod live_config;
 pub mod local_sudo;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod macos_vm;
 mod maintenance;
 pub mod maintenance_tasks;
 mod oauth_handoff;

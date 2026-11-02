@@ -23,6 +23,14 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Prepare or run the persistent isolated macOS workspace using the system hypervisor.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    AiWorkspace {
+        #[arg(value_enum)]
+        operation: octendra_code::macos_vm::Operation,
+        #[arg(long)]
+        directory: Option<PathBuf>,
+    },
     /// Configure exact callback/origin presets; --check reports missing configuration without writing.
     ConfigureClients {
         #[arg(long)]
@@ -413,6 +421,13 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
     match command {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        Command::AiWorkspace {
+            operation,
+            directory,
+        } => {
+            octendra_code::macos_vm::execute(operation, directory.as_deref())?;
+        }
         #[cfg(target_os = "macos")]
         Command::MaintenanceTask { args } => {
             let value = octendra_code::maintenance_tasks::run_child(args);

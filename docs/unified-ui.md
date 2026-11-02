@@ -80,6 +80,31 @@ An uncertain action is not
 replayed; inspect its original `operation_id` through `operation_get` and
 observe the UI. An input acknowledgement does not prove business success.
 
+## Native macOS workspace maintenance
+
+Apple silicon builds include the system Virtualization backend in
+`octendra-code`; no separate hypervisor application is required. The maintenance
+entry is `octendra-code ai-workspace probe|status|prepare|run`. `probe` is read-only.
+`prepare` installs Apple's supported macOS restore image into one persistent
+workspace, and `run` opens its independent console. The default private data
+directory is `~/.local/share/octendra/ai-workspace`. Its stable hardware identity,
+system disk and application data are reused. A second owner is rejected rather
+than starting another VM against the same disk.
+
+The existing macOS signing identity is preserved, with Apple's virtualization
+entitlement. Initial account, automatic login and SSH provisioning use the public
+macOS 27 API. Generated guest credentials stay in a private local file. No host
+directory, clipboard, microphone or audio is attached by default. Closing the
+console hides it and leaves the guest running.
+
+On macOS 14+, SIGTERM/SIGINT suspend the VM into its private directory; the next
+`run` restores that exact state. A failed restoration reports its error and keeps
+the saved state. Older hosts can request guest shutdown; that request alone is
+not shutdown completion. `status` labels its runtime record as recorded state,
+not live acceptance. This maintenance backend does not enroll a guest Agent or
+make `ui_observe`/`ui_act` available inside it: enrollment, graphical input and
+host/guest parallel acceptance remain separate work.
+
 ## Android background view
 
 ```json

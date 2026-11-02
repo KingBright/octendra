@@ -1,5 +1,6 @@
 import importlib.util
 import pathlib
+import plistlib
 import subprocess
 import tempfile
 import unittest
@@ -40,11 +41,17 @@ class MacOsCodeIdentityTests(unittest.TestCase):
 
     def test_existing_identity_signs_copy_without_unlock_create_or_trust(self):
         fingerprint = 'a'*40
+        signing_entitlements = []
+        def codesign(args, **kwargs):
+            if '--sign' in args:
+                path = pathlib.Path(args[args.index('--entitlements') + 1])
+                signing_entitlements.append(plistlib.loads(path.read_bytes()))
+            return subprocess.CompletedProcess(args, 0)
         with tempfile.TemporaryDirectory() as tmp:
             source = pathlib.Path(tmp)/'release'; source.write_bytes(b'artificial immutable release')
             destination = pathlib.Path(tmp)/'signed'
             with mock.patch.object(IDENTITY, '_security', return_value=subprocess.CompletedProcess([], 0, f'1) {fingerprint} "existing"\n')) as security, \
-                 mock.patch.object(IDENTITY.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run, \
+                 mock.patch.object(IDENTITY.subprocess, 'run', side_effect=codesign) as run, \
                  mock.patch.object(IDENTITY, 'create') as create, mock.patch.object(IDENTITY, 'authorize') as authorize:
                 result = IDENTITY.sign_existing_copy(source, destination, fingerprint)
             self.assertEqual(source.read_bytes(), b'artificial immutable release')
@@ -52,6 +59,7 @@ class MacOsCodeIdentityTests(unittest.TestCase):
             self.assertEqual(security.call_count, 1)
             create.assert_not_called(); authorize.assert_not_called()
             self.assertEqual(run.call_count, 2)
+            self.assertEqual(signing_entitlements, [{'com.apple.security.virtualization': True}])
             for call in run.call_args_list:
                 self.assertEqual(call.args[0][0], '/usr/bin/codesign')
                 self.assertNotIn('--keychain', call.args[0])
