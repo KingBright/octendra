@@ -71,7 +71,7 @@ async fn r041_workspace_terminal_pages_and_scope_are_explicit() {
     for (id,created,state) in [("a",10,"running"),("b",30,"exited"),("c",20,"running"),("d",40,"exited"),("e",40,"exited")] {
         f.agent.store.put("terminal",id,&json!({"id":id,"workspace_id":f.ws.id,"state":state,"created_at":created,"output_complete":true}),i64::MAX).await.unwrap();
     }
-    async fn context(f:&Fixture,args:Value)->Value {f.agent.execute(&Job{id:uuid::Uuid::new_v4().to_string(),device_id:f.ws.device_id.clone(),owner:"fixture".into(),tool:"workspace_context".into(),arguments:args}).await.unwrap()}
+    async fn context(f:&Fixture,args:Value)->Value {f.agent.execute(&Job{id:uuid::Uuid::new_v4().to_string(),device_id:f.ws.device_id.clone(),owner:"fixture".into(),tool:"workspace_context".into(),arguments:args,ui_context:None}).await.unwrap()}
     let mut args=json!({"workspace_id":f.ws.id,"limit":2});let mut found=Vec::new();
     for _ in 0..4 {
         let v=context(&f,args.clone()).await;assert!(v.get("error").is_none(),"{v}");

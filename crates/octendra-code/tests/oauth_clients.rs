@@ -382,6 +382,7 @@ impl Fixture {
         let g = Gateway::new(GatewayConfig {
             public_url_aliases,
             forge_browser: None,
+            ui_workspaces: vec![],
             public_url: ORIGIN.into(),
             bind: "127.0.0.1:0".into(),
             state_dir: dir.path().join("state"),

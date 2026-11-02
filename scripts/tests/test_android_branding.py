@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
+import zipfile
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -15,6 +16,21 @@ import android_identity
 
 
 class AndroidBrandingTests(unittest.TestCase):
+    def test_external_signing_preserves_built_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            unsigned, signed = Path(directory)/'unsigned.apk', Path(directory)/'signed.apk'
+            def apk(path, entries):
+                with zipfile.ZipFile(path,'w') as archive:
+                    for name, data in entries.items(): archive.writestr(name,data)
+            apk(unsigned,{'AndroidManifest.xml':b'manifest','classes.dex':b'code'})
+            apk(signed,{'AndroidManifest.xml':b'manifest','classes.dex':b'code','META-INF/OWNER.SF':b'signature'})
+            android_identity.verify_signed_payload(unsigned,signed)
+            for entries in ({'AndroidManifest.xml':b'manifest','classes.dex':b'changed'},
+                            {'AndroidManifest.xml':b'manifest','classes.dex':b'code','assets/extra':b'new'}):
+                apk(signed,entries)
+                with self.assertRaisesRegex(ValueError,'payload differs'):
+                    android_identity.verify_signed_payload(unsigned,signed)
+
     def test_manifest_components_resolve_in_migrated_namespace(self):
         manifest = ET.parse(ROOT / 'android/app/src/main/AndroidManifest.xml')
         for tag in ('activity', 'service', 'provider', 'receiver'):

@@ -39,7 +39,7 @@ async fn r050_terminal_completion_can_be_observed_without_read_job() {
 async fn r050_workspace_events_are_bounded_and_do_not_record_observers() {
     let f=Fixture::new().await;
     let args=json!({"workspace_id":f.ws.id,"limit":50});
-    let original=Job{id:uuid::Uuid::new_v4().to_string(),device_id:f.ws.device_id.clone(),owner:"fixture".into(),tool:"workspace_context".into(),arguments:args.clone()};
+    let original=Job{id:uuid::Uuid::new_v4().to_string(),device_id:f.ws.device_id.clone(),owner:"fixture".into(),tool:"workspace_context".into(),arguments:args.clone(),ui_context:None};
     let first=f.agent.execute(&original).await.unwrap();let cursor=first["events"]["cursor"].as_str().unwrap().to_owned();
     let n=20;
     for i in 0..n {f.agent.store.put("terminal",&format!("event-{i}"),&json!({"workspace_id":f.ws.id,"id":format!("event-{i}"),"state":"exited","created_at":now(),"exit_code":0}),i64::MAX).await.unwrap();}
@@ -80,7 +80,7 @@ async fn r050_workspace_events_are_bounded_and_do_not_record_observers() {
 async fn r050_multi_file_partial_edit_has_committed_and_pending_evidence() {
     let f=Fixture::new().await;let id=uuid::Uuid::new_v4().to_string();
     let args=json!({"workspace_id":f.ws.id,"idempotency_key":"partial","files":[{"path":"made-parent","action":"create","expected_version":"absent","content":"keep"},{"path":"made-parent/child","action":"create","expected_version":"absent","content":"not published"}]});
-    let result=f.agent.execute(&Job{id:id.clone(),device_id:f.ws.device_id.clone(),owner:"fixture".into(),tool:"code_apply_edits".into(),arguments:args}).await.unwrap();
+    let result=f.agent.execute(&Job{id:id.clone(),device_id:f.ws.device_id.clone(),owner:"fixture".into(),tool:"code_apply_edits".into(),arguments:args,ui_context:None}).await.unwrap();
     assert_eq!(result["error"],"partial_edit");assert_eq!(result["changed"].as_array().unwrap().len(),1);assert_eq!(result["pending"],json!(["made-parent/child"]));assert_eq!(result["journal_id"],id);
     let journal:Value=serde_json::from_slice(&std::fs::read(f.agent.config.state_dir.join("edits").join(format!("{id}.json"))).unwrap()).unwrap();
     assert_eq!(journal["status"],"partial");assert_eq!(journal["files"][0]["status"],"applied");assert_eq!(std::fs::read(f.ws.root.join("made-parent")).unwrap(),b"keep");
@@ -98,7 +98,7 @@ async fn r050_sync_manifest_cannot_escape_scope_or_alias_destinations() {
     let f=Fixture::new().await;
     for names in [["a//b","a/b"],["a/./b","a/b"],["a/../b","b"]] {
         let args=json!({"workspace_id":f.ws.id,"idempotency_key":random(),"mode":"plan","files":names.map(|p|json!({"path":p,"sha256":hash(b"x"),"size":1}))});
-        let v=f.agent.execute(&Job{id:uuid::Uuid::new_v4().to_string(),device_id:f.ws.device_id.clone(),owner:"fixture".into(),tool:"files_sync".into(),arguments:args}).await.unwrap();assert!(v.get("error").is_some());
+        let v=f.agent.execute(&Job{id:uuid::Uuid::new_v4().to_string(),device_id:f.ws.device_id.clone(),owner:"fixture".into(),tool:"files_sync".into(),arguments:args,ui_context:None}).await.unwrap();assert!(v.get("error").is_some());
     }
     assert!(std::fs::read_dir(&f.ws.root).unwrap().next().is_none());
 }

@@ -4,9 +4,23 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import zipfile
 
 PACKAGE = "fun.hackerlife.octendra"
 OWNER_CERT_SHA256 = "f84d9b71f1a00f4b5e3084420e5cee3327053389983b2428d9bec71755e5539d"
+
+
+def verify_signed_payload(unsigned, signed):
+    """External signing may add signatures, but may not replace APK contents."""
+    with zipfile.ZipFile(unsigned) as source, zipfile.ZipFile(signed) as result:
+        expected, actual = source.namelist(), result.namelist()
+        if len(set(expected)) != len(expected) or len(set(actual)) != len(actual):
+            raise ValueError("Duplicate APK entries")
+        added = set(actual) - set(expected)
+        if (set(expected) - set(actual) or any(not re.fullmatch(
+                r"META-INF/(MANIFEST\.MF|[^/]+\.(SF|RSA|DSA|EC))", name) for name in added)
+                or any(source.read(name) != result.read(name) for name in expected)):
+            raise ValueError("Signed APK payload differs from the built APK")
 
 
 def release_identity(root):
