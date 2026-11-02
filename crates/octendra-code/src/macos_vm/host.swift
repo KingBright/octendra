@@ -7,8 +7,8 @@ import Virtualization
 import Darwin
 
 private let gib: UInt64 = 1 << 30
-private struct VMFailure: Error { let code: String }
-private struct VMProfile: Codable {
+struct VMFailure: Error { let code: String }
+struct VMProfile: Codable {
     var format = 1
     var id: String
     var cpuCount: Int
@@ -27,7 +27,7 @@ private func privateWrite(_ data: Data, to url: URL) throws {
     try data.write(to: url, options: .atomic)
     try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
 }
-private func emit(_ value: [String: Any]) {
+func emit(_ value: [String: Any]) {
     if let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) {
         FileHandle.standardOutput.write(data)
         FileHandle.standardOutput.write(Data([10]))
@@ -93,7 +93,7 @@ private final class RestoreDownload: NSObject, URLSessionDownloadDelegate {
 }
 
 @available(macOS 13, *)
-@MainActor private final class VMHost: NSObject, @preconcurrency VZVirtualMachineDelegate, NSWindowDelegate {
+@MainActor final class VMHost: NSObject, @preconcurrency VZVirtualMachineDelegate, NSWindowDelegate {
     static var active: VMHost?
     let root: URL
     var profile: VMProfile?
@@ -102,6 +102,14 @@ private final class RestoreDownload: NSObject, URLSessionDownloadDelegate {
     var window: NSWindow?
     var signals: [DispatchSourceSignal] = []
     var suspending = false
+    let controlGeneration = UUID().uuidString.lowercased()
+    var controlRevision: UInt64 = 0
+    var controlBusy = false
+    var controlConnections = 0
+    var controlListener: VZVirtioSocketListener?
+    var controlView: VZVirtualMachineView?
+    var controlSize: [Int] = []
+    var controlBounds = NSSize.zero
     var phase = "not_started"
     init(root: URL) { self.root = root }
     func path(_ name: String) -> URL { root.appendingPathComponent(name) }
@@ -137,6 +145,7 @@ private final class RestoreDownload: NSObject, URLSessionDownloadDelegate {
         guard !suspending else { return }
         suspending = true
         defer { suspending = false }
+        while controlBusy { try await Task.sleep(nanoseconds: 10_000_000) }
         guard let configuration = activeConfiguration else { throw VMFailure(code: "guest_configuration_unavailable") }
         try configuration.validateSaveRestoreSupport()
         let temporary = path("suspend-in-progress.bin")
@@ -261,6 +270,7 @@ private final class RestoreDownload: NSObject, URLSessionDownloadDelegate {
         network.attachment = VZNATNetworkDeviceAttachment()
         config.networkDevices = [network]
         config.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
+        config.socketDevices = [VZVirtioSocketDeviceConfiguration()]
         try config.validate()
         activeConfiguration = config
         return config
@@ -330,8 +340,11 @@ private final class RestoreDownload: NSObject, URLSessionDownloadDelegate {
         window.makeFirstResponder(view)
         window.isReleasedWhenClosed = false
         window.delegate = self
+        window.contentAspectRatio = NSSize(width: 1440, height: 900)
         window.orderBack(nil)
         self.window = window
+        controlView = view
+        try startControl(vm)
         for number in [SIGTERM, SIGINT] {
             signal(number, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: number, queue: .main)

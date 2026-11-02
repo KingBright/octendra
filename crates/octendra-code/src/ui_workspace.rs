@@ -38,6 +38,11 @@ pub struct ExecutionContext {
     pub execution_device_id: String,
     isolation: Isolation,
 }
+impl ExecutionContext {
+    pub(crate) fn is_full_vm(&self) -> bool {
+        self.isolation == Isolation::FullVm
+    }
+}
 
 impl UiWorkspace {
     fn context(&self) -> ExecutionContext {

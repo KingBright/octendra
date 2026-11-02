@@ -1,6 +1,8 @@
 //! Device-neutral observe/act facade. Worker identities and short native leases
 //! are internal to each operation; thinking time never keeps a worker alive.
 mod image;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod macos_guest;
 #[cfg(test)]
 mod tests;
 use crate::{agent::Agent, gateway::Job};
@@ -171,7 +173,7 @@ struct Capture {
     image: image::Image,
 }
 fn actions_for(backend: &str) -> Vec<&'static str> {
-    if backend == "macos_pid_private_window_poc" {
+    if matches!(backend, "macos_pid_private_window_poc" | "apple_vz_guest_private_devices") {
         vec![
             "click",
             "secondary_click",
@@ -211,6 +213,10 @@ pub(crate) async fn perform(agent: &Agent, job: &Job) -> Result<Value> {
             json!({"error":"ui_workspace_gateway_required","input_sent":false,
             "next_action":"select_a_configured_gateway_workspace"}),
         );
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if job.ui_context.as_ref().is_some_and(|context| context.is_full_vm()) {
+        return macos_guest::perform(agent, job, args).await;
     }
     let _guard = agent.ui_access.lock().await;
     let capability = agent.desktop_workers.capabilities().await;

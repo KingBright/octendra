@@ -29,6 +29,7 @@ fn main() {
                     "-sdk",
                     sdk,
                     "src/macos_vm/host.swift",
+                    "src/macos_vm/control.swift",
                     "-o",
                 ])
                 .arg(output.join("libOctendraVM.a"))
@@ -40,7 +41,9 @@ fn main() {
             println!("cargo:rustc-link-lib=static=OctendraVM");
             println!("cargo:rustc-link-lib=framework=Virtualization");
             println!("cargo:rustc-link-lib=framework=AppKit");
+            println!("cargo:rustc-link-lib=framework=ScreenCaptureKit");
             println!("cargo:rerun-if-changed=src/macos_vm/host.swift");
+            println!("cargo:rerun-if-changed=src/macos_vm/control.swift");
         }
     }
     println!("cargo:rerun-if-changed=build.rs");

@@ -104,9 +104,31 @@ On macOS 14+, SIGTERM/SIGINT suspend the VM into its private directory; the next
 `run` restores that exact state. A failed restoration reports its error and keeps
 the saved state. Older hosts can request guest shutdown; that request alone is
 not shutdown completion. `status` labels its runtime record as recorded state,
-not live acceptance. This maintenance backend does not enroll a guest Agent or
-make `ui_observe`/`ui_act` available inside it: enrollment, graphical input and
-host/guest parallel acceptance remain separate work.
+not live acceptance.
+
+An enrolled Apple silicon macOS guest with a bound full-VM execution context
+uses a private virtio socket to that VM's native controller. No DHCP address or
+public control listener is involved. Observation selects the controller's exact
+own VM window through ScreenCaptureKit's `currentProcess` API; input goes
+directly to its `VZVirtualMachineView`. There is no global event posting or host
+window activation. Text uses the guest's pasteboard and virtual Command-V;
+the host clipboard is untouched. The guest clipboard retains the inserted text.
+The macOS Agent runs in its user's `gui/<uid>` LaunchAgent, as the existing
+installer already configures. An SSH audit session can have another pasteboard;
+text input from that context returns `ui_gui_session_required` before sending
+input, instead of acknowledging a paste of stale content.
+The window renders behind the host's active apps; a hidden console can be
+reopened behind them for capture. This is a VM console, not a headless display
+backend.
+
+The returned source identifies the actual controller generation. Its restart
+invalidates old observations even when the guest process resumes from memory.
+The guest adapter refuses execution on a physical Mac and never falls back to
+host input. Mac Studio acceptance has exercised the real Agent execution journal,
+observation, click, Chinese/emoji text, save shortcut, exact saved file and
+duplicate-operation recovery, while recording unchanged host foreground, cursor
+and clipboard revision. Automatic guest enrollment/controller service setup and
+deployed web-MCP/fleet acceptance remain separate delivery work.
 
 ## Android background view
 
