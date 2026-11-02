@@ -30,6 +30,7 @@ pub struct Agent {
     #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
     pub(crate) desktop_workers: crate::computer_use::transport::NativeWorkers,
     pub(crate) ui_access: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) ui_generation: uuid::Uuid,
     scheduler: Arc<Scheduler>,
     pub(crate) active: Arc<ActiveJobs>,
     progress: Arc<crate::progress::Registry>,
@@ -255,6 +256,7 @@ impl Agent {
             #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
             desktop_workers,
             ui_access: Arc::default(),
+            ui_generation: uuid::Uuid::new_v4(),
             configured_directories,
             state_only,
             config: Arc::new(config),

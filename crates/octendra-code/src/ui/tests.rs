@@ -42,6 +42,8 @@ fn saved(capture: &Capture) -> Saved {
         image_size: capture.image.size,
         tiles: capture.image.tiles(),
         resource_revision: 0,
+        provider_generation: None,
+        capability_version: None,
     }
 }
 fn action(value: Value) -> Action {
@@ -201,11 +203,11 @@ async fn observations_from_two_chats_remain_independent_and_cache_is_bounded() {
     assert_eq!(refused["error"], "ui_workspace_gateway_required");
     assert_eq!(refused["input_sent"], false);
     let prefix = crate::hash(format!("{}:{}", identity.owner, identity.device_id));
-    let first = save(&agent, &prefix, &identity, picture, "fixture", &[])
+    let first = save(&agent, &prefix, &identity, picture, "fixture", &[], 1)
         .await
         .unwrap();
     picture = capture();
-    let second = save(&agent, &prefix, &identity, picture, "fixture", &[])
+    let second = save(&agent, &prefix, &identity, picture, "fixture", &[], 1)
         .await
         .unwrap();
     let key = |value: &Value| format!("{prefix}:{}", value["observation_id"].as_str().unwrap());
@@ -215,7 +217,11 @@ async fn observations_from_two_chats_remain_independent_and_cache_is_bounded() {
         .await
         .unwrap()
         .unwrap();
-    assert!(consume(&agent, &key(&first), &saved_first).await.unwrap());
+    assert!(
+        consume(&agent, &key(&first), &saved_first, 1)
+            .await
+            .unwrap()
+    );
     assert!(
         agent
             .store
@@ -238,8 +244,12 @@ async fn observations_from_two_chats_remain_independent_and_cache_is_bounded() {
         .await
         .unwrap()
         .unwrap();
-    assert!(!consume(&agent, &key(&second), &saved_second).await.unwrap());
-    let fresh = save(&agent, &prefix, &identity, capture(), "fixture", &[])
+    assert!(
+        !consume(&agent, &key(&second), &saved_second, 1)
+            .await
+            .unwrap()
+    );
+    let fresh = save(&agent, &prefix, &identity, capture(), "fixture", &[], 1)
         .await
         .unwrap();
     let saved_fresh = agent
@@ -248,9 +258,13 @@ async fn observations_from_two_chats_remain_independent_and_cache_is_bounded() {
         .await
         .unwrap()
         .unwrap();
-    assert!(consume(&agent, &key(&fresh), &saved_fresh).await.unwrap());
+    assert!(
+        consume(&agent, &key(&fresh), &saved_fresh, 1)
+            .await
+            .unwrap()
+    );
     for _ in 0..128 {
-        save(&agent, &prefix, &identity, capture(), "fixture", &[])
+        save(&agent, &prefix, &identity, capture(), "fixture", &[], 1)
             .await
             .unwrap();
     }
@@ -267,6 +281,73 @@ async fn observations_from_two_chats_remain_independent_and_cache_is_bounded() {
         .await
         .unwrap();
     assert_eq!(count, 128);
+}
+
+#[tokio::test]
+async fn durable_observations_require_the_current_agent_and_native_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    let picture = capture();
+    let identity = picture.frame.binding.identity.clone();
+    let config = crate::AgentConfig {
+        gateway_url: "https://fixture.invalid".into(),
+        device_id: identity.device_id.to_string(),
+        device_token: crate::random(),
+        state_dir: dir.path().join("state"),
+        roots: vec![dir.path().to_owned()],
+        allow_write: false,
+        allow_exec: false,
+        shell: "/bin/sh".into(),
+    };
+    let agent = Agent::new(config.clone()).await.unwrap();
+    let generation = agent.ui_generation;
+    let prefix = crate::hash(format!("{}:{}", identity.owner, identity.device_id));
+    let old = save(&agent, &prefix, &identity, picture, "fixture", &[], 9)
+        .await
+        .unwrap();
+    let key = |value: &Value| format!("{prefix}:{}", value["observation_id"].as_str().unwrap());
+    let old_key = key(&old);
+    drop(agent);
+
+    // Reopen the same durable state, with the same device and surface, as the
+    // restarted Agent. Identical pixels must not authorize old input.
+    let agent = Agent::new(config).await.unwrap();
+    assert_ne!(agent.ui_generation, generation);
+    let old = agent
+        .store
+        .get::<Saved>("ui_observation", &old_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!consume(&agent, &old_key, &old, 9).await.unwrap());
+
+    let fresh = save(&agent, &prefix, &identity, capture(), "fixture", &[], 10)
+        .await
+        .unwrap();
+    let fresh_key = key(&fresh);
+    let fresh = agent
+        .store
+        .get::<Saved>("ui_observation", &fresh_key)
+        .await
+        .unwrap()
+        .unwrap();
+    // Renewing or replacing the provider requires a new observation, without
+    // consuming the original record or requiring a new task approval.
+    assert!(!consume(&agent, &fresh_key, &fresh, 11).await.unwrap());
+    let mut legacy = serde_json::to_value(&fresh).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("provider_generation");
+    legacy.as_object_mut().unwrap().remove("capability_version");
+    let legacy: Saved = serde_json::from_value(legacy).unwrap();
+    assert!(!consume(&agent, &fresh_key, &legacy, 10).await.unwrap());
+    let same_runtime = agent.clone();
+    assert_eq!(same_runtime.ui_generation, agent.ui_generation);
+    assert!(
+        consume(&same_runtime, &fresh_key, &fresh, 10)
+            .await
+            .unwrap()
+    );
 }
 
 #[cfg(unix)]

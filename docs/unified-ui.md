@@ -71,6 +71,9 @@ on the native desktop adapter are scoped to the authenticated owner/device and
 immutable observation ID. It retains up to 128 independent observations per owner/device;
 another chat's observation does not overwrite yours. Cache eviction requests a
 fresh observation and does not impose a deadline on the Agent's task.
+Durable observations also bind the current Agent runtime and native capability
+version. Restarting the Agent or changing that provider requires a fresh
+observation; an ordinary connection retry does not create a new runtime.
 Before native input, the adapter consumes that observation and advances the
 source's mutation revision. Earlier observations of that same source require
 refreshing; a second read alone does not invalidate them. Embedded/local native

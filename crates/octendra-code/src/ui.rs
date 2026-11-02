@@ -161,6 +161,10 @@ struct Saved {
     tiles: Vec<String>,
     #[serde(default)]
     resource_revision: u64,
+    #[serde(default)]
+    provider_generation: Option<Uuid>,
+    #[serde(default)]
+    capability_version: Option<u64>,
 }
 struct Capture {
     frame: desktop::FrameRef,
@@ -243,6 +247,8 @@ pub(crate) async fn perform(agent: &Agent, job: &Job) -> Result<Value> {
             Some(saved)
                 if Some(saved.id.as_str()) == args.observation_id.as_deref()
                     && saved.surface == approved.desktop_id
+                    && saved.provider_generation == Some(agent.ui_generation)
+                    && saved.capability_version == Some(version)
                     && saved.resource_revision == current_revision =>
             {
                 Some(saved)
@@ -259,6 +265,7 @@ pub(crate) async fn perform(agent: &Agent, job: &Job) -> Result<Value> {
                         capture,
                         &capability.backend,
                         &supported,
+                        version,
                     )
                     .await?;
                 } else {
@@ -292,7 +299,7 @@ pub(crate) async fn perform(agent: &Agent, job: &Job) -> Result<Value> {
     if let Some(saved) = &saved {
         // Consume before any input. A new request cannot replay an uncertain
         // action by changing observe_after or choosing another retry key.
-        if !consume(agent, &key, saved).await? {
+        if !consume(agent, &key, saved, version).await? {
             return Ok(failure("stale_observation", &supported));
         }
     }
@@ -313,6 +320,7 @@ pub(crate) async fn perform(agent: &Agent, job: &Job) -> Result<Value> {
             capture,
             &capability.backend,
             &supported,
+            version,
         )
         .await?;
         if job.tool == "ui_observe" {
@@ -335,6 +343,7 @@ pub(crate) async fn perform(agent: &Agent, job: &Job) -> Result<Value> {
                 capture,
                 &capability.backend,
                 &supported,
+                version,
             )
             .await
             {
@@ -430,6 +439,7 @@ async fn save(
     capture: Capture,
     backend: &str,
     actions: &[&str],
+    version: u64,
 ) -> Result<Value> {
     let id = Uuid::new_v4().to_string();
     let saved = Saved {
@@ -439,6 +449,8 @@ async fn save(
         image_size: capture.image.size,
         tiles: capture.image.tiles(),
         resource_revision: resource_revision(agent, &identity.desktop_id).await?,
+        provider_generation: Some(agent.ui_generation),
+        capability_version: Some(version),
     };
     agent
         .store
@@ -472,8 +484,11 @@ async fn resource_revision(agent: &Agent, surface: &str) -> Result<u64> {
 }
 /// Caller holds ui_access. Advance before sending input, including uncertain
 /// outcomes, while reads leave every other chat's observation intact.
-async fn consume(agent: &Agent, key: &str, saved: &Saved) -> Result<bool> {
-    if resource_revision(agent, &saved.surface).await? != saved.resource_revision {
+async fn consume(agent: &Agent, key: &str, saved: &Saved, version: u64) -> Result<bool> {
+    if saved.provider_generation != Some(agent.ui_generation)
+        || saved.capability_version != Some(version)
+        || resource_revision(agent, &saved.surface).await? != saved.resource_revision
+    {
         return Ok(false);
     }
     let consumed = agent.store.take::<Saved>("ui_observation", key).await?;
