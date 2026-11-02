@@ -2,9 +2,11 @@
 
 日期：2026-11-02。目标是让外部 AI 使用一套接口操作电脑、手机和网页，同时让用户继续使用自己的设备。平台执行与恢复由 Octendra 负责，实时画面、交互与接管由 Weavelo 负责；规划和业务确认继续属于调用它们的 Agent。
 
-本方案的交付物是设计和两份任务单：[Octendra 任务](tasks/octendra-ui-platform.md)、[Weavelo 任务](tasks/weavelo-ui-platform.md)。本轮不修改 Weavelo 实现、不部署设备、不启动联合测试。联合测试由用户最终安排，各项目先完成自己的验证和汇报。
+本方案包含完整设计和两份任务单：[Octendra 任务](tasks/octendra-ui-platform.md)、[Weavelo 任务](tasks/weavelo-ui-platform.md)。Weavelo 由其现有对话独立实施，Octendra 对话维护执行侧方案，避免同时改动同一项目。联合测试由用户最终安排，各项目先完成自己的验证和汇报。
 
 Weavelo 的界面按后续明确的[主界面和单流远控窗口规划](weavelo-window-ui-plan.md)组织：管理主界面、单流窗口与菜单栏共享操作上下文，保留现有功能、原生媒体和平台执行边界。
+
+最新实施顺序是 Weavelo 对话先自主完成 GUI，再完善 Computer Use。Computer Use 按[首期隔离工作区方案](computer-use-isolation-first.md)以更强隔离作为基础；这取代此前把虚拟机或独立执行空间留作后续可选扩展的路线。当前不启动虚拟化安装或更改设备。
 
 ## 当前基线和完成状态
 
@@ -44,16 +46,16 @@ Mika 的桌面网页模式还调整 UA、UA-CH、视口及部分页面可见的 
 
 ## 平台实现路径
 
-| 平台 | 首选执行路径 | 需要更强隔离时 | 必须如实表达的边界 |
+| 平台 | 首期执行空间 | 空间内执行路径 | 必须如实表达的边界 |
 | --- | --- | --- | --- |
-| Android | 既有授权 helper 的可信 AI 显示、按显示的语义树及输入 | 系统已有的应用分身或工作资料；自己的网页使用私有 WebView 宿主 | Android 版本与 OEM 权限、IME、任务启动和受保护页面不同；一个虚拟屏不是一份新账号 |
-| macOS | AX 语义操作、按窗口抓图；已有 PID 事件只用于实际可验证的操作 | 任务确实需要独立全局输入时，可使用已有 VM；Apple silicon 上可研究官方 Virtualization 路径 | Spaces 或额外显示器不提供第二套通用键鼠；应用可能自行激活或共享内部状态 |
-| Windows | UIA 的 Invoke、Value、Selection、Toggle 等语义能力，配合现有窗口抓图 | 需要独立原始输入时采用独立来宾或已有独立会话 | 新建 Desktop 不代表获得第二个活动输入桌面；不修改 UIPI、UAC 或会话限制 |
-| Linux | 当前图形会话的 AT-SPI；按 X11 / Wayland 实际能力选择截图 | 新启动的任务 App 可使用独立嵌套 compositor 或已有来宾 | 额外 output 不等于独立 seat；既有 App 不能普遍迁入新 compositor；原生 Wayland 不假装拥有全局输入 |
-| 无图形会话的 NAS 和 Linux 节点 | 继续文件、命令与已有浏览器接口 | 有实际 GUI 任务时才准备相应会话 | 不因接入了节点就报告桌面可用；离线设备记为待验证 |
+| Android | 专用且实际可用的 profile / 应用实例空间，加可信 AI 显示 | 按真实 user、显示和目标绑定语义与输入；自己的网页可用私有宿主 | 仍共享内核和部分系统服务；单独虚拟屏不等于应用数据隔离，IME 与 OEM 能力要实测 |
+| macOS | 持久来宾系统，Apple silicon 优先官方 Virtualization 路径 | 来宾内 AX、窗口抓图与实际输入 | 来宾不是宿主正在运行的同一 App；Spaces 或额外显示器不能替代隔离 |
+| Windows | 独立 Windows 来宾，满足版本与硬件条件时优先既有 Hyper-V | 来宾内 UIA、抓图与输入 | 新建 Desktop 不代表第二个活动输入桌面；版本、来宾条件和实际图形能力需核验 |
+| Linux | KVM 等完整来宾，来宾内建立图形会话 | 来宾内 AT-SPI、compositor 与实际截图输入 | 宿主嵌套 compositor 或容器不单独等同系统隔离；无加速或图形能力如实报告 |
+| 无图形会话的 NAS 和 Linux 节点 | 继续原有非 GUI 能力；需要 GUI 时先核实可交付的独立空间 | 只报告实际可用的工作区能力 | 不因接入节点就报告桌面可用，也不擅自把任务转到另一机器 |
 | iOS 等新增平台 | 单独建立公开 API 和授权范围的适配评估 | 依据该平台实际提供的会话或测试机制 | 本方案不把 Android helper、隐藏接口或虚拟屏机制宣称为通用能力 |
 
-独立来宾和 compositor 是解决具体无法后台执行的任务的可选扩展，首期不在每台设备铺设虚拟机。现有宿主已能用语义方式完成的任务直接执行。Mika 并未实现上述桌面平台适配。
+强隔离从首期建立，不能先把宿主输入路径当作完成品再延期补齐。每类设备先交付一个实际可运行的持久工作区，不搭多套自动兜底；不满足条件的节点明确待解决。Mika 并未实现上述桌面平台适配。Weavelo 的既有手动宿主远控保持可用，Computer Use 不因隔离失败静默退回宿主。
 
 平台依据：[Android IME](https://source.android.com/docs/core/display/multi_display/ime-support)、[Android 多显示](https://source.android.com/docs/core/display/multi_display/displays)、[Windows Desktop](https://learn.microsoft.com/en-us/windows/win32/winstation/desktops)、[Weston 后端](https://wayland.pages.freedesktop.org/weston/toc/running-weston.html)、[Apple silicon macOS VM](https://developer.apple.com/documentation/virtualization/running-macos-in-a-virtual-machine-on-apple-silicon)。
 
@@ -66,11 +68,11 @@ Mika 的桌面网页模式还调整 UA、UA-CH、视口及部分页面可见的 
 ```
 
 ```json
-{"tool":"ui_observe","arguments":{"device":"Mac-Studio","target":{"app":"Safari","window":"采购清单"}}}
+{"tool":"ui_observe","arguments":{"device":"Mac-Studio AI 工作区","target":{"app":"Safari","window":"采购清单"}}}
 ```
 
 ```json
-{"tool":"ui_act","arguments":{"device":"Mac-Studio","observation_id":"<returned UUID>","action":{"type":"fill","target":{"ref":"n12"},"text":"采购数量"},"expect":{"type":"value_equals","target":{"ref":"n12"},"value":"采购数量"}}}
+{"tool":"ui_act","arguments":{"device":"Mac-Studio AI 工作区","observation_id":"<returned UUID>","action":{"type":"fill","target":{"ref":"n12"},"text":"采购数量"},"expect":{"type":"value_equals","target":{"ref":"n12"},"value":"采购数量"}}}
 ```
 
 - target 是可选选择条件，首期为 app、window 和 instance；instance 选择已发现的系统应用实例或浏览器 profile。应用重名时返回候选，不猜测执行目标。页面来源通过返回的具体 view 继续选择。
@@ -86,7 +88,8 @@ Mika 的桌面网页模式还调整 UA、UA-CH、视口及部分页面可见的 
 
 | 字段 | 含义和更新时机 |
 | --- | --- |
-| device_id | 既有注册设备身份 |
+| device_id | 实际执行的注册设备身份；来宾不伪装成宿主 |
+| execution_context_id | 宿主与 AI 工作区的明确关联及隔离边界；选定后不静默换执行位置 |
 | app_instance | 平台账户或 profile、应用身份、进程实例；Android 至少包含 package 与 user，不能只用 package |
 | view_id | 具体窗口、页面、后台显示或隔离会话的逻辑身份 |
 | generation | 原生来源重建、helper 重启或视图实例替换时变化，不能用新原生 ID 接受旧输入 |
@@ -135,11 +138,11 @@ helper 丢失后重建 generation，旧引用全部失效。已授权服务恢�
 
 ## 网页会话和原生语义
 
-桌面采用 AX / UIA / AT-SPI 提供语义观察和控件动作，原有像素与窗口事件路径保留给实际需要的界面。agent-desktop 是候选原生后端，pi-computer-use 的资源调度和不可变状态模式可选择性移植；两者都不作为新的模型运行时或额外账户体系。导入代码保留 Apache 2.0、MIT 及相关第三方声明，并按现有平台构建和签名方式交付。
+桌面默认在隔离工作区内采用 AX / UIA / AT-SPI 提供语义观察和控件动作，像素与窗口事件路径也绑定同一空间。显式选择的宿主来源与之分开，不能成为隔离任务的隐式退路。agent-desktop 是候选原生后端，pi-computer-use 的资源调度和不可变状态模式可选择性移植；两者都不作为新的模型运行时或额外账户体系。导入代码保留 Apache 2.0、MIT 及相关第三方声明，并按现有平台构建和签名方式交付。
 
 已有连接和 OS 授权继续有效使用。底层若仍把执行记录绑定到每次变化的二进制哈希，签名兼容升级需要同步续接已授权记录，不能升级一次就要求用户重新批准任务或手动绑定窗口。原生目标身份和签名检查保留，真正尚未取得的 OS 授权单独表达。
 
-浏览器优先使用已有授权且可控制的实际浏览器；需要托管会话时按既有连接维护持久 profile。用户当前使用的 profile 不能同时被第二个进程打开，不复制私有 Cookie 数据库。Android 自有 WebView 的私有显示宿主可减少对 shell / 无障碍的依赖，但只操作自己的网页内容；普通第三方 App 仍走应用执行路径。现有接口能满足时直接复用，只有实测定位到网页渲染或会话控制缺口时才新增私有宿主。
+浏览器默认使用隔离工作区内已授权且可控制的真实浏览器，按既有连接维护持久 profile。用户宿主的 profile 不能同时被第二个进程打开，不复制私有 Cookie 数据库或自动映射整个宿主 home。Android 自有 WebView 的私有显示宿主可减少对 shell / 无障碍的依赖，但只操作自己的网页内容；普通第三方 App 仍走对应隔离实例的执行路径。现有接口能满足时直接复用，只有实测定位到网页渲染或会话控制缺口时才新增私有宿主。
 
 登录会话保存在对应原生应用或 profile；页面借出、人工接管和交回尽量保持同一页面对象、历史和滚动位置。浏览器崩溃后持久 Cookie 可保留登录，但不能宣称未提交的页面内存状态一定恢复。验证码、真实登录失效和服务退避有明确状态及续接位置，不进入反复刷新和重登录循环。
 
@@ -209,16 +212,18 @@ Rust 语义类型、MCP schema 和 Android 测试样例以既有 desktop protoco
 
 | 顺序 | Octendra | Weavelo | 可独立验证的结果 |
 | --- | --- | --- | --- |
+| 当前优先 | 只更新 Computer Use 设计与任务 | W4 管理主界面和单流 GUI 自主推进 | Weavelo 独立实施与汇报，不提前启动联合测试 |
+| Computer Use 起点 | O7 首期隔离工作区 | 来源描述为后续接入准备 | 宿主和工作区的显示、输入与数据边界经实际核验 |
 | 1 | O1 通用上下文、不可变观察及资源调度 | W1 来源与输入协议映射 | 不同对话不覆盖观察；身份、代际和坐标字段一致 |
 | 2 | O2 显示保活、IME 与按显示输入 | W2 AI 来源的原生帧与编码连接 | 后台长时间可操作；编码 Surface 可以独立绑定和解绑 |
 | 3 | O3 实例选择、外溢与任务收尾 | W3 共享执行和人工接管 | 同包不同 user 不混淆，用户前台状态保持，接管不误投 |
 | 4 | O4 桌面语义适配；O5 持久网页上下文 | W4 管理主界面、单流窗口与菜单栏 | 用户按应用选择，AI 和人看到同一真实来源与操作结果 |
-| 5 | O6 进程和系统恢复；O7 按平台隔离扩展评估 | W5 媒体恢复、画质与性能 | 断线无重放，来源恢复明确，呈现与输入实测 |
+| 5 | O6 进程和系统恢复 | W5 媒体恢复、画质与性能 | 断线无重放，来源恢复明确，呈现与输入实测 |
 | 持续 | O8 签名、节点升级与运行验收 | W6 各端交付与独立验收 | 每个节点有实际运行身份和检查结果 |
 
-O4、O5 可在 O1 后独立推进；O6 可与媒体接入并行。W2 依赖 O2 的来源寿命和 Surface 接口，W3 依赖 O1/O3 的归属与应用实例。O7 只为已证明无法通过现有后台语义路径完成的任务实现具体隔离后端，不阻塞先交付的正确能力。
+Weavelo GUI 先行。Computer Use 从 O7 的真实隔离空间开始，O1 接入其执行身份后，O4、O5 可分别完善空间内能力；O6 与媒体接入并行。W2 依赖 O2 的来源寿命和 Surface 接口，W3 依赖 O1/O3 的归属与应用实例。O7 不再是 P2 可选扩展。
 
-显示保活、明确目标的输入检查和恢复诊断可先在现有接口上小步修复，不等待 O1 的全部结构调整。每一阶段先交付一个可实际操作的完整场景，再扩展动作与平台覆盖，避免为了搭通用框架延迟已定位问题的修正。
+进入 Computer Use 阶段后，显示保活、明确目标的输入检查和恢复诊断可在 O7 选定的执行实例中小步修复，不等待 O1 的全部结构调整。每一阶段先交付一个可实际操作的完整场景，再扩展动作与平台覆盖，避免为了搭通用框架延迟已定位问题的修正。
 
 两个仓库都使用主 main 和各自唯一主工作目录。共享协议文件同一时刻只有一个写入任务，另一项目按已提交协议适配；不创建功能分支、额外 worktree 或合并流程。每个小迭代完成相关检查后显式提交、推送并核验远端，兼容升级直接进行，不等待全计划结束，也不增加发布门禁。现有签名、构建缓存、安装入口和在途操作继续复用。
 
