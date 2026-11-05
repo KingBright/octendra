@@ -32,6 +32,7 @@ class WirelessAdbController(private val context: Context) : Closeable {
     @Volatile private var connectionPort = 0
     @Volatile private var state = "needs_pairing"
     @Volatile private var lastError: String? = null
+    @Volatile private var failureType: String? = null
     @Volatile private var activationCount = 0
     @Volatile private var connectionCount = 0
     private var identity: WirelessAdbIdentity? = null
@@ -58,12 +59,13 @@ class WirelessAdbController(private val context: Context) : Closeable {
     private fun enabled() = !closed && AgentRuntime.running &&
         preferences.getBoolean("remote_enabled", false) && preferences.getBoolean("shell_enabled", false)
     private fun paired() = preferences.getBoolean("wireless_adb_paired", false)
-    private fun change(value: String, error: String? = null) {
+    private fun change(value: String, error: String? = null, cause: Throwable? = null) {
         state = value
         lastError = error
+        failureType = cause?.javaClass?.simpleName
         AgentRuntime.changed()
     }
-    fun status() = obj("paired" to paired(), "state" to state, "last_error" to lastError,
+    fun status() = obj("paired" to paired(), "state" to state, "last_error" to lastError, "failure_type" to failureType,
         "pairing_port" to pairingPort.takeIf { it > 0 }, "connection_port" to connectionPort.takeIf { it > 0 },
         "local_only" to true, "auto_recovery_enabled" to (enabled() && paired()),
         "automatic_pairing_available" to (AccessService.instance != null),
@@ -131,9 +133,9 @@ class WirelessAdbController(private val context: Context) : Closeable {
                 notifications.cancel(NOTIFICATION)
                 change("discovering")
                 success = true
-            } catch (_: Exception) {
+            } catch (error: Exception) {
                 if (enabled()) {
-                    change("waiting_for_pairing", "wireless_pairing_failed")
+                    change("waiting_for_pairing", "wireless_pairing_failed", error)
                     pairingNotification(pairingPort > 0)
                 }
             } finally {
@@ -177,8 +179,8 @@ class WirelessAdbController(private val context: Context) : Closeable {
                 if (enabled()) change("ready")
             } catch (_: AdbPairingRequiredException) {
                 if (enabled()) change("needs_pairing", "wireless_pairing_revoked")
-            } catch (_: Exception) {
-                if (enabled()) change("waiting_for_wireless_debugging", "wireless_connection_failed")
+            } catch (error: Exception) {
+                if (enabled()) change("waiting_for_wireless_debugging", (error as? AgentError)?.code ?: "wireless_connection_failed", error)
             } finally { busy.set(false) }
         }
     }
@@ -209,17 +211,11 @@ class WirelessAdbController(private val context: Context) : Closeable {
     }
 
     private fun readCommand(connection: AdbConnection, command: String): String {
-        connection.open("shell:$command").use { stream ->
-            val output = java.io.ByteArrayOutputStream()
-            val buffer = ByteArray(1024)
-            val input = stream.openInputStream()
-            while (true) {
-                val count = input.read(buffer)
-                if (count < 0) break
-                if (output.size() + count > 4096) throw IOException("wireless_activation_output_limit")
-                output.write(buffer, 0, count)
-            }
-            return output.toString("UTF-8")
+        val marker = "octendra_" + java.util.UUID.randomUUID().toString().replace("-", "")
+        // LibADB's legacy stream can throw or wait indefinitely at a normal CLSE.
+        // Finish on our explicit shell result rather than waiting for transport EOF.
+        connection.open("shell:$command\nprintf '\\n$marker:%s\\n' \"\$?\"").use { stream ->
+            return readBootstrapOutput(stream.openInputStream(), marker)
         }
     }
 
@@ -258,6 +254,21 @@ class WirelessAdbController(private val context: Context) : Closeable {
     }
 
     companion object {
+        internal fun readBootstrapOutput(input: java.io.InputStream, marker: String): String {
+            val output = java.io.ByteArrayOutputStream()
+            val buffer = ByteArray(1024)
+            val complete = Regex("\\r?\\n" + Regex.escape(marker) + ":([0-9]+)\\r?\\n")
+            while (true) {
+                val count = input.read(buffer)
+                demand(count >= 0, "wireless_adb_command_incomplete")
+                demand(output.size() + count <= 4096, "wireless_activation_output_limit")
+                output.write(buffer, 0, count)
+                val text = output.toString("UTF-8")
+                val match = complete.find(text) ?: continue
+                demand(match.groupValues[1] == "0", "wireless_adb_command_failed")
+                return text.substring(0, match.range.first)
+            }
+        }
         const val PAIR_ACTION = "fun.hackerlife.octendra.WIRELESS_PAIR"
         const val CODE_INPUT = "pairing_code"
         private const val CHANNEL = "wireless-adb"
