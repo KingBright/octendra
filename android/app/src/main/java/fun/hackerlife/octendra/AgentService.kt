@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicLong
 object AgentRuntime {
     @Volatile var running = false
     @Volatile var bridge: ShellBridge? = null
+    @Volatile var wirelessAdb: WirelessAdbController? = null
     @Volatile var state = "已停止"
     @Volatile var lastContact = 0L
     @Volatile var currentOperation: String? = null
@@ -71,7 +72,15 @@ class AgentService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "STOP") { controls(this).edit().putBoolean("remote_enabled", false).apply(); stopSelf(); return START_NOT_STICKY }
         if (!controls(this).getBoolean("remote_enabled", false)) { stopSelf(); return START_NOT_STICKY }
-        if (started) { updateBridge(); return START_STICKY }
+        if (started) {
+            updateBridge()
+            if (intent?.action == WirelessAdbController.PAIR_ACTION) {
+                val results = android.app.RemoteInput.getResultsFromIntent(intent)
+                val code = results?.getCharSequence(WirelessAdbController.CODE_INPUT)?.toString()?.trim()?.toCharArray()
+                if (code != null) AgentRuntime.wirelessAdb?.pair(code)
+            }
+            return START_STICKY
+        }
         try {
             config = ConfigStore(this).read() ?: throw AgentError("missing_configuration")
             val db = Journal(this, config); db.recover(); journal = db
@@ -89,6 +98,7 @@ class AgentService : Service() {
             }
             Log.i("OctendraConnection", "channel=lifecycle event=service_started")
             AgentRuntime.bridge = ShellBridge(this); updateBridge()
+            AgentRuntime.wirelessAdb = WirelessAdbController(this).also { it.updateEnabled() }
             val dispatcher = Dispatcher(this, config, db, net)
             workers.submit { try { poll(net, db, dispatcher) } finally { dispatcher.close() } }
             workers.submit { heartbeat(net) }
@@ -100,9 +110,12 @@ class AgentService : Service() {
         }
         return START_STICKY
     }
-    private fun updateBridge() { if (controls(this).getBoolean("shell_enabled", false)) AgentRuntime.bridge?.open() else AgentRuntime.bridge?.close() }
+    private fun updateBridge() {
+        if (controls(this).getBoolean("shell_enabled", false)) AgentRuntime.bridge?.open() else AgentRuntime.bridge?.close()
+        AgentRuntime.wirelessAdb?.updateEnabled()
+    }
     private fun hello(): JSONObject {
-        val features = mutableListOf("android_commands_v1", "android_durable_receipts_v1", "android_files_v1", "android_network_recovery_v1", "unified_ui_v1")
+        val features = mutableListOf("android_commands_v1", "android_durable_receipts_v1", "android_files_v1", "android_network_recovery_v1", "android_wireless_adb_v1", "unified_ui_v1")
         if (AccessService.instance != null) features += "android_accessibility_v1"
         if (AgentRuntime.bridge?.connected() == true) features += "android_shell_bridge_v1"
         if (AgentRuntime.bridge?.ui() != null) features += "android_background_ui_v1"
@@ -125,7 +138,7 @@ class AgentService : Service() {
     }
     private fun queueNetworkRecovery() {
         if (!alive) return
-        try { diagnosticsWorker.execute { if (alive) reconnectNetwork() } }
+        try { diagnosticsWorker.execute { if (alive) { reconnectNetwork(); AgentRuntime.wirelessAdb?.networkChanged() } } }
         catch (_: java.util.concurrent.RejectedExecutionException) { /* Service is stopping. */ }
     }
     private fun pause(milliseconds: Long): Boolean {
@@ -194,6 +207,7 @@ class AgentService : Service() {
         if (AgentRuntime.networkMonitoring) try { connectivity?.unregisterNetworkCallback(networkCallback) } catch (_: RuntimeException) { }
         AgentRuntime.networkMonitoring = false
         wakeNetwork()
+        AgentRuntime.wirelessAdb?.close(); AgentRuntime.wirelessAdb = null
         transport?.close(); AgentRuntime.bridge?.close(); AgentRuntime.bridge = null
         workers.shutdownNow()
         diagnosticsWorker.shutdownNow()

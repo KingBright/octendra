@@ -50,6 +50,8 @@ android {
     lint { abortOnError = true; checkReleaseBuilds = true }
 }
 dependencies {
+    implementation("com.github.MuntashirAkon:libadb-android:3.1.1")
+    implementation("org.conscrypt:conscrypt-android:2.5.3")
     testImplementation("junit:junit:4.13.2")
     // JVM tests must exercise JSON parsing instead of Android's stub methods.
     testImplementation("org.json:json:20260814")

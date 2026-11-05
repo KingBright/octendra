@@ -73,7 +73,7 @@ def main():
         'integration_checks':len(acceptance['checks']),
         'mixed_fleet_tests':10,'lint_errors':0,'lint_warnings':len(lint),
         'physical_phone_tested':False,'production_gateway_modified':False,
-        'configuration_embedded':False,'wireless_adb_pairing_ui_included':False,
+        'configuration_embedded':False,'wireless_adb_pairing_ui_included':True,
         'scope':'Signed APK packaging and isolated Android emulator acceptance; not physical-phone or production enrollment acceptance'
     }
     (target/'publication.json').write_text(json.dumps(publication,indent=2,ensure_ascii=False)+'\n')

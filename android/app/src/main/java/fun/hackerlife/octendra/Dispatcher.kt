@@ -79,6 +79,7 @@ class Dispatcher(private val context: Context, private val config: GatewayConfig
         "network_monitoring" to AgentRuntime.networkMonitoring, "network_generation" to transport.generation,
         "shell_enabled_locally" to controls(context).getBoolean("shell_enabled", false), "shell_connected" to (AgentRuntime.bridge?.connected() == true),
         "shell_uid" to AgentRuntime.bridge?.uid, "shared_root" to root.path, "max_file_bytes" to Policy.MAX_FILE,
+        "wireless_adb" to AgentRuntime.wirelessAdb?.status(),
         "background_ui_ready" to (AgentRuntime.bridge?.ui() != null),
         "permissions_are_independent" to true, "transfer_resume" to false, "continuous_recording" to false,
         "connection_diagnostics" to AgentRuntime.connectionDiagnostics?.let { JSONObject(it.snapshot()) })
@@ -89,7 +90,10 @@ class Dispatcher(private val context: Context, private val config: GatewayConfig
         val args = if (space < 0) obj() else JSONObject(command.substring(space + 1).trim())
         return when (name) {
             "help" -> obj("protocol" to 1, "syntax" to "android VERB {JSON arguments}", "commands" to obj(
-                "status" to "Local capability and permission states", "reconnect" to "Rebuild this agent's network connections; never replays an operation", "observe" to "Read visible UI tree; returns observation_id + node IDs (30s lifetime)",
+                "status" to "Local capability and permission states", "reconnect" to "Rebuild this agent's network connections; never replays an operation",
+                "adb_pairing" to "Discover this phone's wireless pairing port and show a local code-entry notification; pairing codes must stay in the phone UI",
+                "adb_reconnect" to "Reconnect this phone's already paired wireless ADB and activate the shell helper",
+                "observe" to "Read visible UI tree; returns observation_id + node IDs (30s lifetime)",
                 "click / long_click" to "{observation_id,node_id}", "text" to "{observation_id,node_id,text}", "scroll" to "{observation_id,node_id,direction:forward|backward}",
                 "tap" to "{observation_id,x,y,duration_ms?}", "swipe" to "{observation_id,x,y,to_x,to_y,duration_ms?}",
                 "screenshot" to "PNG in shared workspace; use file_download(path) afterwards", "back / home / recents / notifications / quick_settings / lock" to "No arguments",
@@ -98,6 +102,8 @@ class Dispatcher(private val context: Context, private val config: GatewayConfig
                 "safety" to "Actions are not replayed after uncertain interruption. Re-observe to verify. System security boundaries remain enforced.")
             "status" -> status()
             "reconnect" -> obj("network_generation" to (AgentRuntime.reconnectNetwork?.invoke() ?: throw AgentError("transport_stopped")), "automatic_replay" to false)
+            "adb_pairing" -> (AgentRuntime.wirelessAdb ?: throw AgentError("transport_stopped")).let { it.requestPairing(); it.status() }
+            "adb_reconnect" -> (AgentRuntime.wirelessAdb ?: throw AgentError("transport_stopped")).let { it.recover(force = true); it.status() }
             "observe" -> screen().dump()
             "click", "long_click", "text", "scroll" -> screen().nodeAction(name, args)
             "tap", "swipe" -> screen().gesture(name, args)

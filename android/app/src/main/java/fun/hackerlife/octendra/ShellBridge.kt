@@ -169,10 +169,14 @@ class ShellBridge(private val context: Context) {
         previous?.close(); AgentRuntime.changed()
     }
     fun activationCommand(): String {
-        val name = socketName ?: throw AgentError("start_service_and_enable_shell_first")
-        val p = context.packageName
-        return "adb shell 'CLASSPATH=\$(pm path $p | sed -n \"s/^package://p\" | head -n 1) nohup app_process /system/bin fun.hackerlife.octendra.ShellMain $name ${Process.myUid()} </dev/null >/dev/null 2>&1 &'"
+        return "adb shell " + shellQuote(activationShellCommand())
     }
+    fun activationShellCommand(): String {
+        val name = socketName ?: throw AgentError("start_service_and_enable_shell_first")
+        val apk = shellQuote(context.applicationInfo.sourceDir)
+        return "CLASSPATH=$apk nohup app_process /system/bin fun.hackerlife.octendra.ShellMain $name ${Process.myUid()} </dev/null >/dev/null 2>&1 &"
+    }
+    private fun shellQuote(value: String) = "'" + value.replace("'", "'\\''") + "'"
     companion object {
         fun readFrame(input: DataInputStream): JSONObject {
             val n = input.readInt()

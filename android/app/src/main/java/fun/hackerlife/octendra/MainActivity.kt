@@ -91,7 +91,21 @@ class MainActivity : Activity() {
                 AgentRuntime.changed()
             }
         }; body.addView(shell)
-        label("无需另装插件。允许后，用已授权的电脑执行激活命令。重启手机或停止服务后需重新激活。当前版本不内置无线 ADB 配对。", 12)
+        label("无线激活后，手机会自行恢复 shell。首次在系统无线调试中选择配对码，再从 Octendra 通知输入六位数字。", 12)
+        button("无线激活 shell（无需电脑）") { guarded {
+            demand(AgentRuntime.running, "请先开启远程控制")
+            shell.isChecked = true
+            val wireless = AgentRuntime.wirelessAdb ?: throw AgentError("连接正在启动，请稍后重试")
+            wireless.requestPairing()
+            val settings = Intent("android.settings.WIRELESS_DEBUGGING_SETTINGS")
+            if (settings.resolveActivity(packageManager) != null) startActivity(settings)
+            else startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
+        } }
+        button("重新连接已配对的无线 ADB") { guarded {
+            val wireless = AgentRuntime.wirelessAdb ?: throw AgentError("请先开启远程控制")
+            wireless.recover(force = true)
+            toast("正在查找本机无线调试并恢复 shell")
+        } }
         button("复制本次 shell 激活命令") { guarded {
             val command = AgentRuntime.bridge?.activationCommand() ?: throw AgentError("请先开启远程控制并允许 shell")
             getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("ADB 激活命令（不含令牌）", command)); toast("已复制，请在已授权电脑上执行")
@@ -199,7 +213,16 @@ class MainActivity : Activity() {
         revision = rev
         status.text = AgentRuntime.state
         capabilities.text = "读屏与操作：${if (AccessService.instance != null) "已授权" else "未授权"}\n" +
-            "shell：${if (AgentRuntime.bridge?.connected() == true) "已激活（UID ${AgentRuntime.bridge?.uid}）" else "未激活"}"
+            "shell：${if (AgentRuntime.bridge?.connected() == true) "已激活（UID ${AgentRuntime.bridge?.uid}）" else "未激活"}\n" +
+            "无线 ADB：" + when (AgentRuntime.wirelessAdb?.status()?.optString("state")) {
+                "ready" -> "已就绪"
+                "pairing" -> "正在配对"
+                "waiting_for_pairing" -> "请在通知中输入系统配对码"
+                "discovering", "connecting" -> "正在连接本机"
+                "waiting_for_wireless_debugging" -> "等待系统无线调试可用，将自动重连"
+                "disabled" -> "未启用"
+                else -> "等待首次配对"
+            }
         toggle.text = if (AgentRuntime.running) "停止远程控制" else "开启远程控制"
         listOf(gateway, device, token, name).forEach { it.isEnabled = !AgentRuntime.running }
     }
