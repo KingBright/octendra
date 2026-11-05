@@ -2,6 +2,8 @@
 
 本任务单落实[平台操作技术方案](../ui-platform-implementation-plan.md)。目标是在既有 ui_observe / ui_act 下完成应用级后台操作、独立观察和恢复，复用当前连接授权，保持外部 Agent 的业务循环。
 
+2026-11-06 起按[两项目开发边界](octendra-weavelo-boundary.md)独立推进。本对话拥有执行环境、AI 语义、Android helper / 后台屏、任务恢复和 Octendra 交付；实时媒体、远控 GUI 与 Weavelo 发布由另一对话负责。下一步是 O7 + O1 的正式来宾接入及最小来源契约，Android 无线 ADB 已完成 0.12.8 两机验收。
+
 源码基线 8a3e4e5。现有两个工具、模拟器后台屏和去重实现继续使用；下面的工作尚未因方案提交而完成。只在 remote_hosts 主 main 和现有主工作目录开发，每次小迭代完成相关检查后提交、推送并核验远端。
 
 Weavelo GUI 由其对话独立推进。Octendra 已接入默认隔离路由与独立观察；Mac Studio 持久来宾和私有 virtio 输入已完成单机实测，生产登记和全平台部署仍未完成。下面是完整任务定义，不能把条目存在视为已交付；逐项状态见 [2026-11-05 规划对账](../planning-status-20261105.md)。任务编号用于引用，O7 不表示后置可选项。
@@ -92,7 +94,7 @@ Weavelo GUI 由其对话独立推进。Octendra 已接入默认隔离路由与�
 
 优先级 P0，是 Computer Use 实施的起点。依据[首期隔离方案](../computer-use-isolation-first.md)直接建立正确执行边界，不先交付宿主输入再把隔离留待以后。
 
-- 先盘点实际 hypervisor、系统版本、CPU、内存、磁盘与已有镜像，固定每类设备的最小后端；GUI 实施期间不启动安装和系统重启。
+- 先盘点实际 hypervisor、系统版本、CPU、内存、磁盘与已有镜像，固定每类设备的最小后端；安装和系统重启避开另一对话正在使用的节点，不因 GUI 历史阶段而继续暂停独立开发。
 - 桌面采用持久来宾：Apple silicon 优先官方 Virtualization，Windows 在实际满足条件时优先既有 Hyper-V，Linux 使用 KVM 等完整来宾。宿主嵌套 compositor、增加显示器或新建 Desktop 不单独算强隔离完成。
 - Android 核实专用 profile 与可信显示的可行性，绑定真实应用 user 和输入连接。该路线仍共享内核，不能宣称 VM 等级；不具备条件的设备明确列为未完成。
 - 复用节点注册、签名安装和操作日志，来宾具有真实执行身份；持久应用数据与浏览器会话，不默认共享整个宿主目录或剪贴板。绑定后不静默改回宿主或另一设备。

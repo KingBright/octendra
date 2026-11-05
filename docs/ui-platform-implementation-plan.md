@@ -4,9 +4,11 @@
 
 本方案包含完整设计和两份任务单：[Octendra 任务](tasks/octendra-ui-platform.md)、[Weavelo 任务](tasks/weavelo-ui-platform.md)。Weavelo 由其现有对话独立实施，Octendra 对话维护执行侧方案，避免同时改动同一项目。联合测试由用户最终安排，各项目先完成自己的验证和汇报。
 
+2026-11-06 的职责和后续队列以[两项目开发边界](tasks/octendra-weavelo-boundary.md)为准：Octendra 维护执行环境与操作，Weavelo 维护媒体与人工远控；各自完成本项目交付。下面的历史基线和方案不作为最新完成状态。
+
 Weavelo 的界面按后续明确的[主界面和单流远控窗口规划](weavelo-window-ui-plan.md)组织：管理主界面、单流窗口与菜单栏共享操作上下文，保留现有功能、原生媒体和平台执行边界。
 
-最新实施顺序是 Weavelo 对话先自主完成 GUI，再完善 Computer Use。Computer Use 按[首期隔离工作区方案](computer-use-isolation-first.md)以更强隔离作为基础；这取代此前把虚拟机或独立执行空间留作后续可选扩展的路线。当前不启动虚拟化安装或更改设备。
+Weavelo GUI 已有交付，两个对话按各自队列继续实施。Computer Use 按[首期隔离工作区方案](computer-use-isolation-first.md)以更强隔离作为基础；这取代此前把虚拟机或独立执行空间留作后续可选扩展的路线。设备操作沿用已有授权并协调正在使用的设备，不中断对方测试。
 
 ## 当前基线和完成状态
 
