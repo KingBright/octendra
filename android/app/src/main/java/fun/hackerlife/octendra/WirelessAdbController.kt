@@ -16,12 +16,14 @@ import java.io.IOException
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Only bootstraps the existing bridge. User commands continue through its durable channel. */
 class WirelessAdbController(private val context: Context) : Closeable {
     private val preferences = controls(context)
     private val executor = Executors.newScheduledThreadPool(2)
     private val busy = AtomicBoolean(false)
+    private val automaticPairingPort = AtomicInteger(0)
     private val resourceLock = Any()
     private var resource: Closeable? = null
     @Volatile private var closed = false
@@ -41,13 +43,14 @@ class WirelessAdbController(private val context: Context) : Closeable {
     private val pairingDiscovery = LocalAdbDiscovery(context, "adb-tls-pairing") { port ->
         pairingPort = port.coerceAtLeast(0)
         if (pairingRequested && port > 0) pairingNotification(true)
+        if (port > 0) pairFromSettings()
         AgentRuntime.changed()
     }
 
     init {
         notifications.createNotificationChannel(NotificationChannel(CHANNEL, "无线 ADB 配对", NotificationManager.IMPORTANCE_HIGH))
         executor.scheduleWithFixedDelay({
-            if (enabled() && pairingRequested) pairingDiscovery.start()
+            if (enabled() && pairingRequested) { pairingDiscovery.start(); pairFromSettings() }
             recover()
         }, 5, 10, TimeUnit.SECONDS)
     }
@@ -63,6 +66,7 @@ class WirelessAdbController(private val context: Context) : Closeable {
     fun status() = obj("paired" to paired(), "state" to state, "last_error" to lastError,
         "pairing_port" to pairingPort.takeIf { it > 0 }, "connection_port" to connectionPort.takeIf { it > 0 },
         "local_only" to true, "auto_recovery_enabled" to (enabled() && paired()),
+        "automatic_pairing_available" to (AccessService.instance != null),
         "activation_count" to activationCount, "connection_count" to connectionCount)
 
     fun updateEnabled() {
@@ -83,11 +87,20 @@ class WirelessAdbController(private val context: Context) : Closeable {
 
     fun requestPairing() {
         demand(enabled(), "start_service_and_enable_shell_first")
-        demand(notifications.areNotificationsEnabled(), "wireless_pairing_notifications_required", "请允许 Octendra 通知，然后在无线调试页面输入配对码。")
+        demand(AccessService.instance != null || notifications.areNotificationsEnabled(), "wireless_pairing_notifications_required", "请允许 Octendra 通知，然后在无线调试页面输入配对码。")
         pairingRequested = true
+        automaticPairingPort.set(0)
         change("waiting_for_pairing")
         pairingNotification(pairingPort > 0)
         pairingDiscovery.start()
+    }
+
+    fun pairFromSettings() {
+        val port = pairingPort
+        if (!enabled() || !pairingRequested || busy.get() || port !in 1..65535 || automaticPairingPort.get() == port) return
+        val code = runCatching { AccessService.instance?.localWirelessPairingCode() }.getOrNull() ?: return
+        if (automaticPairingPort.getAndSet(port) == port) { code.fill('\u0000'); return }
+        pair(code)
     }
 
     fun pair(code: CharArray) {
@@ -221,7 +234,7 @@ class WirelessAdbController(private val context: Context) : Closeable {
     }
 
     private fun pairingNotification(canPair: Boolean) {
-        if (!enabled() || !pairingRequested) return
+        if (!enabled() || !pairingRequested || !notifications.areNotificationsEnabled()) return
         val open = PendingIntent.getActivity(context, 61, Intent(context, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val builder = Notification.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_agent)
             .setContentTitle(if (canPair) "输入无线调试配对码" else "打开无线调试并选择配对码")

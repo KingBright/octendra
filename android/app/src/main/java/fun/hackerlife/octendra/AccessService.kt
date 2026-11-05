@@ -38,6 +38,7 @@ class AccessService : AccessibilityService() {
         instance = this; AgentRuntime.changed()
     }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event?.packageName?.toString() == "com.android.settings") AgentRuntime.wirelessAdb?.pairFromSettings()
         // Only an invalidation counter, never keystrokes or page contents.
         if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || event?.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
             val all = windowsOnAllDisplays
@@ -82,6 +83,19 @@ class AccessService : AccessibilityService() {
         val candidates = windowsOnAllDisplays[displayId] ?: return null
         return candidates.sortedWith(compareByDescending<android.view.accessibility.AccessibilityWindowInfo> { it.isActive }
             .thenByDescending { it.isFocused }.thenByDescending { it.layer }).firstNotNullOfOrNull { it.root }
+    }
+    /** Only used during an explicitly requested local ADB pairing; never returned over MCP. */
+    fun localWirelessPairingCode(): CharArray? = main {
+        if (Build.VERSION.SDK_INT >= 33) clearCache()
+        val root = rootFor(Display.DEFAULT_DISPLAY) ?: return@main null
+        try {
+            if (root.packageName?.toString() != "com.android.settings") return@main null
+            val nodes = root.findAccessibilityNodeInfosByViewId("com.android.settings:id/pairing_code")
+            try {
+                val value = nodes.singleOrNull()?.takeIf { it.isVisibleToUser }?.text?.toString()?.replace(" ", "")
+                value?.takeIf { it.length == 6 && it.all { digit -> digit in '0'..'9' } }?.toCharArray()
+            } finally { nodes.forEach { it.recycle() } }
+        } finally { root.recycle() }
     }
     fun dump(displayId: Int = Display.DEFAULT_DISPLAY): JSONObject = main {
         enabled()

@@ -91,7 +91,7 @@ class MainActivity : Activity() {
                 AgentRuntime.changed()
             }
         }; body.addView(shell)
-        label("无线激活后，手机会自行恢复 shell。首次在系统无线调试中选择配对码，再从 Octendra 通知输入六位数字。", 12)
+        label("无线激活后，手机会自行恢复 shell。首次打开系统无线调试的配对码页面；已允许读屏时会在手机本地自动配对，也可从 Octendra 通知输入六位数字。", 12)
         button("无线激活 shell（无需电脑）") { guarded {
             demand(AgentRuntime.running, "请先开启远程控制")
             shell.isChecked = true
