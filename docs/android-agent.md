@@ -1,12 +1,12 @@
 # Android controlled-device agent
 
-This is a separate, configurable APK for controlling an owner's Android phone through the existing Octendra Code gateway. It is not the Weavelo phone-to-desktop client. Minimum Android 11 (API 30); target API 36. One pure-DEX APK serves arm64, ARM and x86 Android runtimes. Kotlin implements Android lifecycle/platform APIs and the existing wire-2 contract; the existing Rust gateway and desktop agents are not rewritten.
+This is a separate, configurable APK for controlling an owner's Android phone through the existing Octendra Code gateway. It is not the Weavelo phone-to-desktop client. Minimum Android 11 (API 30); target API 36. The APK bundles native wireless-ADB pairing and TLS dependencies; 0.12.8 has physical-device acceptance on arm64 Android 15 and 16. Kotlin implements Android lifecycle/platform APIs and the existing wire-2 contract; the existing Rust gateway and desktop agents are not rewritten.
 
 ## Installation and enrollment
 
 The release APK contains no gateway URL, device token, owner account, test CA, instrumentation, advertising or analytics SDK. It is non-debuggable and signed by an owner-held release key. Signing material is outside the repository in the builder's private application state.
 
-Install `octendra-android-0.1.0.apk`. The gateway administrator must first register a **new, independently revocable device** using the existing gateway CLI. Do not reuse a computer's device ID/token: that would make two devices compete for the same identity.
+Install the current owner-signed APK (`android/app/build/outputs/apk/release/app-release.apk` on the release builder; version comes from `android/version.properties`). The gateway administrator must first register a **new, independently revocable device** using the existing gateway CLI. Do not reuse a computer's device ID/token: that would make two devices compete for the same identity.
 
 Run on the gateway's administrative host with its actual configuration path:
 
@@ -22,7 +22,7 @@ octendra-code enroll \
 
 The CLI writes a private device configuration. A gateway started with its configuration path automatically loads valid device and client changes without restarting connections or queues. Listener, public identity and storage changes still require the existing service restart procedure; invalid partial saves retain the last valid configuration.
 
-Choose **导入配置并连接**, or enter `gateway_url` (HTTPS origin, including port), `device_id` (UUID) and `device_token` and choose **保存并连接**. Both save the encrypted configuration, connect, enable boot recovery and permit the existing USB shell helper in one step. Stop or disable these features in the app at any time. The APK derives its real shared-directory root and reports it to the gateway; the CLI's placeholder roots are not exposed as arbitrary Android filesystem roots. Configuration is encrypted with Android Keystore AES-GCM and excluded from Android backups. Do not send device tokens in chat or commit them.
+Choose **导入配置并连接**, or enter `gateway_url` (HTTPS origin, including port), `device_id` (UUID) and `device_token` and choose **保存并连接**. Both save the encrypted configuration, connect, enable boot recovery and permit shell-helper activation in one step. Activate the helper through on-device wireless ADB or the existing authorized USB path. Stop or disable these features in the app at any time. The APK derives its real shared-directory root and reports it to the gateway; the CLI's placeholder roots are not exposed as arbitrary Android filesystem roots. Configuration is encrypted with Android Keystore AES-GCM and excluded from Android backups. Do not send device tokens in chat or commit them.
 
 An already authorized USB computer can configure the existing owner-signed APK without phone interaction:
 
@@ -60,9 +60,11 @@ Screenshots return a workspace-relative PNG path, not inline base64. Retrieve it
 
 ## On-device wireless ADB (0.12.8)
 
-Start remote control, choose wireless activation, open Android's pairing-code dialog, then enter its six digits in the Octendra notification while that dialog remains open. The app pairs with its own wireless-debugging daemon over loopback and activates the existing shell helper. Its RSA identity persists in AndroidKeyStore. Pairing codes remain in memory and never enter MCP arguments, logs, preferences, or receipts.
+Start remote control, choose wireless activation and open Android's pairing-code dialog. When existing accessibility access is available, Octendra reads that specific system dialog locally and pairs automatically. Otherwise, enter its six digits in the Octendra notification while the dialog remains open. The app pairs with its own wireless-debugging daemon over loopback and activates the existing shell helper. Its RSA identity persists in AndroidKeyStore. Pairing codes remain in memory and never enter MCP arguments, logs, preferences, or receipts.
 
-With remote control and shell enabled, the service rediscovers the TLS port after network changes and retries helper activation after helper loss. Stopping the service or disabling shell cancels activation. Reboot recovery requires system wireless debugging and Wi-Fi to become available. Some vendor settings require wireless debugging to be enabled again. `android status` reports pairing, discovery, connection and activation separately. `android adb_reconnect` requests recovery without replaying user commands. `android adb_pairing` starts discovery and phone-local code entry.
+With remote control and shell enabled, the service rediscovers the TLS port after network changes and retries helper activation after helper loss. Stopping the service or disabling shell cancels activation. `android status` reports pairing, discovery, connection and activation separately. `android adb_reconnect` requests recovery without replaying user commands. `android adb_pairing` starts discovery and phone-local code entry.
+
+System wireless debugging must remain available. In physical-device tests, Wi-Fi reconnection could turn it off or require a new network-consent dialog. The existing remote channel recovered; the Agent used existing shell/accessibility access to re-enable the system setting and accept the normal dialog, then Octendra discovered the changed TLS port. This is not an unattended guarantee across system revocation, reboot or first unlock. Both phones passed helper termination/recovery and remote shell file I/O with USB debugging disabled and their computer-side ADB device lists empty. See [physical-device acceptance](android-wireless-adb-acceptance-20261106.md) for the exact scope.
 
 The pinned dependency and local transport adapter are described in [wireless ADB dependencies](android-wireless-adb-dependencies.md).
 
