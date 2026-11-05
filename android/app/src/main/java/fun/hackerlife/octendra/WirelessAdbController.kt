@@ -11,7 +11,6 @@ import android.os.Build
 import io.github.muntashirakon.adb.AdbConnection
 import io.github.muntashirakon.adb.AdbPairingRequiredException
 import io.github.muntashirakon.adb.LocalAdbPairing
-import io.github.muntashirakon.adb.android.AdbMdns
 import java.io.Closeable
 import java.io.IOException
 import java.util.concurrent.Executors
@@ -35,11 +34,11 @@ class WirelessAdbController(private val context: Context) : Closeable {
     @Volatile private var connectionCount = 0
     private var identity: WirelessAdbIdentity? = null
     private val notifications = context.getSystemService(NotificationManager::class.java)
-    private val connectionDiscovery = AdbMdns(context, AdbMdns.SERVICE_TYPE_TLS_CONNECT) { _, port ->
+    private val connectionDiscovery = LocalAdbDiscovery(context, "adb-tls-connect") { port ->
         connectionPort = port.coerceAtLeast(0)
         if (port > 0) recover()
     }
-    private val pairingDiscovery = AdbMdns(context, AdbMdns.SERVICE_TYPE_TLS_PAIRING) { _, port ->
+    private val pairingDiscovery = LocalAdbDiscovery(context, "adb-tls-pairing") { port ->
         pairingPort = port.coerceAtLeast(0)
         if (pairingRequested && port > 0) pairingNotification(true)
         AgentRuntime.changed()
@@ -47,7 +46,10 @@ class WirelessAdbController(private val context: Context) : Closeable {
 
     init {
         notifications.createNotificationChannel(NotificationChannel(CHANNEL, "无线 ADB 配对", NotificationManager.IMPORTANCE_HIGH))
-        executor.scheduleWithFixedDelay({ recover() }, 5, 10, TimeUnit.SECONDS)
+        executor.scheduleWithFixedDelay({
+            if (enabled() && pairingRequested) pairingDiscovery.start()
+            recover()
+        }, 5, 10, TimeUnit.SECONDS)
     }
 
     private fun enabled() = !closed && AgentRuntime.running &&
@@ -153,7 +155,7 @@ class WirelessAdbController(private val context: Context) : Closeable {
             return
         }
         val port = connectionPort
-        if (port !in 1..65535) { change("waiting_for_wireless_debugging"); return }
+        if (port !in 1..65535) { discoverConnection(); change("waiting_for_wireless_debugging"); return }
         if (!busy.compareAndSet(false, true)) return
         executor.execute {
             try {

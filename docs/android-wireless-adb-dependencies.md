@@ -1,6 +1,6 @@
 # Android wireless ADB dependencies
 
-Octendra 0.12.8 uses the pinned LibADB Android 3.1.1 artifact for the ADB transport, local mDNS discovery, Android public-key encoding and SPAKE2 pairing primitives. The source is dual licensed, and this integration selects Apache-2.0. The small `LocalAdbPairing` adapter owns its loopback socket and provides cancellation, socket deadlines and bounded packet decoding while reusing the library's cryptographic implementation.
+Octendra 0.12.8 uses the pinned LibADB Android 3.1.1 artifact for the ADB transport, Android public-key encoding and SPAKE2 pairing primitives. The source is dual licensed, and this integration selects Apache-2.0. The small `LocalAdbPairing` adapter owns its loopback socket and provides cancellation, socket deadlines and bounded packet decoding while reusing the library's cryptographic implementation. `LocalAdbDiscovery` uses Android NSD directly with a separate listener per network generation, so late stop/start callbacks cannot strand discovery after a network change.
 
 - LibADB Android 3.1.1 source and license are at https://github.com/MuntashirAkon/libadb-android/tree/3.1.1.
 - Its SPAKE2 Android 2.2.1 dependency source and LGPL-3.0 license are at https://github.com/MuntashirAkon/spake2-java/tree/2.2.1.

@@ -98,7 +98,7 @@ class AgentService : Service() {
             }
             Log.i("OctendraConnection", "channel=lifecycle event=service_started")
             AgentRuntime.bridge = ShellBridge(this); updateBridge()
-            AgentRuntime.wirelessAdb = WirelessAdbController(this).also { it.updateEnabled() }
+            AgentRuntime.wirelessAdb = WirelessAdbController(applicationContext).also { it.updateEnabled() }
             val dispatcher = Dispatcher(this, config, db, net)
             workers.submit { try { poll(net, db, dispatcher) } finally { dispatcher.close() } }
             workers.submit { heartbeat(net) }
