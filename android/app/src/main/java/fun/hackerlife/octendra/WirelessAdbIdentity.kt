@@ -17,7 +17,10 @@ class WirelessAdbIdentity {
             KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, "AndroidKeyStore").apply {
                 initialize(KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY)
                     .setKeySize(2048)
-                    .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA512)
+                    // Conscrypt delegates TLS RSA signatures through a private-key Cipher,
+                    // including raw/no-padding RSA for PSS; Android KeyStore maps that to SIGN/NONE.
+                    .setDigests(KeyProperties.DIGEST_NONE, KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA512)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                     .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1, KeyProperties.SIGNATURE_PADDING_RSA_PSS)
                     .setCertificateSubject(X500Principal("CN=Octendra Wireless ADB"))
                     .setCertificateSerialNumber(BigInteger.ONE)
@@ -30,5 +33,5 @@ class WirelessAdbIdentity {
     val privateKey: PrivateKey get() = store.getKey(ALIAS, null) as PrivateKey
     val certificate: java.security.cert.Certificate get() = store.getCertificate(ALIAS)
 
-    companion object { private const val ALIAS = "octendra.wireless-adb.rsa" }
+    companion object { private const val ALIAS = "octendra.wireless-adb.rsa.tls" }
 }
