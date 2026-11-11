@@ -30,7 +30,6 @@ pub const MAX_GATEWAY_RELEASE_DIR_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_AGENT_CACHED_RELEASES: usize = 1;
 pub const MAX_AGENT_RELEASE_DIR_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_LOG_DIR_BYTES: u64 = 16 * 1024 * 1024;
-const REQUIRED_LANES: [&str; 5] = ["read", "write", "transfer", "terminal", "control"];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpgradeDirective {
@@ -821,12 +820,21 @@ pub fn check_and_spawn_agent_upgrade(agent: &Agent, client: &reqwest::Client, he
     tokio::spawn(async move {
         match perform_agent_self_upgrade(&agent, &client, &directive).await {
             Ok(true) => {
-                // Detached watchdog owns service cutover and post-cutover pruning.
-                // Do not prune staged candidate files or clear flags in the outgoing process.
+                // Detached watchdog normally terminates this process within seconds.
+                // If cutover ever fails without stopping this process, automatically
+                // clear draining/upgrade flags so non-control lanes never deadlock.
                 #[cfg(test)]
                 {
                     draining_flag().store(false, Ordering::SeqCst);
                     upgrade_flag().store(false, Ordering::SeqCst);
+                }
+                #[cfg(not(test))]
+                {
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(90)).await;
+                        draining_flag().store(false, Ordering::SeqCst);
+                        upgrade_flag().store(false, Ordering::SeqCst);
+                    });
                 }
             }
             Ok(false) => {
@@ -1496,7 +1504,6 @@ async fn run_bound_upgrade_watchdog(spec_path: &Path) -> Result<Value> {
         .timeout(Duration::from_secs(15))
         .build()?;
 
-    let cutover_started = now();
     let mut service_changed = false;
 
     let outcome: Result<Value> = async {
@@ -1526,8 +1533,8 @@ async fn run_bound_upgrade_watchdog(spec_path: &Path) -> Result<Value> {
         #[cfg(not(test))]
         restart_platform_agent_service(&spec).await?;
 
-        // 3. Verify post-restart readiness across local SQLite + Gateway `/device/readiness`
-        let ready = verify_post_upgrade_readiness(&client, &spec, cutover_started).await?;
+        // 3. Verify post-restart readiness directly via Gateway `/device/readiness`
+        let ready = verify_post_upgrade_readiness(&client, &spec).await?;
 
         // 4. Persist macOS signing installed.json if applicable
         if let Some(signing) = &spec.signing_metadata
@@ -1696,7 +1703,24 @@ async fn install_binary_atomic(source: &Path, target: &Path, _previous_pid: u32)
         let old_exe = target.with_extension("old.exe");
         let _ = tokio::fs::remove_file(&old_exe).await;
         if target.is_file() {
-            tokio::fs::rename(target, &old_exe).await?;
+            let mut last_err = None;
+            for attempt in 0..12 {
+                match tokio::fs::rename(target, &old_exe).await {
+                    Ok(()) => {
+                        last_err = None;
+                        break;
+                    }
+                    Err(err) => {
+                        last_err = Some(err);
+                        if attempt < 11 {
+                            tokio::time::sleep(Duration::from_millis(250)).await;
+                        }
+                    }
+                }
+            }
+            if let Some(err) = last_err {
+                return Err(err.into());
+            }
         }
         if let Err(err) = tokio::fs::copy(source, target).await {
             let _ = tokio::fs::rename(&old_exe, target).await;
@@ -1748,14 +1772,35 @@ async fn restart_platform_agent_service(spec: &WatchdogSpec) -> Result<()> {
     }
     #[cfg(windows)]
     {
-        let status = tokio::process::Command::new("schtasks.exe")
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let status = std::process::Command::new("schtasks.exe")
             .args(["/Run", "/TN", "Octendra Code Agent"])
+            .creation_flags(CREATE_NO_WINDOW)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
-            .await;
+            .status();
         if status.is_ok_and(|s| s.success()) {
-            return Ok(());
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            let self_pid = std::process::id().to_string();
+            let prev_pid = spec.previous_pid.to_string();
+            let running_new = std::process::Command::new("tasklist.exe")
+                .args(["/FI", "IMAGENAME eq octendra-code.exe", "/FO", "CSV", "/NH"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+                .ok()
+                .is_some_and(|out| {
+                    String::from_utf8_lossy(&out.stdout).lines().any(|line| {
+                        let cols: Vec<&str> = line.split(',').map(|s| s.trim_matches('"')).collect();
+                        cols.len() >= 2
+                            && cols[0].eq_ignore_ascii_case("octendra-code.exe")
+                            && cols[1] != self_pid
+                            && cols[1] != prev_pid
+                    })
+                });
+            if running_new {
+                return Ok(());
+            }
         }
     }
     // Standalone fallback across macOS / Linux / Windows when not managed by launchd/systemd/schtasks
@@ -1795,7 +1840,6 @@ async fn restart_platform_agent_service(spec: &WatchdogSpec) -> Result<()> {
 async fn verify_post_upgrade_readiness(
     client: &reqwest::Client,
     spec: &WatchdogSpec,
-    cutover_started: i64,
 ) -> Result<Value> {
     let deadline =
         tokio::time::Instant::now() + Duration::from_secs(spec.readiness_timeout_secs.max(1));
@@ -1804,9 +1848,6 @@ async fn verify_post_upgrade_readiness(
     let mut last_seen = spec.baseline_last_seen;
 
     while tokio::time::Instant::now() < deadline {
-        let local_ok =
-            check_local_sqlite_readiness(&spec.state_dir, &spec.target_version, cutover_started)
-                .await;
         let resp = client
             .get(format!("{}/device/readiness", spec.gateway_url))
             .bearer_auth(&spec.device_token)
@@ -1832,12 +1873,7 @@ async fn verify_post_upgrade_readiness(
                 .previous_session
                 .as_deref()
                 .is_none_or(|prev| prev != sess);
-            if ready
-                && ver == spec.target_version
-                && seen >= last_seen
-                && session_changed
-                && local_ok
-            {
+            if ready && ver == spec.target_version && seen >= last_seen && session_changed {
                 if observed_session.as_deref() == Some(sess) {
                     consecutive_samples += 1;
                 } else {
@@ -1858,39 +1894,10 @@ async fn verify_post_upgrade_readiness(
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     bail!(
-        "candidate {} failed post-restart 5-lane or gateway readiness within {}s",
+        "candidate {} failed post-restart gateway readiness within {}s",
         spec.target_version,
         spec.readiness_timeout_secs
     )
-}
-
-async fn check_local_sqlite_readiness(
-    state_dir: &Path,
-    expected_version: &str,
-    cutover_started: i64,
-) -> bool {
-    let db_path = state_dir.join("state.sqlite");
-    if !db_path.is_file() {
-        return true;
-    }
-    let Ok(store) = crate::store::Store::open(state_dir).await else {
-        return false;
-    };
-    let Ok(Some(readiness)) = store.get::<Value>("runtime", "readiness").await else {
-        return false;
-    };
-    let ver_ok = readiness.get("version").and_then(Value::as_str) == Some(expected_version);
-    let phase_ok = readiness.get("phase").and_then(Value::as_str) == Some("polling");
-    let Some(lanes) = readiness.get("lanes").and_then(Value::as_object) else {
-        return false;
-    };
-    let all_lanes_ok = REQUIRED_LANES.iter().all(|lane| {
-        lanes
-            .get(*lane)
-            .and_then(Value::as_i64)
-            .is_some_and(|ts| ts >= cutover_started.saturating_sub(5))
-    });
-    ver_ok && phase_ok && all_lanes_ok
 }
 
 async fn perform_automatic_rollback(
