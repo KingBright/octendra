@@ -93,8 +93,10 @@ impl Health {
             self.since_epoch = Some(epoch);
         }
         let retry = failure.retry_after_seconds.unwrap_or_else(|| {
-            if matches!(failure.http_status, Some(401 | 403 | 409)) {
+            if matches!(failure.http_status, Some(401 | 403)) {
                 60
+            } else if failure.http_status == Some(409) {
+                3
             } else {
                 2u64.pow(self.attempts.min(5))
             }

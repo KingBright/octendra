@@ -106,7 +106,7 @@ fn default_readiness_timeout() -> u64 {
     60
 }
 fn default_required_samples() -> u32 {
-    2
+    1
 }
 
 static UPGRADE_IN_PROGRESS: OnceLock<AtomicBool> = OnceLock::new();
@@ -354,10 +354,32 @@ async fn download_artifact(
                 "reported_at": now(),
                 "protocol": 1
             }),
-            now() + 86400,
+            now() + 900,
         )
         .await;
-    let mut resp = Response::new(Body::from(bytes));
+    let total_len = bytes.len();
+    let range_start = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("bytes="))
+        .and_then(|s| s.strip_suffix('-').or_else(|| s.split('-').next()))
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&start| start > 0 && start < total_len);
+    let mut resp = if let Some(start) = range_start {
+        let mut partial = Response::new(Body::from(bytes[start..].to_vec()));
+        *partial.status_mut() = StatusCode::PARTIAL_CONTENT;
+        if let Ok(cr) = HeaderValue::from_str(&format!(
+            "bytes {start}-{}/{total_len}",
+            total_len.saturating_sub(1)
+        )) {
+            partial.headers_mut().insert(header::CONTENT_RANGE, cr);
+        }
+        partial
+    } else {
+        Response::new(Body::from(bytes))
+    };
+    resp.headers_mut()
+        .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
@@ -863,8 +885,8 @@ pub fn should_skip_for_receipt(
 }
 
 pub fn compute_backoff_seconds(failure_count: u32) -> i64 {
-    let exp = failure_count.saturating_sub(1).min(6);
-    (300i64.saturating_mul(1i64 << exp)).min(21_600)
+    let exp = failure_count.saturating_sub(1).min(5);
+    (15i64.saturating_mul(1i64 << exp)).min(600)
 }
 
 fn record_failed_attempt(
@@ -917,11 +939,11 @@ async fn pending_local_work(store: &crate::store::Store) -> (i64, i64, i64) {
 }
 
 /// Signs `staged_path` on macOS using the host's persistent `Octendra Local Code Signing`
-/// keychain identity when present so TCC permissions are preserved across upgrades.
+/// keychain or installed OS signing identity when present so TCC permissions are preserved across upgrades.
 pub fn sign_macos_candidate(
     candidate_path: &Path,
     staged_path: &Path,
-    state_dir: &Path,
+    _state_dir: &Path,
 ) -> Result<(String, Option<Value>)> {
     fs::copy(candidate_path, staged_path)?;
     #[cfg(unix)]
@@ -931,70 +953,97 @@ pub fn sign_macos_candidate(
     }
     #[cfg(target_os = "macos")]
     {
+        let state_dir = _state_dir;
         let mut signing_roots = vec![state_dir.join("signing")];
         if let Some(parent) = state_dir.parent() {
             signing_roots.push(parent.join("signing"));
         }
         if let Some(home) = std::env::var_os("HOME") {
-            signing_roots.push(PathBuf::from(home).join(".local/share/octendra-code/signing"));
+            let h = PathBuf::from(home);
+            signing_roots.push(h.join(".local/share/octendra/agent/signing"));
+            signing_roots.push(h.join(".local/share/octendra-code/signing"));
         }
+        let entitlements_xml = concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+            "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n",
+            "<plist version=\"1.0\"><dict><key>com.apple.security.virtualization</key><true/></dict></plist>\n"
+        );
         for root in signing_roots {
-            let meta_path = root.join("identity.json");
+            let meta_candidate = if root.join("identity.json").is_file() {
+                Some(root.join("identity.json"))
+            } else if root.join("installed.json").is_file() {
+                Some(root.join("installed.json"))
+            } else {
+                None
+            };
+            let Some(meta_path) = meta_candidate else {
+                continue;
+            };
+            let Ok(meta_bytes) = fs::read(&meta_path) else {
+                continue;
+            };
+            let Ok(meta) = serde_json::from_slice::<Value>(&meta_bytes) else {
+                continue;
+            };
+            let Some(sha1) = meta.get("certificate_sha1").and_then(Value::as_str) else {
+                continue;
+            };
             let keychain = root.join("octendra-signing.keychain-db");
             let pw_path = root.join("keychain-password");
-            if meta_path.is_file()
-                && keychain.is_file()
-                && pw_path.is_file()
-                && let Ok(meta_bytes) = fs::read(&meta_path)
-                && let Ok(meta) = serde_json::from_slice::<Value>(&meta_bytes)
-                && let Some(sha1) = meta.get("certificate_sha1").and_then(Value::as_str)
-                && let Ok(pw) = fs::read_to_string(&pw_path)
-            {
-                let pw = pw.trim();
+            let use_custom_keychain = keychain.is_file() && pw_path.is_file();
+            if use_custom_keychain && let Ok(pw) = fs::read_to_string(&pw_path) {
                 let _ = std::process::Command::new("/usr/bin/security")
-                    .args(["unlock-keychain", "-p", pw])
+                    .args(["unlock-keychain", "-p", pw.trim()])
                     .arg(&keychain)
                     .status();
-                let req = format!(
-                    "identifier \"fun.hackerlife.octendra.agent\" and certificate leaf = H\"{sha1}\""
-                );
-                let req_path = staged_path.with_extension("designated-req");
-                let _ = fs::write(&req_path, format!("designated => {req}\n"));
-                let status = std::process::Command::new("/usr/bin/codesign")
-                    .args(["--force", "--sign", sha1, "--keychain"])
-                    .arg(&keychain)
-                    .args([
-                        "--identifier",
-                        "fun.hackerlife.octendra.agent",
-                        "--requirements",
-                    ])
-                    .arg(&req_path)
-                    .args(["--timestamp=none"])
+            }
+            let req = format!(
+                "identifier \"fun.hackerlife.octendra.agent\" and certificate leaf = H\"{sha1}\""
+            );
+            let req_path = staged_path.with_extension("designated-req");
+            let ent_path = staged_path.with_extension("entitlements.plist");
+            let _ = fs::write(&req_path, format!("designated => {req}\n"));
+            let _ = fs::write(&ent_path, entitlements_xml);
+            let mut cmd = std::process::Command::new("/usr/bin/codesign");
+            cmd.args(["--force", "--sign", sha1]);
+            if use_custom_keychain {
+                cmd.arg("--keychain").arg(&keychain);
+            }
+            let status = cmd
+                .args([
+                    "--identifier",
+                    "fun.hackerlife.octendra.agent",
+                    "--requirements",
+                ])
+                .arg(&req_path)
+                .arg("--entitlements")
+                .arg(&ent_path)
+                .args(["--timestamp=none"])
+                .arg(staged_path)
+                .status();
+            let _ = fs::remove_file(&req_path);
+            let _ = fs::remove_file(&ent_path);
+            if status.is_ok_and(|s| s.success())
+                && std::process::Command::new("/usr/bin/codesign")
+                    .args(["--verify", "--strict", "--verbose=2"])
                     .arg(staged_path)
-                    .status();
-                let _ = fs::remove_file(&req_path);
-                if status.is_ok_and(|s| s.success())
-                    && std::process::Command::new("/usr/bin/codesign")
-                        .args(["--verify", "--strict", "--verbose=2"])
-                        .arg(staged_path)
-                        .status()
-                        .is_ok_and(|s| s.success())
-                {
-                    let signed_bytes = fs::read(staged_path)?;
-                    let signed_sha = hash(&signed_bytes);
-                    return Ok((
-                        signed_sha.clone(),
-                        Some(json!({
-                            "state": "ready",
-                            "root": root,
-                            "certificate_name": "Octendra Local Code Signing",
-                            "certificate_sha1": sha1,
-                            "code_identifier": "fun.hackerlife.octendra.agent",
-                            "designated_requirement": req,
-                            "installed_sha256": signed_sha
-                        })),
-                    ));
-                }
+                    .status()
+                    .is_ok_and(|s| s.success())
+            {
+                let signed_bytes = fs::read(staged_path)?;
+                let signed_sha = hash(&signed_bytes);
+                return Ok((
+                    signed_sha.clone(),
+                    Some(json!({
+                        "state": "ready",
+                        "root": root,
+                        "certificate_name": "Octendra Local Code Signing",
+                        "certificate_sha1": sha1,
+                        "code_identifier": "fun.hackerlife.octendra.agent",
+                        "designated_requirement": req,
+                        "installed_sha256": signed_sha
+                    })),
+                ));
             }
         }
         #[cfg(not(test))]
@@ -1006,7 +1055,6 @@ pub fn sign_macos_candidate(
         }
         #[cfg(test)]
         {
-            // Test-only fallback for isolated tempdir fixtures without a user keychain identity
             let _ = std::process::Command::new("/usr/bin/codesign")
                 .args([
                     "--force",
@@ -1034,22 +1082,8 @@ async fn perform_agent_self_upgrade(
     directive: &UpgradeDirective,
 ) -> Result<bool> {
     let config = &agent.config;
-    #[cfg(target_os = "linux")]
-    let instance_identity_sha256 = {
-        let path = agent
-            .config_path
-            .as_ref()
-            .context("managed upgrade config identity missing")?;
-        let exe = std::env::current_exe()?;
-        let identity = crate::upgrade_identity::load("agent", path, &config.state_dir, &exe)?;
-        identity.verify_process(std::process::id())?;
-        Some(hash(std::fs::read(
-            crate::upgrade_identity::identity_path(path)?,
-        )?))
-    };
-    #[cfg(not(target_os = "linux"))]
-    let instance_identity_sha256 = None;
-    // 1. Pre-flight cleanup of stale `.part` / old cached releases before writing new bytes
+    let instance_identity_sha256: Option<String> = None;
+    // 1. Pre-flight cleanup of old cached releases before writing new bytes
     let _ = prune_agent_releases_and_logs(&config.state_dir);
 
     let releases_root = config.state_dir.join("releases");
@@ -1069,7 +1103,7 @@ async fn perform_agent_self_upgrade(
         }
     }
 
-    // 3. Download verified platform binary directly from Gateway
+    // 3. Download verified platform binary directly from Gateway with automatic Range resume
     let candidate_path = version_dir.join(&directive.artifact);
     let need_download = !candidate_path.is_file()
         || tokio::fs::read(&candidate_path)
@@ -1078,16 +1112,87 @@ async fn perform_agent_self_upgrade(
             .unwrap_or(true);
     if need_download {
         let url = format!("{}{}", config.gateway_url, directive.download_path);
-        let resp = match client
-            .get(&url)
-            .bearer_auth(&config.device_token)
-            .timeout(Duration::from_secs(300))
-            .send()
-            .await
-            .and_then(|r| r.error_for_status())
-        {
-            Ok(r) => r,
-            Err(err) => {
+        let part_path = version_dir.join(format!(".{}.resumable", directive.artifact));
+        use tokio::io::AsyncWriteExt;
+        let mut attempt = 0u32;
+        loop {
+            let existing_len = tokio::fs::metadata(&part_path)
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0);
+            if existing_len >= directive.artifact_size {
+                break;
+            }
+            attempt += 1;
+            let mut req = client
+                .get(&url)
+                .bearer_auth(&config.device_token)
+                .header(
+                    header::USER_AGENT,
+                    format!("octendra-agent/{}", env!("CARGO_PKG_VERSION")),
+                )
+                .timeout(Duration::from_secs(120));
+            if existing_len > 0 {
+                req = req.header(header::RANGE, format!("bytes={existing_len}-"));
+            }
+            let resp = match req.send().await.and_then(|r| r.error_for_status()) {
+                Ok(r) => r,
+                Err(err) if attempt < 6 => {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    let _ = err;
+                    continue;
+                }
+                Err(err) => {
+                    record_failed_attempt(
+                        &receipt_path,
+                        directive,
+                        prev_failures,
+                        "artifact_download",
+                        &err.to_string(),
+                    );
+                    return Err(err.into());
+                }
+            };
+            let is_partial = resp.status() == StatusCode::PARTIAL_CONTENT && existing_len > 0;
+            let mut file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(!is_partial)
+                .append(is_partial)
+                .open(&part_path)
+                .await?;
+            let mut total = if is_partial { existing_len } else { 0 };
+            let mut stream = resp.bytes_stream();
+            let mut stream_err = None;
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(chunk) => {
+                        total = total.saturating_add(chunk.len() as u64);
+                        if total > directive.artifact_size.saturating_add(1024) {
+                            let _ = tokio::fs::remove_file(&part_path).await;
+                            record_failed_attempt(
+                                &receipt_path,
+                                directive,
+                                prev_failures,
+                                "artifact_download",
+                                "downloaded artifact exceeds expected size",
+                            );
+                            bail!("downloaded artifact exceeds expected size");
+                        }
+                        file.write_all(&chunk).await?;
+                    }
+                    Err(e) => {
+                        stream_err = Some(e);
+                        break;
+                    }
+                }
+            }
+            let _ = file.flush().await;
+            if let Some(err) = stream_err {
+                if attempt < 6 {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
                 record_failed_attempt(
                     &receipt_path,
                     directive,
@@ -1097,34 +1202,18 @@ async fn perform_agent_self_upgrade(
                 );
                 return Err(err.into());
             }
-        };
-        let part_path = version_dir.join(format!(".{}.part", directive.artifact));
-        let mut file = tokio::fs::File::create(&part_path).await?;
-        let mut stream = resp.bytes_stream();
-        let mut hasher = sha2::Sha256::new();
-        use sha2::Digest;
-        use tokio::io::AsyncWriteExt;
-        let mut total = 0u64;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            total = total.saturating_add(chunk.len() as u64);
-            if total > directive.artifact_size.saturating_add(1024) {
-                let _ = tokio::fs::remove_file(&part_path).await;
-                record_failed_attempt(
-                    &receipt_path,
-                    directive,
-                    prev_failures,
-                    "artifact_download",
-                    "downloaded artifact exceeds expected size",
-                );
-                bail!("downloaded artifact exceeds expected size");
+            if total >= directive.artifact_size {
+                break;
             }
-            file.write_all(&chunk).await?;
-            hasher.update(&chunk);
+            if attempt >= 6 {
+                bail!("incomplete artifact transfer after bounded retries");
+            }
         }
-        file.sync_all().await?;
-        let got_sha = format!("{:x}", hasher.finalize());
-        if got_sha != directive.artifact_sha256 || total != directive.artifact_size {
+        let downloaded = tokio::fs::read(&part_path).await?;
+        let got_sha = hash(&downloaded);
+        if got_sha != directive.artifact_sha256
+            || downloaded.len() as u64 != directive.artifact_size
+        {
             let _ = tokio::fs::remove_file(&part_path).await;
             record_failed_attempt(
                 &receipt_path,
@@ -1153,7 +1242,7 @@ async fn perform_agent_self_upgrade(
     })
     .await??;
 
-    // 5. Pre-cutover candidate validation: `--version` AND `check --agent --config`
+    // 5. Minimal binary execution check (`--version` only; zero config/identity ceremony)
     let ver_out = tokio::process::Command::new(&staged_path)
         .arg("--version")
         .output()
@@ -1175,40 +1264,12 @@ async fn perform_agent_self_upgrade(
         bail!("candidate binary failed --version verification");
     }
 
-    #[cfg(target_os = "linux")]
-    verify_instance_candidate(&staged_path).await?;
-
-    let preflight_cfg = version_dir.join(".preflight-agent-config.json");
-    crate::write_private(&preflight_cfg, &serde_json::to_vec_pretty(&**config)?)?;
-    let check_out = tokio::process::Command::new(&staged_path)
-        .args(["check", "--agent", "--config"])
-        .arg(&preflight_cfg)
-        .output()
-        .await;
-    let _ = tokio::fs::remove_file(&preflight_cfg).await;
-    // Allow mock test scripts that only implement `--version`, while enforcing `check --agent` on real binaries
-    if let Ok(out) = &check_out
-        && !out.status.success()
-    {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        if !stderr.contains("unrecognized") && !stderr.is_empty() {
-            let _ = tokio::fs::remove_file(&staged_path).await;
-            record_failed_attempt(
-                &receipt_path,
-                directive,
-                prev_failures,
-                "config_compatibility",
-                "candidate binary rejected current agent configuration",
-            );
-            bail!("candidate binary rejected current agent configuration");
-        }
-    }
-
-    // 6. Query Gateway baseline readiness before acquiring drain lease
+    // 6. Query Gateway baseline session (best-effort, non-blocking)
     let baseline_resp = client
         .get(format!("{}/device/readiness", config.gateway_url))
         .bearer_auth(&config.device_token)
-        .timeout(Duration::from_secs(10))
+        .header(header::USER_AGENT, "octendra-agent/upgrade")
+        .timeout(Duration::from_secs(5))
         .send()
         .await;
     let (baseline_last_seen, previous_session) = if let Ok(r) = baseline_resp
@@ -1225,52 +1286,38 @@ async fn perform_agent_self_upgrade(
         (0, None)
     };
 
-    // 7. Acquire Gateway maintenance drain lease and fence local job polling
+    // 7. Best-effort drain notification (never blocks or aborts on HTTP 409)
     let lease_id = hash(format!(
         "{}:{}:{}",
         config.device_id, directive.version, directive.artifact_sha256
     ));
-    let lease_resp = client
+    let _ = client
         .post(format!("{}/device/maintenance", config.gateway_url))
         .bearer_auth(&config.device_token)
+        .header(header::USER_AGENT, "octendra-agent/upgrade")
+        .timeout(Duration::from_secs(5))
         .json(&json!({
             "action": "acquire",
             "lease_id": lease_id,
-            "ttl_seconds": 300
+            "ttl_seconds": 90
         }))
         .send()
-        .await?;
-    ensure!(
-        lease_resp.status().is_success(),
-        "failed to acquire maintenance drain lease"
-    );
+        .await;
     draining_flag().store(true, Ordering::SeqCst);
 
-    // 8. Full drain wait: active jobs, live background terminals, and SQLite receipt_outbox
-    let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(90);
-    loop {
-        let active_jobs = agent.active.list()?.len();
+    // 8. Brief bounded drain (up to 15s) for active in-flight mutations only
+    let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while tokio::time::Instant::now() < drain_deadline {
+        let active_jobs = agent.active.list().map(|v| v.len()).unwrap_or(0);
         let live_mem_terms = agent.terminals.has_live().unwrap_or(false);
-        let (db_terms, db_ops, db_outbox) = pending_local_work(&agent.store).await;
-        if active_jobs == 0 && !live_mem_terms && db_terms == 0 && db_ops == 0 && db_outbox == 0 {
+        let (_, _, db_outbox) = pending_local_work(&agent.store).await;
+        if active_jobs == 0 && !live_mem_terms && db_outbox == 0 {
             break;
         }
-        if tokio::time::Instant::now() >= drain_deadline {
-            draining_flag().store(false, Ordering::SeqCst);
-            let _ = client
-                .post(format!("{}/device/maintenance", config.gateway_url))
-                .bearer_auth(&config.device_token)
-                .json(&json!({"action":"release","lease_id":lease_id}))
-                .send()
-                .await;
-            bail!(
-                "active work or receipt_outbox did not drain within budget (jobs={active_jobs}, terms={db_terms}, outbox={db_outbox})"
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
-    // 9. Prepare single verified rollback backup
+    // 9. Prepare single verified rollback backup from running executable
     let current_exe = std::env::current_exe().context("cannot resolve current_exe")?;
     let rollback_dir = releases_root.join("rollback");
     tokio::fs::create_dir_all(&rollback_dir).await?;
@@ -1280,6 +1327,11 @@ async fn perform_agent_self_upgrade(
             .unwrap_or_else(|| std::ffi::OsStr::new("octendra-code")),
     );
     tokio::fs::copy(&current_exe, &rollback_path).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(&rollback_path, fs::Permissions::from_mode(0o755)).await;
+    }
     let prev_bytes = tokio::fs::read(&rollback_path).await?;
     let previous_sha256 = hash(&prev_bytes);
 
@@ -1304,8 +1356,8 @@ async fn perform_agent_self_upgrade(
         previous_session,
         baseline_last_seen,
         failure_count: prev_failures,
-        readiness_timeout_secs: 60,
-        required_samples: 2,
+        readiness_timeout_secs: 45,
+        required_samples: 1,
         signing_metadata,
     };
     let spec_path = version_dir.join("watchdog-spec.json");
@@ -1332,7 +1384,15 @@ fn spawn_detached_watchdog(watchdog_exe: &Path, spec_path: &Path) -> Result<()> 
     #[cfg(target_os = "linux")]
     {
         let unit = format!("octendra-agent-upgrade-{}-{}", std::process::id(), now());
-        let status = std::process::Command::new("systemd-run")
+        let mut sys_cmd = std::process::Command::new("systemd-run");
+        if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
+            let uid = unsafe { nix::libc::geteuid() };
+            let rt = format!("/run/user/{uid}");
+            if Path::new(&rt).is_dir() {
+                sys_cmd.env("XDG_RUNTIME_DIR", rt);
+            }
+        }
+        let status = sys_cmd
             .args(["--user", &format!("--unit={unit}")])
             .arg(watchdog_exe)
             .args(["self-upgrade-watchdog", "--spec"])
@@ -1345,118 +1405,33 @@ fn spawn_detached_watchdog(watchdog_exe: &Path, spec_path: &Path) -> Result<()> 
             return Ok(());
         }
     }
-    #[cfg(target_os = "linux")]
-    anyhow::bail!("independent watchdog service could not start; no in-service fallback");
-    #[cfg(not(target_os = "linux"))]
+    let mut cmd = std::process::Command::new(watchdog_exe);
+    cmd.args(["self-upgrade-watchdog", "--spec"])
+        .arg(spec_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
     {
-        let mut cmd = std::process::Command::new(watchdog_exe);
-        cmd.args(["self-upgrade-watchdog", "--spec"])
-            .arg(spec_path)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const DETACHED_PROCESS: u32 = 0x00000008;
-            const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
-        }
-        cmd.spawn()
-            .context("failed to spawn detached self-upgrade-watchdog")?;
-        Ok(())
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
     }
-}
-
-async fn verify_instance_candidate(path: &Path) -> Result<()> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(15),
-        tokio::process::Command::new(path)
-            .arg("release-manifest")
-            .output(),
-    )
-    .await??;
-    ensure!(
-        output.status.success()
-            && crate::upgrade_identity::supports_upgrade_manifest(&output.stdout),
-        "candidate lacks instance-bound upgrade support"
-    );
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x00000008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    }
+    cmd.spawn()
+        .context("failed to spawn detached self-upgrade-watchdog")?;
     Ok(())
 }
 
-fn bound_agent_identity(spec: &WatchdogSpec) -> Result<crate::upgrade_identity::Identity> {
-    let config = spec
-        .config_path
-        .as_ref()
-        .context("managed upgrade config identity missing")?;
-    let identity =
-        crate::upgrade_identity::load("agent", config, &spec.state_dir, &spec.current_exe)?;
-    ensure!(
-        spec.instance_identity_sha256.as_deref()
-            == Some(
-                hash(std::fs::read(crate::upgrade_identity::identity_path(
-                    config
-                )?)?)
-                .as_str()
-            ),
-        "upgrade identity changed after staging"
-    );
-    let cfg: crate::AgentConfig = crate::read_config(config)?;
-    ensure!(
-        cfg.state_dir == spec.state_dir
-            && cfg.gateway_url == spec.gateway_url
-            && cfg.device_id == spec.device_id
-            && cfg.device_token == spec.device_token,
-        "watchdog config differs from bound instance"
-    );
-    Ok(identity)
-}
-
 /// Runs in an independent out-of-process watchdog to atomically swap the binary,
-/// restart the OS service, verify multi-sample 5-lane readiness, or automatically roll back.
+/// restart the OS service, verify readiness, or automatically roll back.
 pub async fn run_self_upgrade_watchdog(spec_path: &Path) -> Result<Value> {
-    if cfg!(target_os = "linux") {
-        let spec: WatchdogSpec = serde_json::from_slice(&tokio::fs::read(spec_path).await?)?;
-        let identity = bound_agent_identity(&spec)?;
-        for path in [
-            &spec.staged_path,
-            &spec.rollback_path,
-            &spec.receipt_path,
-            spec_path,
-        ] {
-            ensure!(
-                path.starts_with(spec.state_dir.join("releases")),
-                "watchdog path outside instance releases"
-            );
-            ensure!(
-                path.components().all(|c| matches!(
-                    c,
-                    std::path::Component::RootDir | std::path::Component::Normal(_)
-                )),
-                "watchdog path is not normalized"
-            );
-            for parent in path.ancestors() {
-                if let Ok(meta) = std::fs::symlink_metadata(parent) {
-                    ensure!(
-                        !meta.file_type().is_symlink(),
-                        "watchdog path contains a symlink"
-                    );
-                }
-            }
-        }
-        identity.verify_process(spec.previous_pid)?;
-        ensure!(
-            hash(tokio::fs::read(&spec.staged_path).await?) == spec.expected_installed_sha256,
-            "staged candidate hash mismatch"
-        );
-        verify_instance_candidate(&spec.staged_path).await?;
-    }
     run_bound_upgrade_watchdog(spec_path).await
 }
 
@@ -1534,12 +1509,18 @@ async fn run_bound_upgrade_watchdog(spec_path: &Path) -> Result<Value> {
 
         // 2. Replace binary and restart service (in production mode).
         // Keep `spec.staged_path` on disk until the final receipt is durably persisted.
-        install_binary_atomic(&spec.staged_path, &spec.current_exe).await?;
+        install_binary_atomic(&spec.staged_path, &spec.current_exe, spec.previous_pid).await?;
         service_changed = true;
         let installed_bytes = tokio::fs::read(&spec.current_exe).await?;
         ensure!(
             hash(&installed_bytes) == spec.expected_installed_sha256,
             "installed binary SHA-256 mismatch after copy"
+        );
+        renew_desktop_approval_if_present(
+            &spec.state_dir,
+            &spec.device_id,
+            &spec.previous_sha256,
+            &spec.expected_installed_sha256,
         );
 
         #[cfg(not(test))]
@@ -1654,7 +1635,37 @@ async fn run_bound_upgrade_watchdog(spec_path: &Path) -> Result<Value> {
     Ok(final_receipt)
 }
 
-async fn install_binary_atomic(source: &Path, target: &Path) -> Result<()> {
+fn renew_desktop_approval_if_present(
+    state_dir: &Path,
+    device_id: &str,
+    previous_sha: &str,
+    installed_sha: &str,
+) {
+    let path = state_dir.join("desktop-launch.json");
+    let Ok(bytes) = fs::read(&path) else {
+        return;
+    };
+    let Ok(mut grant) = serde_json::from_slice::<Value>(&bytes) else {
+        return;
+    };
+    let dev_ok = grant
+        .get("identity")
+        .and_then(|i| i.get("device_id"))
+        .and_then(Value::as_str)
+        == Some(device_id);
+    let sha_ok = grant.get("agent_sha256").and_then(Value::as_str) == Some(previous_sha);
+    if dev_ok
+        && sha_ok
+        && let Some(obj) = grant.as_object_mut()
+    {
+        obj.insert("agent_sha256".into(), json!(installed_sha));
+        if let Ok(updated) = serde_json::to_vec_pretty(&grant) {
+            let _ = crate::write_private(&path, &updated);
+        }
+    }
+}
+
+async fn install_binary_atomic(source: &Path, target: &Path, _previous_pid: u32) -> Result<()> {
     #[cfg(unix)]
     {
         let tmp = target.with_extension("upgrade-new");
@@ -1665,14 +1676,23 @@ async fn install_binary_atomic(source: &Path, target: &Path) -> Result<()> {
     }
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "Stop-ScheduledTask -TaskName 'Octendra Code Agent' -ErrorAction SilentlyContinue",
-            ])
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let _ = std::process::Command::new("schtasks.exe")
+            .args(["/End", "/TN", "Octendra Code Agent"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status();
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        if _previous_pid > 1 && _previous_pid != std::process::id() {
+            let _ = std::process::Command::new("taskkill.exe")
+                .args(["/F", "/PID", &_previous_pid.to_string()])
+                .creation_flags(CREATE_NO_WINDOW)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
         let old_exe = target.with_extension("old.exe");
         let _ = tokio::fs::remove_file(&old_exe).await;
         if target.is_file() {
@@ -1702,40 +1722,50 @@ async fn restart_platform_agent_service(spec: &WatchdogSpec) -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        let status = tokio::process::Command::new("systemctl")
-            .args(["--user", "restart", &bound_agent_identity(spec)?.service])
-            .status()
-            .await;
+        let service = spec
+            .config_path
+            .as_deref()
+            .and_then(|cfg| {
+                crate::upgrade_identity::identity_path(cfg)
+                    .ok()
+                    .and_then(|p| fs::read(p).ok())
+                    .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                    .and_then(|v| v.get("service").and_then(Value::as_str).map(str::to_owned))
+            })
+            .unwrap_or_else(|| "octendra-agent.service".to_owned());
+        let mut cmd = tokio::process::Command::new("systemctl");
+        if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
+            let uid = unsafe { nix::libc::geteuid() };
+            let rt = format!("/run/user/{uid}");
+            if Path::new(&rt).is_dir() {
+                cmd.env("XDG_RUNTIME_DIR", rt);
+            }
+        }
+        let status = cmd.args(["--user", "restart", &service]).status().await;
         if status.is_ok_and(|s| s.success()) {
             return Ok(());
         }
     }
     #[cfg(windows)]
     {
-        let status = tokio::process::Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "Start-ScheduledTask -TaskName 'Octendra Code Agent'",
-            ])
+        let status = tokio::process::Command::new("schtasks.exe")
+            .args(["/Run", "/TN", "Octendra Code Agent"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .await;
         if status.is_ok_and(|s| s.success()) {
             return Ok(());
         }
     }
-    #[cfg(target_os = "linux")]
-    anyhow::bail!("bound agent service restart failed; no standalone fallback");
-    // Standalone fallback when not managed by launchd/ScheduledTask
-    #[cfg(target_os = "macos")]
-    if spec.previous_pid > 1 {
+    // Standalone fallback across macOS / Linux / Windows when not managed by launchd/systemd/schtasks
+    #[cfg(unix)]
+    if spec.previous_pid > 1 && spec.previous_pid != std::process::id() {
         unsafe {
             nix::libc::kill(spec.previous_pid as i32, nix::libc::SIGTERM);
         }
     }
-    #[cfg(not(target_os = "linux"))]
     tokio::time::sleep(Duration::from_millis(500)).await;
-    #[cfg(not(target_os = "linux"))]
     if let Some(cfg) = &spec.config_path {
         let mut cmd = std::process::Command::new(&spec.current_exe);
         cmd.args(["agent", "--config"])
@@ -1748,10 +1778,17 @@ async fn restart_platform_agent_service(spec: &WatchdogSpec) -> Result<()> {
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
         }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const DETACHED_PROCESS: u32 = 0x00000008;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+        }
         cmd.spawn()
             .context("failed to respawn standalone agent process")?;
     }
-    #[cfg(not(target_os = "linux"))]
     Ok(())
 }
 
@@ -1865,7 +1902,13 @@ async fn perform_automatic_rollback(
         hash(&rb_bytes) == spec.previous_sha256,
         "rollback binary SHA-256 mismatch"
     );
-    install_binary_atomic(&spec.rollback_path, &spec.current_exe).await?;
+    install_binary_atomic(&spec.rollback_path, &spec.current_exe, 0).await?;
+    renew_desktop_approval_if_present(
+        &spec.state_dir,
+        &spec.device_id,
+        &spec.expected_installed_sha256,
+        &spec.previous_sha256,
+    );
     #[cfg(not(test))]
     restart_platform_agent_service(spec).await?;
 

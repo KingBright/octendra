@@ -1997,9 +1997,11 @@ async fn poll(
     } else {
         async {
         let mut tx = g.store.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let claimed = sqlx::query("INSERT INTO kv(kind,key,value,expires) VALUES('online',?,?,?) ON CONFLICT(kind,key) DO UPDATE SET value=excluded.value,expires=excluded.expires WHERE json_extract(kv.value,'$.hello.session')=? OR json_extract(kv.value,'$.last_seen')<=?")
+        let claimed = sqlx::query("INSERT INTO kv(kind,key,value,expires) VALUES('online',?,?,?) ON CONFLICT(kind,key) DO UPDATE SET value=excluded.value,expires=excluded.expires WHERE json_extract(kv.value,'$.hello.session')=? OR json_extract(kv.value,'$.last_seen')<=? OR json_extract(kv.value,'$.hello.version') IS NOT ? OR json_extract(kv.value,'$.hello.build_revision') IS NOT ? OR EXISTS (SELECT 1 FROM kv d WHERE d.kind IN ('device_drain','device_update') AND d.key=? AND d.expires>?)")
             .bind(&device).bind(value).bind(i64::MAX)
-            .bind(&online.hello.session).bind(now()-45).execute(&mut *tx).await?;
+            .bind(&online.hello.session).bind(now()-15)
+            .bind(&online.hello.version).bind(&online.hello.build_revision)
+            .bind(&device).bind(now()).execute(&mut *tx).await?;
         if claimed.rows_affected() == 0 { return Ok(false); }
         renew_jobs(&mut tx, &device, &online.hello.session, &request.active_operations).await?;
         save_progress(&mut tx, &device, &online.hello.session, &request.progress).await?;

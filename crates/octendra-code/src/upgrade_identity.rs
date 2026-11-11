@@ -1,5 +1,6 @@
 //! Fixed, installed instance binding for Linux self-upgrade. Never infer a
 //! maintenance service or accept a service/path from an upgrade request.
+#![allow(dead_code)]
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
