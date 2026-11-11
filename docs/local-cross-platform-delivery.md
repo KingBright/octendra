@@ -26,12 +26,12 @@ GitHub Actions is not a build, verification, packaging, or deployment dependency
 ## Daily test scope
 
 For a small edit, select the affected package and unit tests or integration test
-through the existing entry point. These commands use Cargo's normal test profile
-and the established `~/rust-target` cache:
+through the existing entry point. Keep release optimization and reuse the
+established `~/rust-target` cache:
 
 ```sh
-bash scripts/test.sh -p octendra-code --lib token_output::tests::
-bash scripts/test.sh -p octendra-code --test oauth_clients
+bash scripts/test.sh -p octendra-code --release --locked --lib token_output::tests::
+bash scripts/test.sh -p octendra-code --release --locked --test oauth_clients
 ```
 
 Choose the filter or integration target that covers the change; an empty test
@@ -39,15 +39,40 @@ selection is not a passing regression check. Include callers when changing a
 shared library or protocol. With no package selection, `bash scripts/test.sh`
 still runs the whole workspace. Arguments after `--` remain test-harness options.
 
-Run the complete `scripts/check-code-source.py` verification once for the final
-release inputs. It retains the release-profile tests and machine-readable
-receipt required by packaging. Observe the existing release operation instead
-of starting a second full check for unchanged inputs. Partial development checks
-are not release receipts.
+The default `scripts/check-code-source.py` verification still runs formatting,
+Clippy, Python tests, and workspace checking. Its Rust gate uses release mode
+and a serial harness. Given a complete prior full-workspace receipt with an
+intact test log, it runs all `octendra-code` library unit tests plus the core
+integration, authorization, OAuth, file-transfer, and terminal regressions.
+Changes relative to that full baseline add related domain or edited integration
+targets. Dependency/manifest, shared dispatch, unknown-source, deleted-input,
+or shared-fixture changes require the full workspace. Without a valid full
+baseline, it also runs the full workspace. Fixed-commit inputs retain full tests.
+
+The receipt lists the baseline digest, changed inputs, selected targets and
+omitted integration programs. Omitted targets are not counted as executed or
+passed. Packaging validates that the executed command matches this plan and that
+the baseline evidence remains intact. Narrowed runs never become full baselines.
+An explicit full pass is available through both existing entry points:
+
+```sh
+python3 scripts/check-code-source.py --report target/full-source-check.json --full-tests
+python3 scripts/release-code.py --report target/full-release.json --full-tests
+```
+
+Observe an existing release operation instead of restarting the same request.
+Manual package/filter checks are not release receipts. Producer builds default
+to at most eight Cargo jobs; an explicit `CARGO_BUILD_JOBS` value is preserved.
+This does not increase test-harness concurrency or change optimization settings.
 
 The 2026-11-11 release run spent 36m39s compiling the Rust tests and about 7m
-executing them (44m27s combined). Reducing release compilation on every small edit
-is the main opportunity; no reduced-duration release measurement is claimed.
+executing them (44m27s combined). With the same workstation's existing cache,
+the affected plan selected six Rust test programs instead of 51: compilation
+took 1m16s, the Rust gate 4m12s, and all verification gates 5m08s. It executed
+594 Rust and 799 Python tests successfully; two Rust benchmarks and three Python
+tests remained ignored/skipped. These timings include cache-state differences
+and are not a cold-build guarantee. The following native release build reported
+622 fresh artifacts, no recompiled artifact, and completed in 0.52s.
 
 ## Recovery
 

@@ -228,7 +228,7 @@ def build_commands(platforms=None, arm64_linker=None, source_root=None):
 
 
 @release_current.admission()
-def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=None, platforms=None, source_commit=None):
+def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=None, platforms=None, source_commit=None, full_tests=False):
     platforms = release_current.selected_platforms(platforms)
     snapshot = snapshot.resolve(strict=True) if snapshot is not None else None
     report = report.absolute()
@@ -247,6 +247,7 @@ def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=N
         if (previous.get('source_commit') != source_commit
                 or (not source_commit and previous.get('snapshot_id') != manifest['snapshot_id'])
                 or previous.get('verify_only') != verify_only
+                or previous.get('full_tests', False) != full_tests
                 or tuple(previous.get('platforms', release_current.DEFAULT_PLATFORMS)) != platforms):
             raise ValueError('report belongs to different inputs or mode; never overwrite')
         print(json.dumps({'state': 'existing_attempt', 'original_state': previous['state'],
@@ -255,6 +256,7 @@ def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=N
     state = {'schema_version': 1, 'version': version, 'state': 'preparing', 'phase': 'lease',
              'snapshot_id': manifest['snapshot_id'] if manifest else None, 'source_commit': source_commit,
              'snapshot': str(snapshot) if snapshot is not None else None, 'verify_only': verify_only, 'platforms': list(platforms),
+             'full_tests': full_tests,
              'started_at': stamp(), 'pid': os.getpid(), 'stages': {}, 'deployed': False}
     # Atomic claim prevents racing requests with the same report id.
     with report.open('x') as stream:
@@ -287,18 +289,20 @@ def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=N
                 directory.mkdir(exist_ok=False)
                 state['execution_root'] = str(checkout)
                 env = dict(os.environ, CARGO_TERM_COLOR='never', PYTHONUNBUFFERED='1',
-                           CARGO_BUILD_JOBS=str(min(4, max(1, os.cpu_count() or 1))),
+                           CARGO_BUILD_JOBS=os.environ.get('CARGO_BUILD_JOBS') or str(min(8, max(1, os.cpu_count() or 1))),
                            OCTENDRA_BUILD_REVISION=release_current.runtime_revision(manifest))
                 state['build_revision'] = env['OCTENDRA_BUILD_REVISION']
                 if source_binding:
                     env.update(CARGO_TARGET_DIR=str((pathlib.Path.home()/'rust-target').resolve(strict=True)),
                                PYTHONDONTWRITEBYTECODE='1', GIT_CEILING_DIRECTORIES=str(checkout.parent))
                 state['cargo_target_dir'] = str(release_current.established_target(checkout, env))
+                state['build_jobs'] = env['CARGO_BUILD_JOBS']
                 # Cold toolchain startup on a busy workstation is not a lease failure.
                 state.update(phase='toolchain_probe', state='running')
                 build_slot.atomic_json(report, state)
                 state['toolchain'] = subprocess.check_output(['rustc', '-vV'], cwd=checkout, env=env, text=True, timeout=60).strip()
                 verify_argv = [sys.executable, str(ROOT/'scripts/check-code-source.py'), '--report', str(directory/'verification.json')]
+                if full_tests: verify_argv.append('--full-tests')
                 if source_binding: verify_argv += ['--source-binding', str(source_binding)]
                 run_stage('verification', verify_argv,
                           checkout, directory, report, state, env, timeout=5400, manifest=manifest)
@@ -365,7 +369,7 @@ def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=N
     return state
 
 
-def start_pipeline(snapshot, report, verify_only=False, platforms=None, source_commit=None):
+def start_pipeline(snapshot, report, verify_only=False, platforms=None, source_commit=None, full_tests=False):
     """Submit once; observation or launcher timeout never owns the worker group."""
     platforms = release_current.selected_platforms(platforms)
     snapshot = snapshot.resolve(strict=True) if snapshot is not None else None
@@ -385,7 +389,8 @@ def start_pipeline(snapshot, report, verify_only=False, platforms=None, source_c
     # An interrupted launch claim remains evidence; no automatic second spawn.
     intent = {'schema_version': 1, 'state': 'launching', 'snapshot_id': manifest['snapshot_id'],
               'snapshot': str(snapshot) if snapshot is not None else None, 'report': str(report), 'driver_log': str(driver_log),
-              'verify_only': verify_only, 'platforms': list(platforms), 'started_at': stamp(), 'launcher_pid': os.getpid()}
+              'verify_only': verify_only, 'platforms': list(platforms), 'full_tests': full_tests,
+              'started_at': stamp(), 'launcher_pid': os.getpid()}
     if source_commit: intent['source_commit'] = source_commit
     try:
         with launch.open('x') as stream:
@@ -405,6 +410,8 @@ def start_pipeline(snapshot, report, verify_only=False, platforms=None, source_c
             argv.extend(['--snapshot', str(snapshot)])
         if verify_only:
             argv.append('--verify-only')
+        if full_tests:
+            argv.append('--full-tests')
         # posix_spawn has no un-reaped Popen object in this short-lived launcher.
         # The new session owns its stdout file and survives a tool's observation timeout.
         with driver_log.open('xb', buffering=0) as output, open(os.devnull, 'rb') as null:
@@ -433,6 +440,7 @@ def main():
     parser.add_argument('--status', action='store_true')
     parser.add_argument('--start', action='store_true', help='Submit one detached, durable build; never replay an existing report/launch')
     parser.add_argument('--verify-only', action='store_true')
+    parser.add_argument('--full-tests', action='store_true', help='Run every release-profile workspace test target')
     parser.add_argument('--platforms', nargs='+', choices=release_current.PLATFORMS,
                         help='Explicit package platforms; omitted platforms remain pending, never accepted')
     parser.add_argument('--expected-source-id', help=argparse.SUPPRESS)
@@ -443,12 +451,12 @@ def main():
     if os.name != 'posix':
         parser.error('a POSIX build host is required')
     if args.start:
-        start_pipeline(args.snapshot, args.report, args.verify_only, args.platforms, args.source_commit)
+        start_pipeline(args.snapshot, args.report, args.verify_only, args.platforms, args.source_commit, args.full_tests)
         return
     def interrupt(_signum, _frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupt)
-    result = run_pipeline(args.snapshot, args.report, ROOT/'target/release-slot', args.verify_only, args.expected_source_id, args.platforms, args.source_commit)
+    result = run_pipeline(args.snapshot, args.report, ROOT/'target/release-slot', args.verify_only, args.expected_source_id, args.platforms, args.source_commit, args.full_tests)
     if result['state'] != 'passed':
         raise SystemExit(1)
 

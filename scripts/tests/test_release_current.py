@@ -205,12 +205,14 @@ class CurrentTests(unittest.TestCase):
         self.assertFalse((slot/'checkout').exists())
         self.assertFalse((slot/'cargo-target').exists())
 
-    def pipeline(self, verify_only=False, failed=False, unsettled=False):
+    def pipeline(self, verify_only=False, failed=False, unsettled=False, build_jobs=None, full_tests=False):
         def stage(name, argv, checkout, directory, report, state, env, **kwargs):
             self.assertEqual(checkout, self.root)
             self.assertNotIn('CARGO_TARGET_DIR', env)
             self.assertGreaterEqual(int(env['CARGO_BUILD_JOBS']), 1)
-            self.assertLessEqual(int(env['CARGO_BUILD_JOBS']), 4)
+            self.assertLessEqual(int(env['CARGO_BUILD_JOBS']), 8)
+            self.assertEqual(env['CARGO_BUILD_JOBS'], build_jobs or '8')
+            self.assertEqual('--full-tests' in argv, full_tests)
             self.assertEqual(kwargs['manifest'], self.manifest)
             if failed:
                 state['stages'][name] = {'cleanup': {'state': 'unconfirmed' if unsettled else 'complete'}}
@@ -219,7 +221,9 @@ class CurrentTests(unittest.TestCase):
             (directory/'verification.json').write_text(json.dumps(proof))
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(runner, 'ROOT', self.root))
-            stack.enter_context(mock.patch.dict(os.environ, {}, clear=True))
+            stack.enter_context(mock.patch.dict(os.environ,
+                {'CARGO_BUILD_JOBS': build_jobs} if build_jobs else {}, clear=True))
+            stack.enter_context(mock.patch.object(runner.os, 'cpu_count', return_value=20))
             stack.enter_context(mock.patch.object(lifecycle, 'preflight', return_value={}))
             admit = stack.enter_context(mock.patch.object(lifecycle, 'admit', return_value={}))
             abort = stack.enter_context(mock.patch.object(lifecycle, 'abort', return_value={}))
@@ -230,7 +234,8 @@ class CurrentTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(source_snapshot, 'verifier', return_value=verifier))
             stack.enter_context(mock.patch.object(runner, 'run_stage', side_effect=stage))
             with contextlib.redirect_stdout(io.StringIO()):
-                result = runner.run_pipeline(None, self.root/'report.json', self.root/'target/release-slot', verify_only)
+                result = runner.run_pipeline(None, self.root/'report.json', self.root/'target/release-slot', verify_only,
+                                             full_tests=full_tests)
         return result, admit, abort
 
     def test_verify_only_no_admission_or_complete_package(self):
@@ -238,6 +243,24 @@ class CurrentTests(unittest.TestCase):
         self.assertEqual(result['state'], 'passed')
         admit.assert_not_called(); abort.assert_not_called()
         self.assertFalse((self.root/'dist').exists())
+
+    def test_explicit_build_job_limit_is_preserved(self):
+        result, _, _ = self.pipeline(verify_only=True, build_jobs='2')
+        self.assertEqual(result['build_jobs'], '2')
+
+    def test_full_test_mode_reaches_the_verifier_and_durable_receipt(self):
+        result, _, _ = self.pipeline(verify_only=True, full_tests=True)
+        self.assertTrue(result['full_tests'])
+
+    def test_detached_worker_keeps_full_test_mode(self):
+        report = self.root/'full-tests.json'
+        with mock.patch.object(runner, 'ROOT', self.root), \
+             mock.patch.object(runner.os, 'posix_spawn', return_value=123456789) as spawn, \
+             contextlib.redirect_stdout(io.StringIO()):
+            runner.start_pipeline(None, report, verify_only=True, full_tests=True)
+        argv = spawn.call_args.args[1]
+        self.assertIn('--full-tests', argv)
+        self.assertTrue(json.loads((self.root/'full-tests-launch.json').read_text())['full_tests'])
 
     def test_failed_stage_recovers_owned_temp(self):
         result, admit, abort = self.pipeline(failed=True)

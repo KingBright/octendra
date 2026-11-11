@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Fixed source verification gates with incremental, input-bound receipts.
+"""Release source verification with explicit, input-bound test coverage.
 
-No deployment, shell command interpolation, branch change or prior-success reuse.
+All selected tests execute; a retained full run bounds omitted integration targets.
 --check-receipt only compares inputs and never starts verification commands.
 """
 import argparse
@@ -26,6 +26,34 @@ import pinned_source
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 REQUIRED = {'fmt', 'clippy', 'rust_tests', 'python_tests', 'workspace'}
+RUST_ARGS = ['--release', '--locked', '--no-fail-fast']
+HARNESS_ARGS = ['--', '--test-threads=1', '--color', 'never']
+FULL_RUST_COMMAND = ['bash', 'scripts/test.sh', *RUST_ARGS, *HARNESS_ARGS]
+CORE_TESTS = {'integration', 'authorization_boundaries', 'oauth_clients',
+              'file_transfers', 'terminal_regressions'}
+# Shared dispatch, protocol, dependency, and unclassified edits use the full run.
+# These bounded domains add their integration contracts to the mandatory core.
+TEST_DOMAINS = (
+    ({'auth', 'client_profiles', 'oauth_handoff', 'oauth_client_metadata_tests'},
+     {'oauth_client_metadata_cli', 'owner_password_cli', 'owner_password_check_cli',
+      'review_regressions', 'live_configuration', 'experience_contract'}),
+    ({'files', 'files_sync', 'durable_transfer', 'transfers', 'transfer_control',
+      'transfer_journal', 'transfer_receiver', 'transfer_watch', 'resumable'},
+     {'transfers_040', 'result_atomicity', 'review_regressions', 'concurrency',
+      'receipt_delivery_034', 'state_recovery_033', 'reliability_0102',
+      'iteration_reliability', 'experience_contract'}),
+    ({'terminal', 'terminal_io', 'terminal_output', 'terminal_sync', 'local_sudo'},
+     {'terminal_read_latency', 'interaction_031', 'observations_032',
+      'receipt_delivery_034', 'state_recovery_033', 'iteration_reliability',
+      'concurrency', 'experience_contract'}),
+    ({'token_output', 'diagnostics', 'payload_budget', 'code_payload',
+      'permission_view', 'status_view'},
+     {'experience_contract', 'experience_ab', 'gateway_latency', 'terminal_read_latency'}),
+)
+VERIFIER_INPUTS = {'scripts/check-code-source.py', 'scripts/release-code.py',
+                   'scripts/tests/test_source_verification.py',
+                   'scripts/tests/test_build_resource_limits.py',
+                   'scripts/tests/test_release_current.py'}
 
 
 def digest(path):
@@ -52,6 +80,8 @@ def inputs(root):
                 raise ValueError('linked directory cannot be omitted from verification: '+str(directory))
             paths.update(pathlib.Path(directory)/n for n in files)
     paths.update((root/'scripts').glob('*.py'))
+    if (root/'scripts/test.sh').is_file():
+        paths.add(root/'scripts/test.sh')
     paths.update((root/'scripts').glob('*.ps1'))
     for name in (
         'octendra-service',
@@ -162,6 +192,126 @@ def snapshot_identity(root):
     return identity
 
 
+def full_baseline(path, root):
+    """Only a complete full-workspace run with intact evidence can omit targets."""
+    try:
+        path = path.resolve(strict=True)
+        if not path.is_relative_to(root.resolve()):
+            return None
+        proof = json.loads(path.read_text())
+        check = proof['checks']['rust_tests']
+        tests = proof['functional_tests']
+        log = root/check['log']
+        if (proof.get('state') != 'passed' or not proof.get('source_inputs_unchanged')
+                or not isinstance(proof.get('source_inputs'), dict) or not proof['source_inputs']
+                or proof.get('execution_root') != str(root.resolve())
+                or not REQUIRED.issubset(proof['checks'])
+                or any(proof['checks'][name].get('exit_code') != 0 for name in REQUIRED)
+                or check.get('state') != 'finished' or check.get('command') != FULL_RUST_COMMAND
+                or not check.get('output_complete') or check.get('output_truncated')
+                or check.get('output_error') or digest(log) != check.get('sha256')
+                or not tests.get('evidence_complete') or not tests.get('test_gates_completed_successfully')
+                or tests.get('failed') != 0 or tests.get('rust_executed', 0) <= 0
+                or proof.get('rust_test_plan', {}).get('mode', 'full') != 'full'):
+            return None
+        counts = re.findall(r'test result: \w+\. (\d+) passed; (\d+) failed;', log.read_text(errors='replace'))
+        if (not counts or sum(int(f) for p, f in counts) != 0
+                or sum(int(p) for p, f in counts) != tests['rust_executed']):
+            return None
+        return proof
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def baseline_path(root):
+    candidates = [root/'dist/octendra-code-current/source-verification.json']
+    marker = root/'target/source-verification/latest-full.json'
+    try:
+        record = json.loads(marker.read_text())
+        path = pathlib.Path(record['path'])
+        if digest(path) == record['sha256']:
+            candidates.append(path)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    # Existing release receipts include successful verification from a failed
+    # cross-build. Reuse that coverage rather than requiring a published binary.
+    candidates.extend((root/'target').glob('**/verification.json'))
+    candidates = sorted({p for p in candidates if p.is_file()},
+                        key=lambda p: p.stat().st_mtime, reverse=True)
+    return next((p for p in candidates if full_baseline(p, root)), None)
+
+
+def rust_test_plan(root, current, full=False, baseline=None):
+    def full_plan(reason):
+        return {'protocol': 1, 'mode': 'full', 'reason': reason,
+                'command': FULL_RUST_COMMAND, 'selected_targets': ['workspace'],
+                'omitted_integration_targets': []}
+    if full:
+        return full_plan('full workspace requested')
+    path = baseline if baseline is not None else baseline_path(root)
+    proof = full_baseline(path, root) if path is not None else None
+    if proof is None:
+        return full_plan('no complete full-workspace baseline with intact logs')
+    before = proof['source_inputs']
+    changed = sorted(n for n in before.keys() | current.keys() if before.get(n) != current.get(n))
+    available = {p.stem for p in (root/'crates/octendra-code/tests').glob('*.rs')}
+    selected = set(CORE_TESTS)
+    for name in changed:
+        if name not in current:
+            return full_plan('deleted input requires full coverage: '+name)
+        if name in VERIFIER_INPUTS or name.startswith('android/'):
+            continue
+        # Legacy receipts did not fingerprint this wrapper; its original full
+        # command and log are checked above. Later edits invalidate selection.
+        if name == 'scripts/test.sh' and name not in before:
+            continue
+        path_name = pathlib.PurePosixPath(name)
+        if path_name.parent == pathlib.PurePosixPath('crates/octendra-code/tests') and path_name.suffix == '.rs':
+            selected.add(path_name.stem)
+            continue
+        if name.startswith('crates/octendra-code/tests/experience_contract/'):
+            selected.add('experience_contract')
+            continue
+        if path_name.parent == pathlib.PurePosixPath('crates/octendra-code/src') and path_name.suffix == '.rs':
+            domain = next((targets for sources, targets in TEST_DOMAINS if path_name.stem in sources), None)
+            if domain is not None:
+                selected.update(domain)
+                continue
+        return full_plan('shared or unclassified input requires full coverage: '+name)
+    if not selected.issubset(available):
+        return full_plan('required integration target missing')
+    command = ['bash', 'scripts/test.sh', '-p', 'octendra-code', '--lib', *RUST_ARGS]
+    for target in sorted(selected):
+        command.extend(['--test', target])
+    command.extend(HARNESS_ARGS)
+    return {'protocol': 1, 'mode': 'affected', 'reason': 'core plus changed-domain contracts; remaining targets covered by full baseline',
+            'baseline': {'path': str(path.resolve()), 'sha256': digest(path)},
+            'changed_inputs': changed, 'command': command,
+            'selected_targets': ['octendra-code::lib', *sorted(selected)],
+            'omitted_integration_targets': sorted(available-selected),
+            'other_workspace_tests': 'unchanged since full baseline; omitted, not executed in this run'}
+
+
+def test_plan_current(proof, root):
+    plan = proof.get('rust_test_plan')
+    if plan is None:
+        return not proof.get('test_policy_protocol')  # Existing receipts/custom fixtures.
+    try:
+        if plan.get('protocol') != 1:
+            return False
+        if plan['mode'] == 'full':
+            return (plan['command'] == FULL_RUST_COMMAND
+                    and plan['selected_targets'] == ['workspace']
+                    and not plan['omitted_integration_targets']
+                    and proof['checks']['rust_tests']['command'] == FULL_RUST_COMMAND)
+        path = pathlib.Path(plan['baseline']['path'])
+        return (plan['mode'] == 'affected' and digest(path) == plan['baseline']['sha256']
+                and rust_test_plan(root, proof['source_inputs'], baseline=path) == plan
+                and proof['checks']['rust_tests']['command'] == plan['command'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 def receipt_current(proof, root):
     return (proof.get('state') == 'passed' and proof.get('source_inputs_unchanged') is True
             and REQUIRED.issubset(proof.get('checks', {}))
@@ -170,11 +320,12 @@ def receipt_current(proof, root):
             and proof.get('functional_tests', {}).get('test_gates_completed_successfully') is True
             and proof.get('functional_tests', {}).get('evidence_complete') is True
             and proof.get('source_inputs') == inputs(root)
-            and proof.get('snapshot_id') == snapshot_identity(root))
+            and proof.get('snapshot_id') == snapshot_identity(root)
+            and test_plan_current(proof, root))
 
 
 @release_current.admission()
-def run_verification(root, report, gates=None, timeout=900, logs_root=None, source_binding=None):
+def run_verification(root, report, gates=None, timeout=900, logs_root=None, source_binding=None, full_tests=False):
     report = report.resolve()
     report.parent.mkdir(parents=True, exist_ok=True)
     # Claim destination before any expensive command; never discover a collision
@@ -185,6 +336,7 @@ def run_verification(root, report, gates=None, timeout=900, logs_root=None, sour
     run = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')+'-'+uuid.uuid4().hex[:8]
     logs = (logs_root if logs_root is not None else root/'target/source-verification')/run
     logs.mkdir(parents=True)
+    native_gates = gates is None
     try:
         result.update(version=tomllib.loads((root/'crates/octendra-code/Cargo.toml').read_text())['package']['version'],
                       run_id=run, scope='native source verification, not deployment', source_inputs=inputs(root), state='running',
@@ -199,6 +351,9 @@ def run_verification(root, report, gates=None, timeout=900, logs_root=None, sour
         if gates is None:
             # Verify the profile shipped by release-code.py. Reuse its existing
             # cache instead of contending with unrelated interactive dev builds.
+            result['test_policy_protocol'] = 1
+            result['rust_test_plan'] = rust_test_plan(root, result['source_inputs'],
+                                                     full=full_tests or source_binding is not None)
             gates = [
                 ('fmt', ['cargo', 'fmt', '--all', '--', '--check']),
                 ('clippy', ['cargo', 'clippy', '-p', 'octendra-code', '-p', 'octendra-release', '--all-targets', '--release', '--locked', '--', '-D', 'warnings']),
@@ -206,7 +361,7 @@ def run_verification(root, report, gates=None, timeout=900, logs_root=None, sour
                 # Concurrency fixtures create their own parallel actors. Keep
                 # unrelated fsync-heavy cases from distorting their watchdogs;
                 # do not weaken assertions, deadlines, or in-test concurrency.
-                ('rust_tests', ['bash', 'scripts/test.sh', '--release', '--locked', '--no-fail-fast', '--', '--test-threads=1', '--color', 'never']),
+                ('rust_tests', result['rust_test_plan']['command']),
                 ('workspace', ['cargo', 'check', '--workspace', '--release', '--locked']),
             ]
         env = dict(os.environ, CARGO_TERM_COLOR='never', PYTHONUNBUFFERED='1')
@@ -252,10 +407,17 @@ def run_verification(root, report, gates=None, timeout=900, logs_root=None, sour
     except Exception as error:
         result.update(state='stale', source_inputs_unchanged=False, input_failure_type=type(error).__name__)
     result.update(functional_tests=summarize(result['checks'], logs), verified_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
+    if 'rust_test_plan' in result:
+        result['functional_tests'].update(rust_test_scope=result['rust_test_plan']['mode'],
+            omitted_rust_integration_targets=result['rust_test_plan']['omitted_integration_targets'])
     if result['state'] == 'passed' and not result['functional_tests']['evidence_complete']:
         result['state'] = 'failed'
         result['failure_type'] = 'IncompleteTestEvidence'
     publish(report, result)
+    if native_gates and result['state'] == 'passed' and result['rust_test_plan']['mode'] == 'full':
+        marker = root/'target/source-verification/latest-full.json'
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        publish(marker, {'path': str(report), 'sha256': digest(report)})
     print(json.dumps({'state': result['state'], 'report': str(report), **result['functional_tests']}), flush=True)
     return result
 
@@ -264,6 +426,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--report', type=pathlib.Path, required=True)
     parser.add_argument('--check-receipt', action='store_true')
+    parser.add_argument('--full-tests', action='store_true',
+                        help='Compile and execute every workspace test target in release mode')
     parser.add_argument('--source-binding', type=pathlib.Path,
                         help='Original producer-owned fixed-commit record; no arbitrary source root')
     args = parser.parse_args()
@@ -282,7 +446,7 @@ def main():
     root = pathlib.Path(binding['source_root']) if binding else ROOT
     result = run_verification(root, args.report,
                               logs_root=args.report.resolve().parent/'source-check-logs' if binding else None,
-                              source_binding=binding)
+                              source_binding=binding, full_tests=args.full_tests)
     if result['state'] != 'passed':
         raise SystemExit(1)
 
