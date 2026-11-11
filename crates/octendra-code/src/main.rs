@@ -180,6 +180,24 @@ fn lock(dir: &std::path::Path) -> Result<std::fs::File> {
         .context("another service is already using this state directory")?;
     Ok(file)
 }
+#[cfg(unix)]
+fn raise_nofile_soft_limit() {
+    use nix::sys::resource::{Resource, getrlimit, rlim_t, setrlimit};
+    if let Ok((soft, hard)) = getrlimit(Resource::RLIMIT_NOFILE) {
+        for target in [65_536u32, 32_768, 10_240] {
+            let desired = rlim_t::from(target).min(hard);
+            if desired <= soft {
+                break;
+            }
+            if setrlimit(Resource::RLIMIT_NOFILE, desired, hard).is_ok() {
+                break;
+            }
+        }
+    }
+}
+#[cfg(not(unix))]
+fn raise_nofile_soft_limit() {}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     if std::env::args_os()
@@ -338,6 +356,7 @@ async fn main() -> Result<()> {
         state_only,
     } = &command
     {
+        raise_nofile_soft_limit();
         use tracing_subscriber::fmt::writer::{BoxMakeWriter, MakeWriterExt};
         let c: AgentConfig = read_config(config)?;
         if *state_only {
@@ -380,6 +399,7 @@ async fn main() -> Result<()> {
         return result;
     }
     if let Command::Gateway { config } = &command {
+        raise_nofile_soft_limit();
         use tracing_subscriber::fmt::writer::{BoxMakeWriter, MakeWriterExt};
         let c: GatewayConfig = read_config(config)?;
         let bind: SocketAddr = c.bind.parse()?;

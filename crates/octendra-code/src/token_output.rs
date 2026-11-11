@@ -268,87 +268,15 @@ fn deduplicate_preview(value: &mut Value, output_ref: &str) {
     }
 }
 
+/// Serialize the already-compacted payload into `content[0].text` so MCP hosts
+/// that consume text blocks rather than `structuredContent` (e.g. Gemini, Claude,
+/// Cursor, stdio CLIs) still receive ranges, matches, `operation_id`, and structured
+/// diagnostics on the default `compact` path without a second `full` round-trip.
 pub(crate) fn compact_text(tool: &str, value: &Value) -> String {
-    if let Some(error) = value.get("error").and_then(Value::as_str) {
-        let mut text = error.chars().take(512).collect::<String>();
-        if error.chars().count() > 512 {
-            text.push('…');
-        }
-        return format!("{tool}: error: {text}");
-    }
-    match tool {
-        "terminal_read" => format!(
-            "terminal_read: {}/{}",
-            value
-                .pointer("/terminal/state")
-                .and_then(Value::as_str)
-                .unwrap_or("result"),
-            value
-                .pointer("/terminal/exit_code")
-                .map_or_else(|| "?".into(), Value::to_string)
-        ),
-        "fleet_status" => format!(
-            "fleet_status: {}/{} converged; online={}; gateway={}; all_converged={}",
-            value
-                .pointer("/summary/devices_converged")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-            value
-                .pointer("/summary/devices_total")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-            value
-                .pointer("/summary/devices_online")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-            value
-                .pointer("/gateway/version")
-                .and_then(Value::as_str)
-                .unwrap_or("?"),
-            value
-                .get("all_converged")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        ),
-        "devices_list" => {
-            let devices = value
-                .get("devices")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let online = devices.iter().filter(|d| d["online"] == true).count();
-            format!(
-                "devices_list: {online}/{} online; gateway={}",
-                devices.len(),
-                value
-                    .pointer("/gateway/version")
-                    .and_then(Value::as_str)
-                    .unwrap_or("?")
-            )
-        }
-        "code_read" => format!(
-            "code_read: {} range(s)",
-            value
-                .get("ranges")
-                .and_then(Value::as_array)
-                .map(Vec::len)
-                .unwrap_or(0)
-        ),
-        "code_search" => format!(
-            "code_search: {} match(es)",
-            value
-                .get("match_count")
-                .and_then(Value::as_u64)
-                .or_else(|| value
-                    .get("matches")
-                    .and_then(Value::as_array)
-                    .map(|v| v.len() as u64))
-                .unwrap_or(0)
-        ),
-        _ => format!(
-            "{tool}: {}",
-            value.get("state").and_then(Value::as_str).unwrap_or("ok")
-        ),
+    if value.is_object() {
+        value.to_string()
+    } else {
+        format!("{tool}: {value}")
     }
 }
 
@@ -571,5 +499,28 @@ mod tests {
                 .is_none()
         );
         assert!(compacted["gateway"].get("optional_inputs").is_none());
+    }
+
+    #[test]
+    fn compact_text_preserves_compacted_payload_for_text_only_mcp_hosts() {
+        let read = compact_response(
+            "code_read",
+            json!({
+                "ranges": [{"path": "src/lib.rs", "start_line": 1, "end_line": 1, "text": "pub fn ok() {}\n"}],
+                "timing": {"total_ms": 4},
+                "operation_lifecycle": {"gateway": {"queue_ms": 10}}
+            }),
+        );
+        let parsed: Value = serde_json::from_str(&compact_text("code_read", &read)).unwrap();
+        assert_eq!(parsed["ranges"][0]["text"], "pub fn ok() {}\n");
+        assert!(parsed.get("timing").is_none());
+
+        let pending = compact_response(
+            "code_list",
+            json!({"operation_id": "op-123", "state": "dispatched", "pending": true}),
+        );
+        let parsed_pending: Value =
+            serde_json::from_str(&compact_text("code_list", &pending)).unwrap();
+        assert_eq!(parsed_pending["operation_id"], "op-123");
     }
 }

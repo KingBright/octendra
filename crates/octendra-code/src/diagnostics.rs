@@ -14,6 +14,18 @@ pub(crate) fn outcome_unknown(value: &Value) -> bool {
                 || value["execution_state"] == "unknown"
                 || value["state"] == "outcome_unknown"))
 }
+#[cfg(unix)]
+fn is_fd_limit_exhausted(error: &std::io::Error) -> bool {
+    use nix::errno::Errno;
+    matches!(
+        error.raw_os_error(),
+        Some(code) if code == Errno::EMFILE as i32 || code == Errno::ENFILE as i32
+    )
+}
+#[cfg(not(unix))]
+fn is_fd_limit_exhausted(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(4 | 24))
+}
 pub(crate) fn error_from_source(
     tool: &str,
     source: &anyhow::Error,
@@ -25,6 +37,12 @@ pub(crate) fn error_from_source(
         .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
     {
         error(tool, "local_permission_denied", operation, stage)
+    } else if source
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .any(is_fd_limit_exhausted)
+    {
+        error(tool, "local_fd_limit_reached", operation, stage)
     } else {
         let mut value = error(tool, &source.to_string(), operation, stage);
         if let Some(problem) = source.downcast_ref::<crate::tools::ArgumentProblem>() {
@@ -220,6 +238,12 @@ pub(crate) fn error(tool: &str, message: &str, operation: Option<&str>, stage: &
             "inspect_selected_device_local_file_or_os_permission",
             "not_executed_or_partial",
         )
+    } else if is_code(message, "local_fd_limit_reached") {
+        (
+            "local_fd_limit_reached",
+            "narrow_glob_or_inspect_selected_device_open_file_limits",
+            "not_executed_or_partial",
+        )
     } else if (message.starts_with("octendra_authority_") || message.starts_with("octendra_task_"))
         && message.len() <= 96
         && message.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
@@ -301,9 +325,10 @@ pub(crate) fn error(tool: &str, message: &str, operation: Option<&str>, stage: &
         | "platform_authorization_required"
         | "source_address_policy_rejected" => "do_not_replay_or_expand_authority",
         "invalid_arguments" => "retry_only_after_correcting_arguments",
-        "device_offline" | "device_feature_unavailable" | "storage_capacity_insufficient" => {
-            "retry_only_after_reported_condition_changes"
-        }
+        "device_offline"
+        | "device_feature_unavailable"
+        | "storage_capacity_insufficient"
+        | "local_fd_limit_reached" => "retry_only_after_reported_condition_changes",
         "idempotency_conflict" | "operation_unavailable" => "do_not_replay_observe_original",
         "version_conflict" | "change_set_unavailable" | "gc_preview_changed" => {
             "do_not_replay_reconcile_state_first"
@@ -318,6 +343,7 @@ pub(crate) fn error(tool: &str, message: &str, operation: Option<&str>, stage: &
         "invalid_arguments" => "correct_arguments",
         "access_denied" => "check_account_and_device_permissions",
         "local_permission_denied" => "inspect_selected_device_local_file_or_os_permission",
+        "local_fd_limit_reached" => "inspect_selected_device_open_file_limits",
         "task_authorization_missing"
         | "task_authorization_version_required"
         | "task_authorization_version_changed"
@@ -585,5 +611,16 @@ mod tests {
         );
         assert_eq!(v["error_code"], "version_conflict");
         assert_eq!(v["recovery_action"], "read_current_version_and_merge");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn fd_exhaustion_maps_to_sanitized_code() {
+        let err = anyhow::Error::new(std::io::Error::from_raw_os_error(
+            nix::errno::Errno::EMFILE as i32,
+        ))
+        .context("private path /secret/project");
+        let v = super::error_from_source("code_list", &err, None, "agent_execute");
+        assert_eq!(v["error_code"], "local_fd_limit_reached");
+        assert!(!v.to_string().contains("/secret/project"));
     }
 }

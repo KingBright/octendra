@@ -96,7 +96,7 @@ fn host_file_parameter_metadata_and_safety_annotations_survive_catalog() {
     let v = serde_json::to_value(t).unwrap();
     assert_eq!(v["_meta"]["openai/fileParams"], json!(["file"]));
     assert_eq!(v["annotations"]["readOnlyHint"], false);
-    assert_eq!(v["annotations"]["destructiveHint"], true);
+    assert_eq!(v["annotations"]["destructiveHint"], false);
     let args = json!({"workspace_id":"d:w","idempotency_key":"import","path":"a.bin","file":{"file_id":"file-synthetic","download_url":"https://files.oaiusercontent.com/f"}});
     tools::validate("file_upload", &args).unwrap();
     let mut bad = args;

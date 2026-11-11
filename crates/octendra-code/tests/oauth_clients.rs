@@ -2244,3 +2244,70 @@ async fn parallel_browser_authorizations_keep_independent_csrf_cookies() {
             .join("; ");
     }
 }
+
+#[tokio::test]
+async fn token_endpoint_returns_invalid_grant_and_keeps_five_minute_confidential_retry_grace() {
+    let f = Fixture::new().await;
+    let client = f.register("client_secret_post", SPARK).await;
+
+    // Missing required parameter remains invalid_request.
+    let (status, _, missing_param) = f
+        .authenticated(
+            &client,
+            "/oauth/token",
+            json!({"grant_type": "refresh_token"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(missing_param, json!({"error": "invalid_request"}));
+
+    // Unknown refresh token returns RFC 6749 invalid_grant.
+    let (status, _, unknown_rt) = f
+        .authenticated(
+            &client,
+            "/oauth/token",
+            json!({"grant_type": "refresh_token", "refresh_token": format!("rh2_{}", random())}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(unknown_rt, json!({"error": "invalid_grant"}));
+
+    // Replayed authorization code returns invalid_grant.
+    let mut code = f.code(&client).await;
+    code.as_object_mut().unwrap().remove("resource");
+    let (status, _, original) = f.authenticated(&client, "/oauth/token", code.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, replayed_code) = f.authenticated(&client, "/oauth/token", code).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(replayed_code, json!({"error": "invalid_grant"}));
+
+    // Confidential refresh retry still succeeds past 30s (within the 300s grace window).
+    let (status, _, rotated) = f
+        .authenticated(
+            &client,
+            "/oauth/token",
+            json!({"grant_type": "refresh_token", "refresh_token": original["refresh_token"]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let old_key = hash(original["refresh_token"].as_str().unwrap());
+    let binding: Value =
+        f.g.store
+            .get("oauth_refresh_binding", &old_key)
+            .await
+            .unwrap()
+            .unwrap();
+    let retry_until = binding["retry_until"].as_i64().unwrap();
+    assert!(retry_until >= octendra_code::now() + 240);
+
+    let (status, _, retried) = f
+        .authenticated(
+            &client,
+            "/oauth/token",
+            json!({"grant_type": "refresh_token", "refresh_token": original["refresh_token"]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(retried["access_token"], rotated["access_token"]);
+    assert_eq!(retried["refresh_token"], rotated["refresh_token"]);
+}

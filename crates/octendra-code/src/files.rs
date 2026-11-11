@@ -173,15 +173,32 @@ fn paths(ws: &Workspace, v: &Value) -> Result<Vec<String>> {
             prefix.push(component);
         }
     }
-    let mut stack = vec![(dir, anchor, inherited)];
-    while let Some((dir, prefix, mut rules)) = stack.pop() {
+    drop(dir);
+    let mut stack = vec![(anchor, inherited)];
+    while let Some((prefix, mut rules)) = stack.pop() {
         ensure!(
             start.elapsed().as_secs() < 120,
             "file enumeration exceeded 120 seconds; narrow the glob"
         );
+        let dir = if prefix.as_os_str().is_empty() {
+            root.try_clone()?
+        } else {
+            match open_beneath(&root, &prefix) {
+                Ok(dir) => dir,
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        };
         if !ignored {
             rules.push(local_ignore_rules(&dir, &prefix)?);
         }
+        let mut subdirs = Vec::new();
         for entry in dir.entries()? {
             let entry = entry?;
             let name = entry.file_name();
@@ -210,8 +227,10 @@ fn paths(ws: &Workspace, v: &Value) -> Result<Vec<String>> {
                 continue;
             }
             if kind.is_dir() {
-                // no-follow at open time, not merely at directory enumeration.
-                stack.push((open_beneath(&dir, Path::new(&name))?, path, rules.clone()));
+                // Open each directory through open_beneath when popped so no-follow
+                // containment holds while keeping open FD usage O(1).
+                let _ = open_beneath(&dir, Path::new(&name))?;
+                subdirs.push((path, rules.clone()));
             } else if kind.is_file() {
                 let path = path.to_string_lossy().replace('\\', "/");
                 if matcher.is_match(&path) {
@@ -219,10 +238,12 @@ fn paths(ws: &Workspace, v: &Value) -> Result<Vec<String>> {
                 }
             }
             ensure!(
-                out.len() + stack.len() <= 1000000,
+                out.len() + stack.len() + subdirs.len() <= 1000000,
                 "too many files; narrow the glob"
             );
         }
+        drop(dir);
+        stack.extend(subdirs);
     }
     out.sort();
     Ok(out)
@@ -1098,6 +1119,18 @@ mod tests {
             std::fs::read_to_string(d.path().join("a")).unwrap(),
             "user-edit"
         );
+    }
+    #[test]
+    fn list_include_ignored_uses_constant_file_descriptors() {
+        let (d, w) = fixture();
+        std::fs::write(d.path().join(".gitignore"), "ignored_tree/\n").unwrap();
+        for idx in 0..320 {
+            let shard = d.path().join("ignored_tree").join(format!("s_{idx:03}"));
+            std::fs::create_dir_all(&shard).unwrap();
+            std::fs::write(shard.join("item.txt"), "x").unwrap();
+        }
+        let listed = list(&w, &json!({"include_ignored": true, "limit": 500})).unwrap();
+        assert_eq!(listed["total"], 321);
     }
     #[cfg(unix)]
     #[test]

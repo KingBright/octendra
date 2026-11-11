@@ -220,6 +220,76 @@ async fn old_ack_cannot_delete_a_new_attempt_lease() {
     assert!(compact.get("result").is_none());
     server.abort();
 }
+
+#[tokio::test]
+async fn ephemeral_read_delivery_skips_sqlite_on_accept_and_persists_on_retry() {
+    use axum::http::StatusCode;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (_tmp, mut d) = fixture().await;
+    let accept = Arc::new(AtomicBool::new(true));
+    let flag = accept.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    Arc::make_mut(&mut d.config).gateway_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route(
+                "/device/result",
+                post(move || {
+                    let flag = flag.clone();
+                    async move {
+                        if flag.load(Ordering::SeqCst) {
+                            (StatusCode::OK, Json(json!({"accepted":true})))
+                        } else {
+                            (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                Json(json!({"accepted":false})),
+                            )
+                        }
+                    }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let client = reqwest::Client::new();
+    let fast_id = uuid::Uuid::new_v4().to_string();
+    let fast_record = json!({"state":"done","tool":"code_read","result":{"ok":true}});
+    let writer_tx = d.store.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let delivered = d
+        .deliver_ephemeral_or_persist(&client, &fast_id, &fast_record, &json!({"ok":true}))
+        .await
+        .unwrap();
+    writer_tx.rollback().await.unwrap();
+    assert!(delivered);
+    assert!(rows(&d).await.is_empty());
+    assert!(
+        d.store
+            .get::<Value>("local_operation", &fast_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    accept.store(false, Ordering::SeqCst);
+    let fallback_id = uuid::Uuid::new_v4().to_string();
+    let fallback_record = json!({"state":"done","tool":"code_read","result":{"ok":true}});
+    let delivered = d
+        .deliver_ephemeral_or_persist(&client, &fallback_id, &fallback_record, &json!({"ok":true}))
+        .await
+        .unwrap();
+    assert!(!delivered);
+    assert_eq!(rows(&d).await.len(), 1);
+    assert!(
+        d.store
+            .get::<Value>("local_operation", &fallback_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    server.abort();
+}
 use axum::{Json, Router, routing::post};
 
 async fn fixture() -> (tempfile::TempDir, Delivery) {

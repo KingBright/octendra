@@ -1036,10 +1036,15 @@ impl Gateway {
         }
         // Publish only after the insertion is committed; retries keep the same job.
         signals.jobs.notify_waiters();
+        let default_wait_ms = if name == "terminal_exec" {
+            10_500
+        } else {
+            4_000
+        };
         let gateway_wait_ms = args
             .get("wait_ms")
             .and_then(Value::as_u64)
-            .unwrap_or(4_000)
+            .unwrap_or(default_wait_ms)
             .clamp(100, 62_000);
         let deadline = Instant::now() + Duration::from_millis(gateway_wait_ms);
         loop {

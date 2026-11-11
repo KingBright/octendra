@@ -737,6 +737,10 @@ fn spawn(
         }
         cmd.cwd(&ws.root);
         cmd.env("TERM", "xterm-256color");
+        #[cfg(unix)]
+        if let Some(path) = enriched_unix_path() {
+            cmd.env("PATH", path);
+        }
         let child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
         #[cfg(unix)]
@@ -757,6 +761,45 @@ fn spawn(
         spawn_pipes(ws, cmd)
     }
 }
+#[cfg(unix)]
+fn enriched_unix_path_with(
+    current: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+) -> Option<std::ffi::OsString> {
+    use std::path::PathBuf;
+    let mut entries: Vec<PathBuf> = current
+        .map(|value| std::env::split_paths(value).collect())
+        .unwrap_or_default();
+    let mut extras = Vec::new();
+    if let Some(home) = home.map(PathBuf::from) {
+        extras.push(home.join(".cargo/bin"));
+        extras.push(home.join(".local/bin"));
+    }
+    for fixed in [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ] {
+        extras.push(PathBuf::from(fixed));
+    }
+    for candidate in extras {
+        if !entries.iter().any(|existing| existing == &candidate) {
+            entries.push(candidate);
+        }
+    }
+    std::env::join_paths(entries).ok()
+}
+#[cfg(unix)]
+fn enriched_unix_path() -> Option<std::ffi::OsString> {
+    enriched_unix_path_with(
+        std::env::var_os("PATH").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
+}
 fn spawn_pipes(ws: &Workspace, mut cmd: std::process::Command) -> Result<Spawned> {
     // A single kernel pipe preserves the observed stdout/stderr write order.
     // It is intentionally a combined stream, not falsely labeled stdout-only.
@@ -770,6 +813,10 @@ fn spawn_pipes(ws: &Workspace, mut cmd: std::process::Command) -> Result<Spawned
         .env("CLICOLOR", "0")
         .env("PAGER", "cat")
         .env("GIT_PAGER", "cat");
+    #[cfg(unix)]
+    if let Some(path) = enriched_unix_path() {
+        cmd.env("PATH", path);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -1445,5 +1492,23 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(op["state"], "unknown");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn enriched_unix_path_preserves_order_and_appends_toolchains() {
+        use std::ffi::OsStr;
+        let out = enriched_unix_path_with(
+            Some(OsStr::new("/custom/first:/usr/bin")),
+            Some(OsStr::new("/Users/tester")),
+        )
+        .unwrap();
+        let parts: Vec<_> = std::env::split_paths(&out)
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(parts[0], "/custom/first");
+        assert_eq!(parts[1], "/usr/bin");
+        assert!(parts.iter().any(|p| p == "/Users/tester/.cargo/bin"));
+        assert!(parts.iter().any(|p| p == "/opt/homebrew/bin"));
+        assert_eq!(parts.iter().filter(|p| p.as_str() == "/usr/bin").count(), 1);
     }
 }

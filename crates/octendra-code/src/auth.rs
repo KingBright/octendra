@@ -42,6 +42,12 @@ fn invalid() -> (StatusCode, Json<Value>) {
         Json(json!({"error":"invalid_request"})),
     )
 }
+fn invalid_grant() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"error":"invalid_grant"})),
+    )
+}
 fn internal(_: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -87,7 +93,7 @@ struct Access {
 // Preserve the deployed policy. Longer sessions need a separately reviewed policy change.
 const ACCESS_TTL: i64 = 3600;
 const REFRESH_TTL: i64 = 30 * 86400;
-const REFRESH_RETRY_WINDOW: i64 = 30;
+const REFRESH_RETRY_WINDOW: i64 = 300;
 
 #[derive(Serialize, Deserialize)]
 struct CurrentTokens {
@@ -659,7 +665,7 @@ async fn token_inner(a: Auth, headers: &HeaderMap, f: TokenRequest) -> HttpResul
                 .get(&oauth_state_kind("code", &code), &hash(&code))
                 .await
                 .map_err(internal)?
-                .ok_or_else(invalid)?;
+                .ok_or_else(invalid_grant)?;
             if &g.client_id != client_id
                 || Some(g.redirect_uri) != f.redirect_uri
                 || g.resource != resource
@@ -668,7 +674,7 @@ async fn token_inner(a: Auth, headers: &HeaderMap, f: TokenRequest) -> HttpResul
                     &URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
                 )
             {
-                return Err(invalid());
+                return Err(invalid_grant());
             }
             // Invalid credentials, redirect or PKCE must not consume another
             // client's code. The final atomic take still enforces single use.
@@ -676,7 +682,7 @@ async fn token_inner(a: Auth, headers: &HeaderMap, f: TokenRequest) -> HttpResul
                 .take::<Grant>(&oauth_state_kind("code", &code), &hash(&code))
                 .await
                 .map_err(internal)?
-                .ok_or_else(invalid)?;
+                .ok_or_else(invalid_grant)?;
             Access {
                 principal: Principal {
                     owner: a.config.owner.clone(),
@@ -739,14 +745,14 @@ async fn token_inner(a: Auth, headers: &HeaderMap, f: TokenRequest) -> HttpResul
                     {
                         (family, None)
                     }
-                    _ => return Err(invalid()),
+                    _ => return Err(invalid_grant()),
                 };
                 if get_tx::<bool>(&mut tx, "revoked", &family, observed_at)
                     .await
                     .map_err(internal)?
                     .is_some()
                 {
-                    return Err(invalid());
+                    return Err(invalid_grant());
                 }
                 if client.token_endpoint_auth_method != "none"
                     && retry_until.is_some_and(|until| observed_at < until)
@@ -790,7 +796,7 @@ async fn token_inner(a: Auth, headers: &HeaderMap, f: TokenRequest) -> HttpResul
                 // unlimited replay, even during the confidential-client retry grace.
                 revoke_family_tx(&mut tx, &family).await.map_err(internal)?;
                 tx.commit().await.map_err(internal)?;
-                return Err(invalid());
+                return Err(invalid_grant());
             };
             let access: Access = serde_json::from_str(&encoded).map_err(internal)?;
             if &access.client_id != client_id
@@ -802,7 +808,7 @@ async fn token_inner(a: Auth, headers: &HeaderMap, f: TokenRequest) -> HttpResul
                     .map_err(internal)?
                     .is_some()
             {
-                return Err(invalid());
+                return Err(invalid_grant());
             }
             sqlx::query("DELETE FROM kv WHERE kind=? AND key=?")
                 .bind(&refresh_kind)

@@ -127,6 +127,32 @@ impl Delivery {
         self.changed.notify_waiters();
         Ok(())
     }
+    /// Attempt direct in-memory receipt delivery for stateless idempotent reads;
+    /// fall back to durable outbox persistence only when not immediately accepted.
+    pub async fn deliver_ephemeral_or_persist(
+        &self,
+        client: &reqwest::Client,
+        id: &str,
+        local_record: &impl Serialize,
+        value: &Value,
+    ) -> Result<bool> {
+        uuid::Uuid::parse_str(id).context("invalid receipt operation id")?;
+        ensure!(value.is_object(), "receipt must be an object");
+        let payload = json!({"operation_id":id,"result":value}).to_string();
+        if payload.len() <= 256 * 1024 {
+            let claim = Claim {
+                id: id.to_owned(),
+                payload,
+                attempt: 1,
+                lease: String::new(),
+            };
+            if self.send(client, &claim).await == Outcome::Accepted {
+                return Ok(true);
+            }
+        }
+        self.complete(id, local_record, value).await?;
+        Ok(false)
+    }
     async fn claim(&self) -> Result<Option<Claim>> {
         // An empty UPDATE still acquires SQLite's writer. Idle senders run four
         // times per second, so inspect the indexed queue before attempting a claim.

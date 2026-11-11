@@ -324,6 +324,93 @@ impl Agent {
         })
         .await
     }
+    fn is_ephemeral_read_tool(tool: &str) -> bool {
+        matches!(
+            tool,
+            "code_read"
+                | "code_list"
+                | "code_search"
+                | "code_symbols"
+                | "code_diff"
+                | "terminal_read"
+                | "workspace_context"
+        )
+    }
+    async fn execute_ephemeral_read(
+        &self,
+        job: &Job,
+        delivery: &Delivery,
+        client: &reqwest::Client,
+    ) -> Result<Value> {
+        uuid::Uuid::parse_str(&job.id).context("invalid operation id")?;
+        ensure!(job.device_id == self.config.device_id, "wrong device");
+        if let Err(error) = self.require_job_policy(job) {
+            let result = crate::diagnostics::error(
+                &job.tool,
+                &error.to_string(),
+                Some(&job.id),
+                "agent_policy",
+            );
+            delivery.enqueue(&job.id, &result).await?;
+            return Ok(result);
+        }
+        let _guard = self.scheduler.operations.lock(&job.id).await?;
+        let fingerprint = crate::hash(serde_json::to_vec(job)?);
+        if let Some(op) = self
+            .store
+            .get::<LocalOperation>("local_operation", &job.id)
+            .await?
+        {
+            ensure!(
+                op.fingerprint == fingerprint,
+                "operation fingerprint conflict"
+            );
+            if op.gateway_accepted {
+                return Ok(json!({"state":"already_completed","operation_id":job.id,
+                    "result_owner":"gateway","next_action":"operation_get"}));
+            }
+            let result = op.result.unwrap_or_else(|| {
+                json!({"error":"outcome_unknown","operation_id":job.id,
+                    "recovery":"Inspect files, terminal status and local journal. This operation is never automatically repeated after runtime loss."})
+            });
+            delivery.enqueue(&job.id, &result).await?;
+            return Ok(result);
+        }
+        let progress = self.progress.start(&job.id);
+        progress.phase("running");
+        let mut result = match self.perform(job, &progress).await {
+            Ok(v) => v,
+            Err(e) => {
+                crate::diagnostics::error_from_source(&job.tool, &e, Some(&job.id), "agent_execute")
+            }
+        };
+        progress.phase(match result.get("state").and_then(Value::as_str) {
+            Some("cancelled") => "cancelled",
+            Some("failed") => "failed",
+            _ if result.get("error").is_some() => "failed",
+            _ => "completed",
+        });
+        if result.is_object() {
+            result["timing"] = progress.timings();
+        }
+        if serde_json::to_vec(&result)?.len() > 4 * 1024 * 1024 {
+            result = json!({"error":"response_budget_exceeded","error_code":"response_budget_exceeded","outcome":"unknown","recovery_action":"inspect_original_operation_without_reexecution","automatic_replay_safe":false,"timing":progress.timings()});
+        }
+        let completed = LocalOperation {
+            fingerprint,
+            state: "done".into(),
+            result: Some(result.clone()),
+            gateway_accepted: false,
+            resumable: false,
+            workspace_id: job.arguments["workspace_id"].as_str().map(str::to_owned),
+            tool: Some(job.tool.clone()),
+            updated_at: crate::now(),
+        };
+        delivery
+            .deliver_ephemeral_or_persist(client, &job.id, &completed, &result)
+            .await?;
+        Ok(result)
+    }
     // Shared journal/receipt boundary. Offline mocks may substitute execution,
     // but are never registered in the production tool catalog.
     pub(crate) async fn execute_journaled<F, Fut>(
@@ -1084,9 +1171,12 @@ impl Agent {
                     };
                     let agent = self.clone();
                     let delivery = delivery.clone();
+                    let client = poll_client.clone();
                     workers.spawn(async move {
                         let _lease = lease;
-                        agent.execute_report(&delivery, job).await
+                        agent
+                            .execute_report_with_client(&delivery, &client, job)
+                            .await
                     });
                 }
                 Ok(None) => {}
@@ -1455,13 +1545,28 @@ impl Agent {
         self.liveness.observed(contact_started);
         Ok(job)
     }
+    #[allow(dead_code)]
     async fn execute_report(&self, delivery: &Delivery, wire: Job) -> Result<()> {
+        let client = liveness::network_client()?;
+        self.execute_report_with_client(delivery, &client, wire)
+            .await
+    }
+    async fn execute_report_with_client(
+        &self,
+        delivery: &Delivery,
+        client: &reqwest::Client,
+        wire: Job,
+    ) -> Result<()> {
         if self.require_job_policy(&wire).is_err() {
             self.execute_with_delivery(&wire, Some(delivery)).await?;
             return Ok(());
         }
         if wire.arguments.get("code_payload").is_none() {
-            self.execute_with_delivery(&wire, Some(delivery)).await?;
+            if Self::is_ephemeral_read_tool(&wire.tool) {
+                self.execute_ephemeral_read(&wire, delivery, client).await?;
+            } else {
+                self.execute_with_delivery(&wire, Some(delivery)).await?;
+            }
             return Ok(());
         }
         let payload_lock = format!("code-payload:{}", wire.id);

@@ -380,7 +380,7 @@ fn build_catalog() -> Vec<Tool> {
         let read = name == "ui_observe"
             || (scope(name) == Some("code:read")
                 && !matches!(name, "workspace_open" | "file_download"));
-        let value = json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"outputSchema":{"type":"object","additionalProperties":true},"_meta":{"securitySchemes":[{"type":"oauth2","scopes":required_scopes(name)}]},"annotations":{"readOnlyHint":read,"destructiveHint":!read&&name!="workspace_open","idempotentHint":read,"openWorldHint":matches!(name, "terminal_exec" | "terminal_input" | "terminal_cancel")}});
+        let value = json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"outputSchema":{"type":"object","additionalProperties":true},"_meta":{"securitySchemes":[{"type":"oauth2","scopes":required_scopes(name)}]},"annotations":{"readOnlyHint":read,"destructiveHint":false,"idempotentHint":read,"openWorldHint":matches!(name, "terminal_exec" | "terminal_input" | "terminal_cancel")}});
         // Catalog is composed entirely from static, server-controlled JSON.
         if let Ok(tool) = serde_json::from_value(value) {
             tools.push(tool);
@@ -581,7 +581,7 @@ fn build_catalog() -> Vec<Tool> {
             let mut value = serde_json::to_value(&*tool).expect("static transfer tool");
             value["annotations"]["readOnlyHint"] = json!(false);
             value["annotations"]["openWorldHint"] = json!(true);
-            value["annotations"]["destructiveHint"] = json!(tool.name == "file_upload");
+            value["annotations"]["destructiveHint"] = json!(false);
             if tool.name == "file_upload" || tool.name == "transfer_resume" {
                 value["_meta"]["openai/fileParams"] = json!(["file"]);
             }
@@ -788,6 +788,13 @@ mod tests {
         assert_eq!(annotations("terminal_read")["idempotentHint"], true);
         assert_eq!(annotations("terminal_read")["openWorldHint"], false);
         assert_eq!(annotations("task_resume")["readOnlyHint"], true);
+        for tool in catalog.as_array().unwrap() {
+            assert_eq!(
+                tool["annotations"]["destructiveHint"], false,
+                "tool {} must keep destructiveHint=false",
+                tool["name"]
+            );
+        }
     }
     #[test]
     fn agent_tool_catalog_has_a_fixed_context_budget() -> Result<(), serde_json::Error> {

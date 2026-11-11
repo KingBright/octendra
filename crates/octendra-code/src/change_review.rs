@@ -58,10 +58,17 @@ fn repository(
         .any(|key| normalized.contains(key)),
         "workspace_review_denied: Git config may reference external metadata"
     );
-    let mut stack = vec![git.try_clone()?];
+    // Store relative paths rather than open Dir handles so a 256-directory
+    // .git/objects fan-out cannot exhaust macOS launchd's 256-FD soft limit.
+    let mut stack = vec![std::path::PathBuf::new()];
     let start = std::time::Instant::now();
     let mut count = 0usize;
-    while let Some(dir) = stack.pop() {
+    while let Some(rel) = stack.pop() {
+        let dir = if rel.as_os_str().is_empty() {
+            git.try_clone()?
+        } else {
+            files::open_beneath(&git, &rel)?
+        };
         for entry in dir.entries()? {
             let entry = entry?;
             let kind = entry.file_type()?;
@@ -70,10 +77,7 @@ fn repository(
                 "workspace_review_denied: Git metadata symlink"
             );
             if kind.is_dir() {
-                stack.push(files::open_beneath(
-                    &dir,
-                    std::path::Path::new(&entry.file_name()),
-                )?);
+                stack.push(rel.join(entry.file_name()));
             } else {
                 ensure!(
                     kind.is_file(),
@@ -514,7 +518,7 @@ pub(crate) async fn read(ws: &Workspace, v: &Value) -> Result<Value> {
         details.push(json!({"path":path,"kind":if content.is_some(){"text"}else{"binary"},"size":data.len(),"version":version,"expanded":expanded}));
     }
     let cursor = files::number(v, "cursor", 0, 0, 100000000)?;
-    let max = files::number(v, "max_bytes", 16000, 1024, 65536)?;
+    let max = files::number(v, "max_bytes", 16000, 1024, 1024 * 1024)?;
     ensure!(
         cursor <= text.len() && text.is_char_boundary(cursor),
         "invalid diff cursor"
@@ -857,5 +861,24 @@ mod tests {
         let first = v["version"].clone();
         std::fs::write(d.path().join("new.rs"), "changed").unwrap();
         assert!(read(&ws, &json!({"expected_version":first})).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn git_objects_fanout_and_one_mib_max_bytes_succeed_within_low_fd_limits() {
+        let d = tempfile::tempdir().unwrap();
+        init(d.path());
+        for idx in 0..300_u16 {
+            let shard = d.path().join(".git/objects").join(format!("s{idx:03}"));
+            std::fs::create_dir_all(&shard).unwrap();
+            std::fs::write(shard.join("placeholder"), b"obj").unwrap();
+        }
+        std::fs::write(d.path().join("tracked.rs"), "pub fn ok() {}\n").unwrap();
+        let v = read(
+            &workspace(d.path()),
+            &json!({"max_bytes": 1_048_576, "include_untracked": true}),
+        )
+        .await
+        .unwrap();
+        assert!(v["diff"].as_str().unwrap().contains("+pub fn ok() {}"));
     }
 }
