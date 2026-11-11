@@ -2763,5 +2763,5 @@
     "host_tools": "x-octendra-host-tools",
     "request_id": "x-octendra-request-id"
   },
-  "version": "0.12.8"
+  "version": "0.13.0"
 }

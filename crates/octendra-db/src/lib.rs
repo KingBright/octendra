@@ -239,6 +239,8 @@ pub async fn connect_sqlite(database_url: &str) -> Result<SqlitePool, DbError> {
         .create_if_missing(true)
         .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal)
+        .pragma("journal_size_limit", "16777216")
+        .pragma("wal_autocheckpoint", "1000")
         .busy_timeout(SQLITE_BUSY_TIMEOUT);
 
     SqlitePoolOptions::new()
@@ -7259,6 +7261,18 @@ impl StateEventRepository {
             }
             published = published.saturating_add(1);
         }
+        if published > 0 {
+            let _ = sqlx::query(
+                "DELETE FROM state_events WHERE sequence <= COALESCE((SELECT sequence FROM state_events ORDER BY sequence DESC LIMIT 1 OFFSET 4096), -1)",
+            )
+            .execute(&self.pool)
+            .await;
+            let _ = sqlx::query(
+                "DELETE FROM lifecycle_outbox WHERE published_at IS NOT NULL AND sequence <= COALESCE((SELECT sequence FROM lifecycle_outbox ORDER BY sequence DESC LIMIT 1 OFFSET 4096), -1)",
+            )
+            .execute(&self.pool)
+            .await;
+        }
         Ok(published)
     }
 
@@ -7334,6 +7348,11 @@ impl StateEventRepository {
         .bind(event.observed_at)
         .execute(&self.pool)
         .await?;
+        let _ = sqlx::query(
+            "DELETE FROM state_events WHERE sequence <= COALESCE((SELECT sequence FROM state_events ORDER BY sequence DESC LIMIT 1 OFFSET 4096), -1)",
+        )
+        .execute(&self.pool)
+        .await;
         Ok(())
     }
 

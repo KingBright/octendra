@@ -41,6 +41,7 @@ use tokio::{io::AsyncWriteExt, sync::Notify, time::Instant};
 struct DeviceSignals {
     jobs: Notify,
     results: Notify,
+    ephemeral: crate::ephemeral::DeviceEphemeral,
     // Coalesce the five poll lanes before they occupy SQLite connections. This
     // is only a write-elision hint; each use rechecks the durable session lease.
     poll_snapshot: tokio::sync::Mutex<Option<(String, Instant)>>,
@@ -808,6 +809,43 @@ impl Gateway {
         if name == "desktop_frame" {
             crate::transfers::desktop_artifact(self, &job).await?;
         }
+        if !self.audit_observations
+            && request_id.is_none()
+            && crate::ephemeral::is_channel_tool(name)
+            && signals.ephemeral.is_live_poller_active(now())
+        {
+            let online = self.store.get::<Online>("online", device).await?;
+            let payload_supported = online
+                .as_ref()
+                .and_then(|o| o.runtime_features.as_ref())
+                .is_some_and(|f| {
+                    crate::code_payload::supported(&serde_json::to_value(f).unwrap_or(Value::Null))
+                });
+            crate::code_payload::admit(&job, payload_supported)?;
+            ensure!(
+                online.as_ref().is_some_and(|o| now() - o.last_seen < 45),
+                "device_offline: reconnect the selected device; do not fail over"
+            );
+            signals.ephemeral.enqueue(job, now(), now_ms())?;
+            signals.jobs.notify_waiters();
+            let gateway_wait_ms = args
+                .get("wait_ms")
+                .and_then(Value::as_u64)
+                .unwrap_or(12_000)
+                .clamp(100, 62_000);
+            let deadline = Instant::now() + Duration::from_millis(gateway_wait_ms);
+            loop {
+                let notified = signals.results.notified();
+                let result = self.result(p, &id).await?;
+                if result.get("pending") != Some(&json!(true)) || Instant::now() >= deadline {
+                    return Ok(result);
+                }
+                tokio::select! {
+                    _ = notified => {},
+                    _ = tokio::time::sleep_until(deadline.min(Instant::now() + RECOVERY_INTERVAL)) => {},
+                }
+            }
+        }
         let existing: Option<(String, String)> =
             sqlx::query_as("SELECT id,fingerprint FROM jobs WHERE idem=?")
                 .bind(&idem)
@@ -1037,9 +1075,9 @@ impl Gateway {
         // Publish only after the insertion is committed; retries keep the same job.
         signals.jobs.notify_waiters();
         let default_wait_ms = if name == "terminal_exec" {
-            10_500
+            12_000
         } else {
-            4_000
+            5_000
         };
         let gateway_wait_ms = args
             .get("wait_ms")
@@ -1061,7 +1099,55 @@ impl Gateway {
             }
         }
     }
+    pub(crate) fn can_route_ephemeral(&self, tool: &str, args: &Value) -> bool {
+        if !crate::ephemeral::is_channel_tool(tool) || args.get("task_id").is_some() {
+            return false;
+        }
+        let Some(raw_ws) = args.get("workspace_id").and_then(Value::as_str) else {
+            return false;
+        };
+        let resolve = |raw: &str| {
+            self.config
+                .devices
+                .iter()
+                .find(|d| d.id == raw || d.name.eq_ignore_ascii_case(raw))
+                .map(|d| d.id.as_str())
+        };
+        let device = if let Some((prefix, _)) = raw_ws.split_once(':')
+            && !raw_ws.starts_with('/')
+            && (prefix.len() > 1 || raw_ws.as_bytes().get(2).is_none_or(|b| *b != b'\\'))
+        {
+            resolve(prefix)
+        } else if let Some(raw_dev) = args.get("device_id").and_then(Value::as_str) {
+            resolve(raw_dev)
+        } else if self.config.devices.len() == 1 {
+            Some(self.config.devices[0].id.as_str())
+        } else {
+            None
+        };
+        let Some(device) = device else {
+            return false;
+        };
+        self.device_signals(device)
+            .is_ok_and(|signals| signals.ephemeral.is_live_poller_active(now()))
+    }
+    pub(crate) fn ephemeral_snapshot(
+        &self,
+        id: &str,
+    ) -> Option<crate::ephemeral::EphemeralSnapshot> {
+        let at = now();
+        let map = self.signals.lock().ok()?;
+        for signals in map.values() {
+            if let Some(snapshot) = signals.ephemeral.snapshot(id, at) {
+                return Some(snapshot);
+            }
+        }
+        None
+    }
     async fn legacy_job(&self, p: &Principal, id: &str) -> Option<Job> {
+        if let Some(snap) = self.ephemeral_snapshot(id) {
+            return (snap.job.owner == p.owner).then_some(snap.job);
+        }
         let request: Option<String> = sqlx::query_scalar("SELECT request FROM jobs WHERE id=?")
             .bind(id)
             .fetch_optional(&self.store.pool)
@@ -1280,6 +1366,54 @@ impl Gateway {
         Ok((history.map(|history| history.describe()), registered))
     }
     pub(crate) async fn result(&self, p: &Principal, id: &str) -> Result<Value> {
+        if let Some(snap) = self.ephemeral_snapshot(id) {
+            let (history, _registered) = self
+                .require_operation_observation(
+                    p,
+                    &snap.job.owner,
+                    &snap.job.device_id,
+                    &snap.job.tool,
+                )
+                .await?;
+            let online = self
+                .store
+                .get::<Online>("online", &snap.job.device_id)
+                .await?;
+            let lifecycle = json!({
+                "protocol": 1,
+                "gateway": snap.gateway_timing_json(),
+                "device_receipt_delivery": online.as_ref().and_then(|o| o.receipt_delivery.clone()),
+                "receipt_delivery_scope": "device-wide queue snapshot; operation result presence is authoritative for this operation"
+            });
+            if let Some(mut result) = snap.result {
+                if let Some(o) = result.as_object_mut() {
+                    o.insert("operation_id".into(), json!(id));
+                    o.insert("device_id".into(), json!(snap.job.device_id));
+                }
+                result["operation_lifecycle"] = lifecycle;
+                if let Some(history) = &history {
+                    result["history_migration"] = history.clone();
+                }
+                result["receipt"] =
+                    crate::receipts::decision(&result, None, Some(id), snap.updated_at);
+                return Ok(result);
+            }
+            let mut pending = json!({
+                "operation_id": id,
+                "device_id": snap.job.device_id,
+                "state": snap.state,
+                "pending": true,
+                "next_action": "operation_get",
+                "retry_after_ms": 1000,
+                "operation_lifecycle": lifecycle
+            });
+            if let Some(history) = &history {
+                pending["history_migration"] = history.clone();
+            }
+            pending["receipt"] =
+                crate::receipts::decision(&pending, None, Some(id), snap.updated_at);
+            return Ok(pending);
+        }
         let (request, result, state, updated): (String, Option<String>, String, i64) =
             sqlx::query_as("SELECT request,result,state,updated FROM jobs WHERE id=?")
                 .bind(id)
@@ -1720,6 +1854,9 @@ async fn heartbeat(
     }.await;
     match updated {
         Ok(true) => {
+            if let Ok(signals) = g.device_signals(&device) {
+                signals.ephemeral.renew(&request.active_operations, now());
+            }
             g.observation_changed.notify_waiters();
             let mut resp = StatusCode::NO_CONTENT.into_response();
             crate::auto_upgrade::attach_directive_header(&g, &request.hello, &mut resp);
@@ -1882,21 +2019,23 @@ async fn poll(
         }
         Err(error) => return crate::job_dispatch::storage_error("poll_snapshot", &error),
         Ok(true) => {
+            signals.ephemeral.note_live_poll(now());
+            signals.ephemeral.renew(&request.active_operations, now());
             if !lease_current {
                 g.observation_changed.notify_waiters();
             }
         }
     }
     let deadline = Instant::now() + poll_wait;
-    let current_scopes = serde_json::to_string(
-        &g.config
-            .devices
-            .iter()
-            .find(|d| d.id == device)
-            .expect("authenticated device")
-            .scopes,
-    )
-    .expect("scope strings");
+    let registered_scopes = g
+        .config
+        .devices
+        .iter()
+        .find(|d| d.id == device)
+        .expect("authenticated device")
+        .scopes
+        .clone();
+    let current_scopes = serde_json::to_string(&registered_scopes).expect("scope strings");
     let selection = crate::job_dispatch::Selection {
         device: &device,
         session: &online.hello.session,
@@ -1915,6 +2054,41 @@ async fn poll(
         // disappear between the empty result and the subsequent bounded wait.
         notified.as_mut().enable();
         completed.as_mut().enable();
+        if signals.ephemeral.has_claimable(
+            &request.active_operations,
+            &registered_scopes,
+            &lanes,
+            now(),
+        ) {
+            let session_active = match g.store.get::<Online>("online", &device).await {
+                Ok(Some(saved)) => saved.hello.session == online.hello.session,
+                Ok(None) => false,
+                Err(error) => {
+                    return crate::job_dispatch::storage_error("poll_ephemeral_lease", &error);
+                }
+            };
+            if session_active
+                && let Some(job) = signals.ephemeral.claim(
+                    &request.active_operations,
+                    &registered_scopes,
+                    &lanes,
+                    now(),
+                    now_ms(),
+                )
+            {
+                let enabled = online.runtime_features.as_ref().is_some_and(|v| {
+                    crate::code_payload::supported(&serde_json::to_value(v).unwrap_or(Value::Null))
+                });
+                return match crate::code_payload::envelope(&job, enabled, true) {
+                    Ok(value) => {
+                        let mut resp = Json(value).into_response();
+                        crate::auto_upgrade::attach_directive_header(&g, &online.hello, &mut resp);
+                        resp
+                    }
+                    Err(error) => crate::job_dispatch::storage_error("poll_payload", &error),
+                };
+            }
+        }
         match crate::job_dispatch::claim(&g.store, &selection, now()).await {
             Ok(Some((id, request))) => {
                 let result = async {
@@ -1985,6 +2159,25 @@ async fn receipt(
             .is_none_or(|revision| revision < 0)
     {
         return StatusCode::BAD_REQUEST.into_response();
+    }
+    if let Ok(signals) = g.device_signals(&device) {
+        match signals.ephemeral.complete(
+            &device,
+            &receipt.operation_id,
+            &receipt.result,
+            now(),
+            now_ms(),
+        ) {
+            crate::ephemeral::CommitOutcome::Accepted { duplicate } => {
+                signals.results.notify_waiters();
+                g.observation_changed.notify_waiters();
+                return Json(json!({"accepted":true,"duplicate":duplicate})).into_response();
+            }
+            crate::ephemeral::CommitOutcome::Conflict => {
+                return StatusCode::CONFLICT.into_response();
+            }
+            crate::ephemeral::CommitOutcome::NotFound => {}
+        }
     }
     let duplicate = match crate::job_receipts::commit(
         &g.store,

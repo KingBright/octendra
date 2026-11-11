@@ -146,10 +146,59 @@ async fn retire(store: &Store, row: &Row, brief: &Value) -> Result<bool> {
         .bind(&row.0)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM kv WHERE kind IN ('terminal_observation','operation_progress','receive_progress','history_retention_clock') AND key=?")
+    sqlx::query("DELETE FROM kv WHERE kind IN ('terminal_observation','operation_progress','receive_progress','history_retention_clock','code_payload_admission') AND key=?")
         .bind(&row.0).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(true)
+}
+
+const MAX_RETIRED_TOMBSTONES: i64 = 1024;
+const TOMBSTONE_EVICT_BATCH: i64 = 128;
+
+/// Natural FIFO cap on already-retired job tombstones so Gateway SQLite stays
+/// bounded over months of operation without unbounded row accumulation.
+async fn purge_retired_tombstones(store: &Store) -> Result<u64> {
+    let retired_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM history_result_digests h WHERE NOT EXISTS(SELECT 1 FROM semantic_guards s WHERE s.operation_id=h.id)",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    let excess = retired_count.saturating_sub(MAX_RETIRED_TOMBSTONES);
+    if excess == 0 {
+        return Ok(0);
+    }
+    let limit = excess.min(TOMBSTONE_EVICT_BATCH);
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT j.id FROM jobs j INNER JOIN history_result_digests h ON h.id=j.id WHERE j.state='done' AND NOT EXISTS(SELECT 1 FROM semantic_guards s WHERE s.operation_id=j.id) ORDER BY j.updated ASC, j.id ASC LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(&store.pool)
+    .await?;
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let ids_json = serde_json::to_string(&ids)?;
+    let mut tx = crate::history_retention::begin_maintenance(store).await?;
+    let deleted = sqlx::query(
+        "DELETE FROM jobs WHERE id IN (SELECT value FROM json_each(?)) AND state='done' AND NOT EXISTS(SELECT 1 FROM semantic_guards s WHERE s.operation_id=jobs.id)",
+    )
+    .bind(&ids_json)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM history_result_digests WHERE id IN (SELECT value FROM json_each(?)) AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.id=history_result_digests.id)")
+        .bind(&ids_json)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM operation_timing WHERE id IN (SELECT value FROM json_each(?)) AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.id=operation_timing.id)")
+        .bind(&ids_json)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM kv WHERE kind IN ('task_operation','code_payload_admission','operation_semantic') AND key IN (SELECT value FROM json_each(?)) AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.id=kv.key)")
+        .bind(&ids_json)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(deleted.rows_affected())
 }
 
 #[path = "history_gateway_scan.rs"]
@@ -237,6 +286,10 @@ async fn bounded_tick(
     match store.prune_batch().await {
         Ok(count) => report["expired_cache_rows"] = json!(count),
         Err(error) => report["cache_prune_error"] = json!(error_category(&error)),
+    }
+    match purge_retired_tombstones(store).await {
+        Ok(count) => report["evicted_retired_tombstones"] = json!(count),
+        Err(error) => report["tombstone_evict_error"] = json!(error_category(&error)),
     }
     report
 }

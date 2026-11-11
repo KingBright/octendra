@@ -7,6 +7,9 @@ pub(super) async fn eligible(g: &Gateway, tool: &str, args: &Value) -> Result<bo
     if matches!(tool, "devices_list" | "fleet_status" | "task_context") {
         return Ok(true);
     }
+    if g.can_route_ephemeral(tool, args) {
+        return Ok(true);
+    }
     if tool != "operation_get" || args.get("request_id").is_some() {
         // A request can acquire an operation binding concurrently. Keep that
         // recovery path audited rather than guessing what it might resolve to.

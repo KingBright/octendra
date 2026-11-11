@@ -152,15 +152,29 @@ fn apply_terminal_cursor(result: &mut Value, args: &Value) -> Result<()> {
 async fn view(g: &Gateway, p: &Principal, ids: &[String]) -> Result<View> {
     let rows = sqlx::query("SELECT j.id,j.device,j.state,json_extract(j.request,'$.owner') AS owner,json_extract(j.request,'$.tool') AS tool,json_extract(j.result,'$.terminal') AS saved_terminal,j.updated AS job_updated,COALESCE(r.value,a.value) AS progress FROM jobs j LEFT JOIN kv a ON a.kind='operation_progress' AND a.key=j.id AND a.expires>? LEFT JOIN kv r ON r.kind='receive_progress' AND r.key=j.id AND r.expires>? AND json_extract(j.request,'$.tool')='file_download' WHERE j.id IN (SELECT value FROM json_each(?))")
         .bind(now()).bind(now()).bind(serde_json::to_string(ids)?).fetch_all(&g.store.pool).await?;
-    ensure!(
-        rows.len() == ids.len(),
-        "operation_unavailable: check the original operation identifiers"
-    );
     let rows: HashMap<String, _> = rows.into_iter().map(|r| (r.get("id"), r)).collect();
     let mut stamps = Vec::with_capacity(ids.len());
     let mut pending = 0;
     for id in ids {
-        let row = rows.get(id).context("operation unavailable")?;
+        let Some(row) = rows.get(id) else {
+            let snap = g
+                .ephemeral_snapshot(id)
+                .context("operation_unavailable: check the original operation identifiers")?;
+            let _scope = tools::scope(&snap.job.tool).context("unknown original operation tool")?;
+            g.require_operation_observation(
+                p,
+                &snap.job.owner,
+                &snap.job.device_id,
+                &snap.job.tool,
+            )
+            .await
+            .context("operation_unavailable: original operation access is required")?;
+            if snap.state != "done" {
+                pending += 1;
+            }
+            stamps.push(json!({"id":id,"state":snap.state}));
+            continue;
+        };
         let owner: String = row.try_get("owner")?;
         let device: String = row.try_get("device")?;
         let tool: String = row.try_get("tool")?;

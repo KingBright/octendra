@@ -21,6 +21,7 @@ pub mod contract;
 mod delivery;
 mod diagnostics;
 mod durable_transfer;
+mod ephemeral;
 pub mod files;
 mod files_sync;
 pub mod forge_browser;

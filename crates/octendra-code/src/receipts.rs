@@ -13,6 +13,9 @@ mod observation;
 /// Recovery and idempotency metadata remain durable. Completed bulky payloads
 /// have an independent, default-on history-retention policy.
 pub const RETAIN_UNTIL_EXPLICIT_CLEANUP: i64 = i64::MAX;
+/// Completed request receipts naturally age out via `kv_expiring` after 24h;
+/// unresolved (`outcome_unknown`) and rejected diagnostics retain explicit cleanup.
+pub const COMPLETED_RECEIPT_TTL_SECS: i64 = 86_400;
 pub const RETENTION: Option<u64> = None;
 pub fn valid_request_id(id: &str) -> bool {
     id.len() == 36
@@ -394,14 +397,17 @@ pub(crate) async fn finish(
     saved["user_action"] = receipt["user_action"].clone();
     saved["authorization_recovery_available"] = value["authorization_recovery_available"].clone();
     value["receipt"] = receipt;
+    let receipt_expires = if matches!(
+        saved["state"].as_str(),
+        Some("outcome_unknown" | "gateway_rejected")
+    ) {
+        RETAIN_UNTIL_EXPLICIT_CLEANUP
+    } else {
+        now().saturating_add(COMPLETED_RECEIPT_TTL_SECS)
+    };
     let persisted = g
         .store
-        .put(
-            "request_receipt",
-            request_id,
-            &saved,
-            RETAIN_UNTIL_EXPLICIT_CLEANUP,
-        )
+        .put("request_receipt", request_id, &saved, receipt_expires)
         .await
         .is_ok();
     value["receipt"]["durable"] = json!(persisted);

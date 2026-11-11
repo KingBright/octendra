@@ -29,6 +29,8 @@ impl Store {
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(sqlx::sqlite::SqliteSynchronous::Full)
+            .pragma("journal_size_limit", "16777216")
+            .pragma("wal_autocheckpoint", "1000")
             .busy_timeout(Duration::from_secs(10));
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
