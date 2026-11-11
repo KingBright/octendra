@@ -23,6 +23,32 @@ GitHub Actions is not a build, verification, packaging, or deployment dependency
 7. Execute target-platform tests on owned machines. A Linux-only hang must be bounded and diagnosed on Linux, not relabeled as a cloud-only problem.
 8. Accept each installed executable by hash and version, followed by real command success/failure, output consistency, file roundtrip, precise edits, idempotency, task recovery, and status checks.
 
+## Daily test scope
+
+For a small edit, select the affected package and unit tests or integration test
+through the existing entry point. These commands use Cargo's normal test profile
+and the established `~/rust-target` cache:
+
+```sh
+bash scripts/test.sh -p octendra-code --lib token_output::tests::
+bash scripts/test.sh -p octendra-code --test oauth_clients
+```
+
+Choose the filter or integration target that covers the change; an empty test
+selection is not a passing regression check. Include callers when changing a
+shared library or protocol. With no package selection, `bash scripts/test.sh`
+still runs the whole workspace. Arguments after `--` remain test-harness options.
+
+Run the complete `scripts/check-code-source.py` verification once for the final
+release inputs. It retains the release-profile tests and machine-readable
+receipt required by packaging. Observe the existing release operation instead
+of starting a second full check for unchanged inputs. Partial development checks
+are not release receipts.
+
+The 2026-11-11 release run spent 36m39s compiling the Rust tests and about 7m
+executing them (44m27s combined). Reducing release compilation on every small edit
+is the main opportunity; no reduced-duration release measurement is claimed.
+
 ## Recovery
 
 A running operation is observed by its original handle. A completed step is reused only when its inputs and artifacts are still verified. A failed node does not trigger rebuilds or restarts on already accepted nodes. Never overwrite an immutable released version.
