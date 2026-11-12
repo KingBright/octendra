@@ -253,7 +253,12 @@ class SupervisionTests(unittest.TestCase):
             self.assertNotEqual(os.getpgid(worker_pid), os.getpgid(observer.pid))
             os.killpg(observer.pid, signal.SIGTERM);observer.wait(timeout=5)
             deadline = time.monotonic()+10
-            while not marker.exists() and time.monotonic() < deadline:
+            while time.monotonic() < deadline:
+                try:
+                    if marker.read_text() == 'done' and 'worker finished' in (self.root/'report-driver.log').read_text():
+                        break
+                except OSError:
+                    pass
                 time.sleep(.01)
             self.assertEqual(marker.read_text(), 'done')
             self.assertIn('worker finished', (self.root/'report-driver.log').read_text())
