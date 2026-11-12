@@ -9,9 +9,11 @@ Invoke-Expression $definition[0].Extent.Text
 $root=Join-Path ([IO.Path]::GetTempPath()) ('octendra-upgrade-metadata-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $root|Out-Null
 try {
-  $target=Join-Path $root 'installed';$candidate=Join-Path $root 'candidate';$backup=Join-Path $root 'backup'
+ foreach($protected in @($false,$true)) {
+  $caseRoot=Join-Path $root ([string]$protected);New-Item -ItemType Directory -Path $caseRoot|Out-Null
+  $target=Join-Path $caseRoot 'installed';$candidate=Join-Path $caseRoot 'candidate';$backup=Join-Path $caseRoot 'backup'
   [IO.File]::WriteAllText($target,'previous');[IO.File]::WriteAllText($candidate,'candidate');[IO.File]::WriteAllText($backup,'previous')
-  $acl=Get-Acl -LiteralPath $target;$acl.SetAccessRuleProtection($true,$true);Set-Acl -LiteralPath $target -AclObject $acl
+  if($protected){$acl=Get-Acl -LiteralPath $target;$acl.SetAccessRuleProtection($true,$true);Set-Acl -LiteralPath $target -AclObject $acl}
   $expectedAcl=(Get-Acl -LiteralPath $target).Sddl
   Copy-AgentBinary -Source $candidate -Target $target
   if ([IO.File]::ReadAllText($target) -ne 'candidate' -or (Get-Acl -LiteralPath $target).Sddl -ne $expectedAcl) { throw 'installation failed to preserve exact ACL' }
@@ -22,5 +24,6 @@ try {
   [IO.File]::WriteAllText("$target.new",'original pending evidence')
   $failed=$false;try { Copy-AgentBinary -Source $candidate -Target $target } catch { $failed=$true }
   if (-not $failed -or [IO.File]::ReadAllText("$target.new") -ne 'original pending evidence' -or [IO.File]::ReadAllText($target) -ne 'previous') { throw 'original temporary was replayed or removed' }
-  @{state='passed';tests=4;fixture_only=$true;real_agent_changed=$false}|ConvertTo-Json -Compress
+ }
+  @{state='passed';tests=8;fixture_only=$true;real_agent_changed=$false}|ConvertTo-Json -Compress
 } finally { Remove-Item -LiteralPath $root -Recurse -Force }

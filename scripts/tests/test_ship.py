@@ -90,7 +90,7 @@ class FastShipTests(unittest.TestCase):
              contextlib.redirect_stdout(io.StringIO()):
             ship.remote_publish(config, expected)
         self.assertEqual((root/'octendra-code').read_bytes(), binary)
-        self.assertEqual(json.loads((root/'releases/current.json').read_text())['version'], 'current')
+        self.assertEqual(json.loads((root/'releases/current.json').read_text())['version'], '1.2.3')
         self.assertEqual((old/'evidence').read_text(), 'preserve')
         self.assertFalse((root/'releases/.current-pending').exists())
         self.assertEqual(run.call_args.args[0], ['systemctl', 'restart', 'example.service'])

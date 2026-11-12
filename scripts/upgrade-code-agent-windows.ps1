@@ -44,14 +44,13 @@ $record.binary_path=$BinaryPath;$record.config_path=$ConfigPath
 function Save-Receipt { param($Value) $parent=Split-Path -Parent $Result;New-Item -ItemType Directory -Force $parent|Out-Null;$Value|ConvertTo-Json -Depth 8|Set-Content -Encoding UTF8 $Result }
 function Copy-AgentBinary {
   param([string]$Source,[string]$Target)
-  $acl=Get-Acl -LiteralPath $Target
   $temporary="$Target.new"
   if (Test-Path -LiteralPath $temporary) { throw 'original replacement temporary exists; inspect before retry' }
   try {
     Copy-Item -LiteralPath $Source -Destination $temporary -ErrorAction Stop
-    Set-Acl -LiteralPath $temporary -AclObject $acl -ErrorAction Stop
-    if ((Get-Acl -LiteralPath $temporary).Sddl -ne $acl.Sddl) { throw 'replacement ACL differs from installed binary' }
-    Move-Item -LiteralPath $temporary -Destination $Target -Force -ErrorAction Stop
+    # ReplaceFile preserves the installed file's ACL and metadata itself. Set-Acl
+    # can change inheritance flags/ACE order on a new file despite equal access.
+    [IO.File]::Replace($temporary,$Target,[System.Management.Automation.Language.NullString]::Value)
   } finally {
     if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -ErrorAction Stop }
   }

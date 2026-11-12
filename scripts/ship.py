@@ -36,7 +36,6 @@ def deployment_config(path):
 
 def remote_publish(config, expected):
     # Runs on the existing Linux Gateway; stdin is the verified local bundle.
-    import ctypes
     import fcntl
     import hashlib
     import json
@@ -102,20 +101,17 @@ def remote_publish(config, expected):
         candidate = stage/'octendra-code-linux-amd64'
         subprocess.run([str(candidate), 'check', '--config', config['cfg']], check=True,
                        stdout=subprocess.DEVNULL, timeout=30)
-        current = releases/'current'
+        current = releases/manifest['version']
         if current.exists():
-            libc = ctypes.CDLL(None, use_errno=True)
-            if libc.renameat2(-100, os.fsencode(stage), -100, os.fsencode(current), 2) != 0:
-                raise OSError(ctypes.get_errno(), 'atomic current exchange failed')
-        else:
-            os.replace(str(stage), str(current))
+            raise ValueError('published version already exists; increment the patch version')
+        os.replace(str(stage), str(current))
         gateway_sha = manifest['artifacts']['octendra-code-linux-amd64']['sha256']
         next_binary = root/'.octendra-code-ship'
         shutil.copyfile(str(current/'octendra-code-linux-amd64'), str(next_binary))
         next_binary.chmod(installed.st_mode & 0o777)
         os.chown(str(next_binary), installed.st_uid, installed.st_gid)
         os.replace(str(next_binary), str(executable))
-        write_json(releases/'current.json', {'version': 'current',
+        write_json(releases/'current.json', {'version': manifest['version'],
             'release_version': manifest['version'], 'installed_sha256': gateway_sha,
             'updated_at': int(time.time())})
         subprocess.run(['systemctl', 'restart', config['service']], check=True, timeout=60)
@@ -139,7 +135,7 @@ def remote_publish(config, expected):
             'build_revision': manifest['build_revision'], 'gateway_sha256': digest(executable),
             'agents': 'automatic_on_next_poll', 'verified_at': int(time.time())}
         write_json(releases/'ship-result.json', result)
-        shutil.rmtree(str(pending))  # Only this transaction's previous current and upload.
+        shutil.rmtree(str(pending))  # Only this transaction's upload; published versions stay intact.
         print(json.dumps(result))
 
 
@@ -173,7 +169,9 @@ def main():
     ssh = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-p', str(config['ssh_port']),
            config['ssh_host'], 'python3 -c '+shlex.quote(source)]
     with Path(package['bundle']).open('rb') as bundle:
-        subprocess.run(ssh, stdin=bundle, check=True)
+        result = subprocess.run(ssh, stdin=bundle)
+    if result.returncode:
+        raise SystemExit('Publication failed; inspect the original Gateway .current-pending and '+str(report))
 
 
 if __name__ == '__main__':
