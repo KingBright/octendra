@@ -180,11 +180,9 @@ impl PollRequest {
     fn valid(&self) -> bool {
         self.hello.session.len() == 64
             && self.hello.version.len() <= 64
-            && self
-                .hello
-                .build_revision
-                .as_ref()
-                .is_none_or(|id| id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            && self.hello.build_revision.as_ref().is_none_or(|id| {
+                matches!(id.len(), 40 | 64) && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
             && self
                 .hello
                 .wire_protocol

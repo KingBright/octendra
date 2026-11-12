@@ -500,6 +500,40 @@ async fn payload_poll_http(a: &Agent, request: &serde_json::Value) -> reqwest::S
 }
 
 #[tokio::test]
+async fn payload_poll_accepts_git_and_fingerprint_build_revisions() {
+    let (_tmp, a, g, ws, server) = fixture().await;
+    for revision in ["6".repeat(40), "c".repeat(64)] {
+        let mut request = payload_poll_hello(&a, &ws, None);
+        request["build_revision"] = json!(revision);
+        assert_eq!(
+            payload_poll_http(&a, &request).await,
+            reqwest::StatusCode::OK
+        );
+        let online = g
+            .store
+            .get::<Value>("online", &a.config.device_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(online["hello"]["build_revision"], revision);
+    }
+    for revision in [
+        "6".repeat(39),
+        "6".repeat(41),
+        "g".repeat(40),
+        "g".repeat(64),
+    ] {
+        let mut request = payload_poll_hello(&a, &ws, None);
+        request["build_revision"] = json!(revision);
+        assert_eq!(
+            payload_poll_http(&a, &request).await,
+            reqwest::StatusCode::BAD_REQUEST
+        );
+    }
+    server.abort();
+}
+
+#[tokio::test]
 async fn payload_current_agent_features_poll_all_lanes_and_legacy_shape() {
     let (_tmp, a, g, ws, server) = fixture().await;
     for lane in Lane::ALL {

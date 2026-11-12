@@ -602,50 +602,14 @@ pub fn prune_agent_releases_and_logs(state_dir: &Path) -> Value {
             "max_log_bytes": MAX_LOG_DIR_BYTES
         });
     }
-    let mut reclaimed = 0u64;
-    let current = env!("CARGO_PKG_VERSION");
-    let agent_releases = state_dir.join("releases");
-    // Once the current version is upgraded and running, remove duplicate cached binaries/bundles
-    // inside `releases/<current>/`, keeping only the JSON receipts and `releases/rollback/`.
-    let active_dir = agent_releases.join(current);
-    if active_dir.join("auto-upgrade-result.json").is_file()
-        && !active_dir.join("watchdog-spec.json").is_file()
-        && let Ok(entries) = fs::read_dir(&active_dir)
-    {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if p.is_file()
-                && (name.starts_with("octendra-code-")
-                    || name.ends_with(".tgz")
-                    || name.ends_with(".staged")
-                    || name.ends_with(".part"))
-            {
-                reclaimed = reclaimed.saturating_add(remove_entry(&p));
-            }
-        }
-    }
-    reclaimed = reclaimed.saturating_add(prune_release_tree(
-        &agent_releases,
-        Some(current),
-        MAX_AGENT_CACHED_RELEASES,
-        MAX_AGENT_RELEASE_DIR_BYTES,
-    ));
-    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-        let legacy_releases = PathBuf::from(home).join(".local/share/octendra-code/releases");
-        if legacy_releases != agent_releases {
-            reclaimed = reclaimed.saturating_add(prune_release_tree(
-                &legacy_releases,
-                Some(current),
-                MAX_AGENT_CACHED_RELEASES,
-                MAX_AGENT_RELEASE_DIR_BYTES,
-            ));
-        }
-    }
-    reclaimed = reclaimed.saturating_add(prune_log_dir(&state_dir.join("logs"), MAX_LOG_DIR_BYTES));
+    // Historical and current release bytes share their directories with durable
+    // upgrade evidence. Only the registered lifecycle owner may retire them.
+    let reclaimed = prune_log_dir(&state_dir.join("logs"), MAX_LOG_DIR_BYTES);
     json!({
         "reclaimed_bytes": reclaimed,
         "max_release_bytes": MAX_AGENT_RELEASE_DIR_BYTES,
+        "max_release_bytes_enforced": false,
+        "release_cleanup": "preserved_for_lifecycle_owner",
         "max_log_bytes": MAX_LOG_DIR_BYTES
     })
 }
@@ -1791,7 +1755,8 @@ async fn restart_platform_agent_service(spec: &WatchdogSpec) -> Result<()> {
                 .ok()
                 .is_some_and(|out| {
                     String::from_utf8_lossy(&out.stdout).lines().any(|line| {
-                        let cols: Vec<&str> = line.split(',').map(|s| s.trim_matches('"')).collect();
+                        let cols: Vec<&str> =
+                            line.split(',').map(|s| s.trim_matches('"')).collect();
                         cols.len() >= 2
                             && cols[0].eq_ignore_ascii_case("octendra-code.exe")
                             && cols[1] != self_pid
@@ -1999,6 +1964,40 @@ mod tests {
                 b"unconfirmed transfer"
             );
         }
+    }
+
+    #[test]
+    fn agent_startup_preserves_completed_and_interrupted_release_evidence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let releases = state.join("releases");
+        for name in ["0.10.36", "0.12.8", env!("CARGO_PKG_VERSION"), "rollback"] {
+            let dir = releases.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("octendra-code-fixture"), b"verified product").unwrap();
+            fs::write(dir.join("auto-upgrade-result.json"), b"original receipt").unwrap();
+        }
+        fs::write(
+            releases.join(".upload.fixture.part"),
+            b"unconfirmed transfer",
+        )
+        .unwrap();
+        let result = prune_agent_releases_and_logs(&state);
+        assert_eq!(result["release_cleanup"], "preserved_for_lifecycle_owner");
+        for name in ["0.10.36", "0.12.8", env!("CARGO_PKG_VERSION"), "rollback"] {
+            assert_eq!(
+                fs::read(releases.join(name).join("octendra-code-fixture")).unwrap(),
+                b"verified product"
+            );
+            assert_eq!(
+                fs::read(releases.join(name).join("auto-upgrade-result.json")).unwrap(),
+                b"original receipt"
+            );
+        }
+        assert_eq!(
+            fs::read(releases.join(".upload.fixture.part")).unwrap(),
+            b"unconfirmed transfer"
+        );
     }
 
     #[test]
