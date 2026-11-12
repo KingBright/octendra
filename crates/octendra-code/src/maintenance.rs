@@ -69,17 +69,17 @@ async fn apply(g: &Gateway, device: &str, r: &Request) -> Result<Value> {
             .bind(device)
             .fetch_optional(&mut *tx)
             .await?;
-    let mut owned = false;
     if let Some((value, expires)) = previous {
         let value: Value = serde_json::from_str(&value)?;
-        owned = expires > now() && value["lease_id"] == r.lease_id;
         ensure!(
             expires <= now() || value["lease_id"] == r.lease_id,
             "maintenance lease belongs to another updater"
         );
     }
     let v = if r.action == "report" {
-        ensure!(owned, "receipt requires a live owned drain lease");
+        // An authenticated device may report its own automatic update without
+        // first disabling task dispatch. A different live manual lease still
+        // conflicts above; reporting itself never creates a drain.
         let input = r.receipt.as_ref().context("missing update receipt")?;
         ensure!(
             input.is_object() && serde_json::to_vec(input)?.len() <= 8192,
@@ -165,9 +165,19 @@ mod tests {
             ttl_seconds: 300,
             receipt: None,
         };
+        let mut report = r.clone();
+        report.action = "report".into();
+        report.receipt = Some(json!({"state":"failed", "version":"0.13.4", "error":"fixture"}));
+        assert_eq!(apply(&g, "a", &report).await.unwrap()["accepted"], true);
+        assert_eq!(view(&g, "a").await.unwrap()["state"], "open");
+        let update: Value = g.store.get("device_update", "a").await.unwrap().unwrap();
+        assert_eq!(update["receipt"]["state"], "failed");
         assert_eq!(apply(&g, "a", &r).await.unwrap()["state"], "draining");
         let mut other = r.clone();
         other.lease_id = crate::hash("b");
+        assert!(apply(&g, "a", &other).await.is_err());
+        other.action = "report".into();
+        other.receipt = report.receipt;
         assert!(apply(&g, "a", &other).await.is_err());
         assert_eq!(view(&g, "b").await.unwrap()["state"], "open");
         let mut release = r;

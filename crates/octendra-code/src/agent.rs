@@ -1144,10 +1144,6 @@ impl Agent {
             while let Some(result) = workers.try_join_next() {
                 Self::worker_result(result);
             }
-            if lane != Lane::Control && crate::auto_upgrade::is_upgrade_draining() {
-                tokio::time::sleep(Duration::from_millis(250)).await;
-                continue;
-            }
             if workers.len() >= lane.limit() {
                 if let Some(result) = workers.join_next().await {
                     Self::worker_result(result);

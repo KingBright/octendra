@@ -109,18 +109,9 @@ fn default_required_samples() -> u32 {
 }
 
 static UPGRADE_IN_PROGRESS: OnceLock<AtomicBool> = OnceLock::new();
-static UPGRADE_DRAINING: OnceLock<AtomicBool> = OnceLock::new();
 
 fn upgrade_flag() -> &'static AtomicBool {
     UPGRADE_IN_PROGRESS.get_or_init(|| AtomicBool::new(false))
-}
-
-fn draining_flag() -> &'static AtomicBool {
-    UPGRADE_DRAINING.get_or_init(|| AtomicBool::new(false))
-}
-
-pub fn is_upgrade_draining() -> bool {
-    draining_flag().load(Ordering::SeqCst)
 }
 
 pub fn platform_artifact_name(platform: &str, arch: &str) -> Option<&'static str> {
@@ -784,25 +775,20 @@ pub fn check_and_spawn_agent_upgrade(agent: &Agent, client: &reqwest::Client, he
     tokio::spawn(async move {
         match perform_agent_self_upgrade(&agent, &client, &directive).await {
             Ok(true) => {
-                // Detached watchdog normally terminates this process within seconds.
-                // If cutover ever fails without stopping this process, automatically
-                // clear draining/upgrade flags so non-control lanes never deadlock.
-                #[cfg(test)]
-                {
-                    draining_flag().store(false, Ordering::SeqCst);
-                    upgrade_flag().store(false, Ordering::SeqCst);
+                // Only another upgrade waits for the original watchdog. Normal
+                // read/write/transfer/terminal polling never stops for an update.
+                let spec = agent
+                    .config
+                    .state_dir
+                    .join("releases")
+                    .join(&directive.version)
+                    .join("watchdog-spec.json");
+                while spec.is_file() {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
                 }
-                #[cfg(not(test))]
-                {
-                    tokio::spawn(async move {
-                        tokio::time::sleep(Duration::from_secs(90)).await;
-                        draining_flag().store(false, Ordering::SeqCst);
-                        upgrade_flag().store(false, Ordering::SeqCst);
-                    });
-                }
+                upgrade_flag().store(false, Ordering::SeqCst);
             }
             Ok(false) => {
-                draining_flag().store(false, Ordering::SeqCst);
                 upgrade_flag().store(false, Ordering::SeqCst);
             }
             Err(err) => {
@@ -811,7 +797,6 @@ pub fn check_and_spawn_agent_upgrade(agent: &Agent, client: &reqwest::Client, he
                     target_version = %directive.version,
                     "direct agent auto-upgrade deferred or aborted"
                 );
-                draining_flag().store(false, Ordering::SeqCst);
                 let _ = prune_agent_releases_and_logs(&agent.config.state_dir);
                 upgrade_flag().store(false, Ordering::SeqCst);
             }
@@ -888,26 +873,6 @@ fn record_failed_attempt(
             .as_bytes(),
     );
     receipt
-}
-
-async fn pending_local_work(store: &crate::store::Store) -> (i64, i64, i64) {
-    let terminals: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM kv WHERE kind='terminal' AND json_extract(value,'$.state') IN ('running','starting')",
-    )
-    .fetch_one(&store.pool)
-    .await
-    .unwrap_or(0);
-    let operations: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM kv WHERE kind='local_operation' AND json_extract(value,'$.state')='running'",
-    )
-    .fetch_one(&store.pool)
-    .await
-    .unwrap_or(0);
-    let outbox: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM receipt_outbox")
-        .fetch_one(&store.pool)
-        .await
-        .unwrap_or(0);
-    (terminals, operations, outbox)
 }
 
 /// Signs `staged_path` on macOS using the host's persistent `Octendra Local Code Signing`
@@ -1258,35 +1223,16 @@ async fn perform_agent_self_upgrade(
         (0, None)
     };
 
-    // 7. Best-effort drain notification (never blocks or aborts on HTTP 409)
+    // 7. Updates do not acquire a device-wide maintenance drain. Defer only
+    // this cutover while real commands are running, leaving every lane open.
     let lease_id = hash(format!(
         "{}:{}:{}",
         config.device_id, directive.version, directive.artifact_sha256
     ));
-    let _ = client
-        .post(format!("{}/device/maintenance", config.gateway_url))
-        .bearer_auth(&config.device_token)
-        .header(header::USER_AGENT, "octendra-agent/upgrade")
-        .timeout(Duration::from_secs(5))
-        .json(&json!({
-            "action": "acquire",
-            "lease_id": lease_id,
-            "ttl_seconds": 90
-        }))
-        .send()
-        .await;
-    draining_flag().store(true, Ordering::SeqCst);
-
-    // 8. Brief bounded drain (up to 15s) for active in-flight mutations only
-    let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    while tokio::time::Instant::now() < drain_deadline {
-        let active_jobs = agent.active.list().map(|v| v.len()).unwrap_or(0);
-        let live_mem_terms = agent.terminals.has_live().unwrap_or(false);
-        let (_, _, db_outbox) = pending_local_work(&agent.store).await;
-        if active_jobs == 0 && !live_mem_terms && db_outbox == 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+    if !agent.active.list()?.is_empty() || agent.terminals.has_live()? {
+        tracing::info!(target_version = %directive.version,
+            "agent cutover deferred while commands run; task polling remains open");
+        return Ok(false);
     }
 
     // 9. Prepare single verified rollback backup from running executable
