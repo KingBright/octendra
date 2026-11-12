@@ -7,13 +7,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/Users/jinliang/rust-target}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/rust-target}"
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-12}"
 export OCTENDRA_BUILD_REVISION="${OCTENDRA_BUILD_REVISION:-$(git rev-parse HEAD)}"
-GATEWAY_SSH_HOST="${OCTENDRA_GATEWAY_SSH_HOST:-root@hackerlife.fun}"
+GATEWAY_SSH_HOST="${OCTENDRA_GATEWAY_SSH_HOST:?Set the authorized Gateway SSH destination}"
 GATEWAY_SSH_PORT="${OCTENDRA_GATEWAY_SSH_PORT:-222}"
-GATEWAY_BIN_ROOT="${OCTENDRA_GATEWAY_BIN_ROOT:-/volume1/@entware-opt/octendra/bin}"
-GATEWAY_CFG="${OCTENDRA_GATEWAY_CFG:-/volume1/@entware-opt/octendra/config/gateway.json}"
+GATEWAY_BIN_ROOT="${OCTENDRA_GATEWAY_BIN_ROOT:?Set the installed Gateway binary directory}"
+GATEWAY_CFG="${OCTENDRA_GATEWAY_CFG:?Set the installed Gateway configuration path}"
 GATEWAY_SERVICE="${OCTENDRA_GATEWAY_SERVICE:-octendra-gateway.service}"
 
 VERSION="$(python3 -c 'import re,pathlib; t=pathlib.Path("crates/octendra-code/Cargo.toml").read_text(); print(re.search(r"^version\s*=\s*\"([^\"]+)\"", t, re.M).group(1))')"
