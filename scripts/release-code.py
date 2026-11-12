@@ -227,8 +227,24 @@ def build_commands(platforms=None, arm64_linker=None, source_root=None):
     return stages
 
 
+def build_only_receipt(manifest, version, platforms, stages):
+    names = [platform.replace('-', '_')+'_release' for platform in platforms]
+    checks = {name: stages[name] for name in names}
+    if any(check.get('exit_code') != 0 for check in checks.values()):
+        raise ValueError('a selected platform did not build successfully')
+    receipt = {**manifest, 'version': version, 'state': 'passed',
+               'verification_scope': 'build_only', 'source_inputs_unchanged': True,
+               'checks': checks, 'verified_at': stamp(), 'deployed': False,
+               'functional_tests': {'status': 'not_run', 'scope': 'build_only',
+                   'passed': 0, 'failed': 0, 'rust_executed': 0, 'python_executed': 0,
+                   'test_gates_completed_successfully': False, 'evidence_complete': False}}
+    return receipt
+
+
 @release_current.admission()
-def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=None, platforms=None, source_commit=None, full_tests=False):
+def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=None, platforms=None, source_commit=None, full_tests=False, quick=False):
+    if quick and (verify_only or full_tests):
+        raise ValueError('quick mode builds selected platforms without full verification')
     platforms = release_current.selected_platforms(platforms)
     snapshot = snapshot.resolve(strict=True) if snapshot is not None else None
     report = report.absolute()
@@ -248,6 +264,7 @@ def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=N
                 or (not source_commit and previous.get('snapshot_id') != manifest['snapshot_id'])
                 or previous.get('verify_only') != verify_only
                 or previous.get('full_tests', False) != full_tests
+                or previous.get('quick', False) != quick
                 or tuple(previous.get('platforms', release_current.DEFAULT_PLATFORMS)) != platforms):
             raise ValueError('report belongs to different inputs or mode; never overwrite')
         print(json.dumps({'state': 'existing_attempt', 'original_state': previous['state'],
@@ -256,7 +273,7 @@ def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=N
     state = {'schema_version': 1, 'version': version, 'state': 'preparing', 'phase': 'lease',
              'snapshot_id': manifest['snapshot_id'] if manifest else None, 'source_commit': source_commit,
              'snapshot': str(snapshot) if snapshot is not None else None, 'verify_only': verify_only, 'platforms': list(platforms),
-             'full_tests': full_tests,
+             'full_tests': full_tests, 'quick': quick,
              'started_at': stamp(), 'pid': os.getpid(), 'stages': {}, 'deployed': False}
     # Atomic claim prevents racing requests with the same report id.
     with report.open('x') as stream:
@@ -301,29 +318,38 @@ def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=N
                 state.update(phase='toolchain_probe', state='running')
                 build_slot.atomic_json(report, state)
                 state['toolchain'] = subprocess.check_output(['rustc', '-vV'], cwd=checkout, env=env, text=True, timeout=60).strip()
-                verify_argv = [sys.executable, str(ROOT/'scripts/check-code-source.py'), '--report', str(directory/'verification.json')]
-                if full_tests: verify_argv.append('--full-tests')
-                if source_binding: verify_argv += ['--source-binding', str(source_binding)]
-                run_stage('verification', verify_argv,
-                          checkout, directory, report, state, env, timeout=5400, manifest=manifest)
-                proof = load(directory/'verification.json')
-                verifier = source_snapshot.verifier(checkout)
-                if not verifier.receipt_current(proof, checkout):
-                    raise ValueError('source verification failed or is no longer current')
-                state['verification'] = {'path': str(directory/'verification.json'), 'sha256': build_slot.digest(directory/'verification.json'),
-                                         'tests': proof['functional_tests']}
-                # The completed same-source receipt supersedes the last sampled
-                # progress tick, which may still have said running.
-                state['verification_gate'] = 'passed'
-                build_slot.atomic_json(report, state)
+                if not quick:
+                    verify_argv = [sys.executable, str(ROOT/'scripts/check-code-source.py'), '--report', str(directory/'verification.json')]
+                    if full_tests: verify_argv.append('--full-tests')
+                    if source_binding: verify_argv += ['--source-binding', str(source_binding)]
+                    run_stage('verification', verify_argv,
+                              checkout, directory, report, state, env, timeout=5400, manifest=manifest)
+                    proof = load(directory/'verification.json')
+                    verifier = source_snapshot.verifier(checkout)
+                    if not verifier.receipt_current(proof, checkout):
+                        raise ValueError('source verification failed or is no longer current')
+                    state['verification'] = {'path': str(directory/'verification.json'), 'sha256': build_slot.digest(directory/'verification.json'),
+                                             'tests': proof['functional_tests']}
+                    state['verification_gate'] = 'passed'
+                    build_slot.atomic_json(report, state)
                 if not verify_only:
                     commands = build_commands(platforms, source_root=checkout) if source_binding else build_commands(platforms)
                     for name, args in commands:
                         run_stage(name, args, checkout, directory, report, state, env, manifest=manifest)
+                    if quick:
+                        release_current.check_inputs(checkout, manifest)
+                        proof = build_only_receipt(manifest, version, platforms, state['stages'])
+                        build_slot.atomic_json(directory/'verification.json', proof)
+                        state['verification'] = {'path': str(directory/'verification.json'),
+                            'sha256': build_slot.digest(directory/'verification.json'),
+                            'scope': 'build_only', 'tests': proof['functional_tests']}
+                        state['verification_gate'] = 'not_requested'
+                        build_slot.atomic_json(report, state)
                     package_argv = [sys.executable, str(ROOT/'scripts/package-code-release.py'), '--version', version,
                                          '--verification', str(directory/'verification.json'), '--producer-pid', str(os.getpid()),
                                          '--platforms', *platforms]
                     if source_binding: package_argv += ['--source-binding', str(source_binding)]
+                    if quick: package_argv.append('--build-only')
                     run_stage('package', package_argv,
                               checkout, directory, report, state, env, manifest=manifest)
                     release, bundle = release_current.stages(ROOT)
@@ -369,7 +395,7 @@ def run_pipeline(snapshot, report, slot, verify_only=False, expected_source_id=N
     return state
 
 
-def start_pipeline(snapshot, report, verify_only=False, platforms=None, source_commit=None, full_tests=False):
+def start_pipeline(snapshot, report, verify_only=False, platforms=None, source_commit=None, full_tests=False, quick=False):
     """Submit once; observation or launcher timeout never owns the worker group."""
     platforms = release_current.selected_platforms(platforms)
     snapshot = snapshot.resolve(strict=True) if snapshot is not None else None
@@ -389,7 +415,7 @@ def start_pipeline(snapshot, report, verify_only=False, platforms=None, source_c
     # An interrupted launch claim remains evidence; no automatic second spawn.
     intent = {'schema_version': 1, 'state': 'launching', 'snapshot_id': manifest['snapshot_id'],
               'snapshot': str(snapshot) if snapshot is not None else None, 'report': str(report), 'driver_log': str(driver_log),
-              'verify_only': verify_only, 'platforms': list(platforms), 'full_tests': full_tests,
+              'verify_only': verify_only, 'platforms': list(platforms), 'full_tests': full_tests, 'quick': quick,
               'started_at': stamp(), 'launcher_pid': os.getpid()}
     if source_commit: intent['source_commit'] = source_commit
     try:
@@ -412,6 +438,8 @@ def start_pipeline(snapshot, report, verify_only=False, platforms=None, source_c
             argv.append('--verify-only')
         if full_tests:
             argv.append('--full-tests')
+        if quick:
+            argv.append('--quick')
         # posix_spawn has no un-reaped Popen object in this short-lived launcher.
         # The new session owns its stdout file and survives a tool's observation timeout.
         with driver_log.open('xb', buffering=0) as output, open(os.devnull, 'rb') as null:
@@ -441,22 +469,25 @@ def main():
     parser.add_argument('--start', action='store_true', help='Submit one detached, durable build; never replay an existing report/launch')
     parser.add_argument('--verify-only', action='store_true')
     parser.add_argument('--full-tests', action='store_true', help='Run every release-profile workspace test target')
+    parser.add_argument('--quick', action='store_true', help='Build and package incrementally; full tests and clippy are opt-in')
     parser.add_argument('--platforms', nargs='+', choices=release_current.PLATFORMS,
                         help='Explicit package platforms; omitted platforms remain pending, never accepted')
     parser.add_argument('--expected-source-id', help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.quick and (args.verify_only or args.full_tests):
+        parser.error('--quick cannot be combined with --verify-only or --full-tests')
     if args.status:
         print(json.dumps(current_status(args.report)), flush=True)
         return
     if os.name != 'posix':
         parser.error('a POSIX build host is required')
     if args.start:
-        start_pipeline(args.snapshot, args.report, args.verify_only, args.platforms, args.source_commit, args.full_tests)
+        start_pipeline(args.snapshot, args.report, args.verify_only, args.platforms, args.source_commit, args.full_tests, args.quick)
         return
     def interrupt(_signum, _frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupt)
-    result = run_pipeline(args.snapshot, args.report, ROOT/'target/release-slot', args.verify_only, args.expected_source_id, args.platforms, args.source_commit, args.full_tests)
+    result = run_pipeline(args.snapshot, args.report, ROOT/'target/release-slot', args.verify_only, args.expected_source_id, args.platforms, args.source_commit, args.full_tests, args.quick)
     if result['state'] != 'passed':
         raise SystemExit(1)
 

@@ -80,6 +80,20 @@ def machine_contract(binary, version):
         raise ValueError('release machine contract contains session-specific fields')
     return contract
 
+def receipt_current(proof, root, verifier, platforms, build_only=False):
+    if not build_only:
+        required = {'fmt', 'clippy', 'rust_tests', 'python_tests', 'workspace'}
+        return (required.issubset(proof.get('checks', {}))
+                and all(proof['checks'][name].get('exit_code') == 0 for name in required)
+                and verifier.receipt_current(proof, root))
+    required = {platform.replace('-', '_')+'_release' for platform in platforms}
+    return (proof.get('verification_scope') == 'build_only'
+            and proof.get('functional_tests', {}).get('status') == 'not_run'
+            and required.issubset(proof.get('checks', {}))
+            and all(proof['checks'][name].get('exit_code') == 0 for name in required)
+            and proof.get('source_inputs') == verifier.inputs(root))
+
+
 @release_current.admission()
 def main():
     p = argparse.ArgumentParser()
@@ -88,6 +102,7 @@ def main():
     p.add_argument('--producer-pid', required=True, type=int)
     p.add_argument('--platforms', nargs='+', choices=release_current.PLATFORMS)
     p.add_argument('--source-binding', type=pathlib.Path)
+    p.add_argument('--build-only', action='store_true', help='Accept an explicit successful-build receipt without claiming tests ran')
     args = p.parse_args()
     platforms = release_current.selected_platforms(args.platforms)
     release_current.primary(ROOT)
@@ -96,12 +111,9 @@ def main():
     release_current.validate_producer(ROOT, args.producer_pid)
     proof_path = args.verification.resolve()
     proof = json.loads(proof_path.read_text())
-    required = {'fmt', 'clippy', 'rust_tests', 'python_tests', 'workspace'}
     if (proof['version'] != args.version or proof.get('state') != 'passed'
             or not proof.get('source_inputs_unchanged')
-            or proof['functional_tests']['failed'] != 0
-            or not required.issubset(proof.get('checks', {}))
-            or any(proof['checks'][name].get('exit_code') != 0 for name in required)):
+            or proof['functional_tests']['failed'] != 0):
         raise SystemExit('verification is incomplete, failed, stale or does not match release')
     if binding and proof.get('source_commit') != binding['source_commit']:
         raise SystemExit('verification belongs to another source commit')
@@ -114,8 +126,8 @@ def main():
     current = verifier.inputs(source_root)
     mismatches = sorted(name for name in current.keys() | proof['source_inputs'].keys()
                         if current.get(name) != proof['source_inputs'].get(name))
-    if mismatches or not verifier.receipt_current(proof, source_root):
-        raise SystemExit('verified source changed or evidence incomplete: ' + ', '.join(mismatches))
+    if mismatches or not receipt_current(proof, source_root, verifier, platforms, args.build_only):
+        raise SystemExit('verification is incomplete or source changed: ' + ', '.join(mismatches))
     target = release_current.established_target(source_root)
     files = {
         'upgrade-code-agent.py': source_root/'scripts/upgrade-code-agent.py',
@@ -199,7 +211,7 @@ def main():
             },
         },
         'pending_platforms': [name for name in release_current.PLATFORMS if name not in platforms],
-        'tests':proof['functional_tests'], 'deployed':False,
+        'tests':proof['functional_tests'], 'verification_scope':proof.get('verification_scope', 'full'), 'deployed':False,
         'limitations':['64 MiB default per file; 0.7+ negotiated large-file mode permits explicit requests up to 256 MiB when storage reserve and agent capability gates pass; retained partials expire after 24 hours',
                         'inbound prefix recovery needs a strong validator or original expected SHA-256',
                         'expired authorization requires explicit transfer_resume with a refreshed file reference',
@@ -217,7 +229,7 @@ def main():
     with tarfile.open(bundle,'x:gz') as archive:
         for path in sorted(dest.iterdir(), key=lambda p:p.name):
             if path.is_file(): archive.add(path,arcname=path.name)
-    if verifier.inputs(source_root) != current or not verifier.receipt_current(proof, source_root):
+    if verifier.inputs(source_root) != current or not receipt_current(proof, source_root, verifier, platforms, args.build_only):
         raise ValueError('source changed during package; current was not replaced')
     print(json.dumps({'staged_current': True, 'release_dir':str(dest), 'manifest_sha256':digest(dest/'manifest.json'),
                       'bundle':str(bundle),'bundle_sha256':digest(bundle),'bundle_size':bundle.stat().st_size,
