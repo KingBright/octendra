@@ -36,6 +36,17 @@ def main():
     gateway=a.gateway_binary.resolve(strict=True);cfg=base/'gateway.json';password=base/'owner-password';agent=base/'android-device.json'
     report={'run_id':runid,'environment':'isolated Rust gateway and dedicated Android emulator','checks':checks,'release_apk_tested_as_install_target':False,'physical_phone_tested':False,'passed':False}
     try:
+        aapt=pathlib.Path(a.adb).resolve().parents[1]/'build-tools/36.1.0/aapt'
+        def ai_view_authority(apk):
+            manifest=run([str(aapt),'dump','xmltree',str(apk),'AndroidManifest.xml'],text=True).stdout
+            providers=re.split(r'\n\s*E: provider \(line=\d+\)',manifest)
+            provider=next((part for part in providers if 'fun.hackerlife.octendra.AiViewBridgeProvider' in part),None)
+            match=re.search(r'android:authorities\([^)]*\)="([^"]+)"',provider or '')
+            return match.group(1) if match else None
+        debug_authority=ai_view_authority(ROOT/'android/app/build/outputs/apk/debug/app-debug.apk')
+        release_authority=ai_view_authority(a.install_fixture_apk)
+        checked('debug_and_release_ai_view_authorities_isolated',debug_authority=='fun.hackerlife.octendra.debug.aiview' and
+                release_authority=='fun.hackerlife.octendra.aiview',debug_authority=debug_authority,release_authority=release_authority)
         version=run([str(gateway),'--version'],text=True).stdout.strip();report['gateway_version']=version
         run([str(gateway),'init-gateway','--config',str(cfg),'--public-url',origin,'--bind',f'127.0.0.1:{innerport}','--state-dir',str(base/'gateway-state'),'--password-file',str(password),'--owner','android-fixture'])
         run([str(gateway),'enroll','--gateway-config',str(cfg),'--agent-config',str(agent),'--name','Android Integration Emulator','--state-dir','/android/private','--root','/android/shared','--allow-write','--allow-exec','--shell','/system/bin/sh'])
