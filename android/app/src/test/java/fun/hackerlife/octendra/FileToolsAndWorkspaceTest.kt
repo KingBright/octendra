@@ -22,6 +22,24 @@ class FileToolsAndWorkspaceTest {
         }
     }
 
+    @Test fun readsDefaultEitherOrBothLineBoundsAndRejectsInvalidBounds() {
+        val root = Files.createTempDirectory("octendra-read-defaults").toFile().canonicalFile
+        try {
+            val file = File(root, "fixture.txt").apply { writeText("one\ntwo\nthree") }
+            fun read(request: org.json.JSONObject) = FileTools.readTextRanges(root,
+                obj("requests" to JSONArray().put(request))).getJSONArray("ranges").getJSONObject(0)
+            fun request() = obj("path" to "fixture.txt", "expected_version" to FileTools.digest(file))
+            assertEquals("one\ntwo\nthree\n", read(request()).getString("text"))
+            assertEquals("one\ntwo\n", read(request().put("end_line", 2)).getString("text"))
+            assertEquals("two\nthree\n", read(request().put("start_line", 2)).getString("text"))
+            for (invalid in listOf(request().put("start_line", 0), request().put("start_line", 3).put("end_line", 2))) {
+                try { read(invalid); fail("invalid bounds accepted") } catch (_: AgentError) { }
+            }
+            try { read(request().put("expected_version", "0".repeat(64))); fail("stale version accepted") } catch (_: AgentError) { }
+            try { read(obj("path" to "../outside")); fail("outside path accepted") } catch (_: AgentError) { }
+        } finally { root.deleteRecursively() }
+    }
+
     @Test fun unifiedPatchMatchesGitZeroContextAndEofBytes() {
         val root = kotlin.io.path.createTempDirectory("git-patch-fixtures").toFile()
         try {

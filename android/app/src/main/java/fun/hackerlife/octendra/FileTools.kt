@@ -308,6 +308,24 @@ class FileTools(private val context: Context, private val transport: Transport) 
                 }
             }
         }
+        internal fun readTextRanges(root: File, args: JSONObject): JSONObject {
+            val requests = args.getJSONArray("requests"); demand(requests.length() in 1..20, "request_count_exceeded")
+            var budget = args.optInt("max_bytes", 32768).coerceIn(1024, 65536)
+            val ranges = mutableListOf<JSONObject>()
+            for (i in 0 until requests.length()) {
+                val q = requests.getJSONObject(i); val path = q.getString("path"); val f = Policy.within(root, path)
+                demand(f.isFile && f.length() <= 1024 * 1024, "text_file_unavailable_or_too_large")
+                val version = digest(f); if (q.has("expected_version")) demand(q.getString("expected_version") == version, "version_conflict")
+                val lines = f.readText().split('\n'); val start = if (q.has("start_line")) q.getInt("start_line") else 1; val end = if (q.has("end_line")) q.getInt("end_line") else 10_000_000
+                demand(start >= 1 && end >= start && q.optInt("line_byte_offset", 0) == 0, "invalid_range")
+                val picked = mutableListOf<String>(); var index = start - 1
+                while (index < lines.size && index < end) { val text = lines[index] + "\n"; if (text.toByteArray().size > budget) break; budget -= text.toByteArray().size; picked += text; index++ }
+                val more = index < minOf(end, lines.size)
+                ranges += obj("path" to path, "version" to version, "start_line" to start, "end_line" to index, "text" to picked.joinToString(""), "total_lines" to lines.size, "truncated" to more, "next_line" to if (more) index + 1 else null)
+            }
+            return obj("ranges" to arr(ranges))
+        }
+
     }
 
     fun delete(root: File, args: JSONObject): JSONObject = deleteFile(root, args)
@@ -376,23 +394,7 @@ class FileTools(private val context: Context, private val transport: Transport) 
         return obj("files" to arr(files), "truncated" to (files.size == limit || scanned > 10000), "next_cursor" to null)
     }
 
-    fun read(root: File, args: JSONObject): JSONObject {
-        val requests = args.getJSONArray("requests"); demand(requests.length() in 1..20, "request_count_exceeded")
-        var budget = args.optInt("max_bytes", 32768).coerceIn(1024, 65536)
-        val ranges = mutableListOf<JSONObject>()
-        for (i in 0 until requests.length()) {
-            val q = requests.getJSONObject(i); val path = q.getString("path"); val f = Policy.within(root, path)
-            demand(f.isFile && f.length() <= 1024 * 1024, "text_file_unavailable_or_too_large")
-            val version = digest(f); if (q.has("expected_version")) demand(q.getString("expected_version") == version, "version_conflict")
-            val lines = f.readText().split('\n'); val start = q.getInt("start_line"); val end = q.getInt("end_line")
-            demand(start >= 1 && end >= start && q.optInt("line_byte_offset", 0) == 0, "invalid_range")
-            val picked = mutableListOf<String>(); var index = start - 1
-            while (index < lines.size && index < end) { val text = lines[index] + "\n"; if (text.toByteArray().size > budget) break; budget -= text.toByteArray().size; picked += text; index++ }
-            val more = index < minOf(end, lines.size)
-            ranges += obj("path" to path, "version" to version, "start_line" to start, "end_line" to index, "text" to picked.joinToString(""), "total_lines" to lines.size, "truncated" to more, "next_line" to if (more) index + 1 else null)
-        }
-        return obj("ranges" to arr(ranges))
-    }
+    fun read(root: File, args: JSONObject): JSONObject = readTextRanges(root, args)
 
     fun pruneScreenshots(root: File) {
         val dir = File(root, "screenshots"); var size = 0L; var count = 0
