@@ -154,4 +154,61 @@ class AiViewBridgeProviderTest {
         assertFalse(badGen.getBoolean("ok"))
         assertEquals("stale_view_or_consumer", badGen.getString("error"))
     }
+    @Test fun ownershipEndsOnlyAfterAllContactsKeysAndModifiersRelease() {
+        val sink = object : AiInputSink {
+            override fun injectTouch(displayId: Int, downTimeMs: Long, eventTimeMs: Long, action: Int, pointerCount: Int, pointerIds: IntArray, xs: FloatArray, ys: FloatArray, pressures: FloatArray) = true
+            override fun injectKey(displayId: Int, downTimeMs: Long, eventTimeMs: Long, action: Int, androidKeyCode: Int, metaState: Int, flags: Int) = true
+            override fun commitText(displayId: Int, text: String) = true
+            override fun uptimeMs() = 100L
+        }
+        val host = AiViewHost()
+        host.register(AiViewHost.ActiveView("display:1", 1, "g", 100, 100, 100, 0,
+            object : AiViewHost.SurfaceBridge { override fun attachSurface(surface: Any) = "c"; override fun detachSurface(consumerId: String) {} },
+            sink, {}, {}, { AiViewHost.ViewAppInfo("", "", 0) }))
+        host.attachVideo("display:1", "g", "surface")
+        fun send(json: String) = host.dispatchInput("c", "display:1", "g", 1, json).getBoolean("accepted")
+        assertTrue(send("""{"TouchFrame":[{"action":"Down","pointer_id":0,"normalized_x":0.5,"normalized_y":0.5},{"action":"Down","pointer_id":1,"normalized_x":0.4,"normalized_y":0.4}]}"""))
+        assertTrue(send("""{"ModifiersChanged":1}"""))
+        assertTrue(send("""{"Key":{"key_code":0,"pressed":true}}"""))
+        assertTrue(send("""{"Touch":{"action":"Up","pointer_id":0,"normalized_x":0.5,"normalized_y":0.5}}"""))
+        assertTrue(host.isHumanActive("display:1"))
+        assertTrue(send("""{"Touch":{"action":"Up","pointer_id":1,"normalized_x":0.4,"normalized_y":0.4}}"""))
+        assertTrue(send("""{"Key":{"key_code":0,"pressed":false}}"""))
+        assertTrue(host.isHumanActive("display:1"))
+        assertTrue(send("""{"ModifiersChanged":0}"""))
+        assertFalse(host.isHumanActive("display:1"))
+        assertNotNull(host.checkTakeoverForAi("display:1", "g", 1))
+        assertNull(host.checkTakeoverForAi("display:1", "g", host.currentResourceEpoch("display:1")))
+    }
+
+    @Test fun detachWaitsForInFlightInputAndCancelsHeldGesture() {
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val unblock = java.util.concurrent.CountDownLatch(1)
+        val actions = java.util.Collections.synchronizedList(mutableListOf<Int>())
+        val sink = object : AiInputSink {
+            override fun injectTouch(displayId: Int, downTimeMs: Long, eventTimeMs: Long, action: Int, pointerCount: Int, pointerIds: IntArray, xs: FloatArray, ys: FloatArray, pressures: FloatArray): Boolean {
+                actions.add(action)
+                if (action == MotionEvent.ACTION_DOWN) { entered.countDown(); check(unblock.await(3, java.util.concurrent.TimeUnit.SECONDS)) }
+                return true
+            }
+            override fun injectKey(displayId: Int, downTimeMs: Long, eventTimeMs: Long, action: Int, androidKeyCode: Int, metaState: Int, flags: Int) = true
+            override fun commitText(displayId: Int, text: String) = true
+            override fun uptimeMs() = 100L
+        }
+        val host = AiViewHost()
+        host.register(AiViewHost.ActiveView("display:1", 1, "g", 100, 100, 100, 0,
+            object : AiViewHost.SurfaceBridge { override fun attachSurface(surface: Any) = "c"; override fun detachSurface(consumerId: String) {} },
+            sink, {}, {}, { AiViewHost.ViewAppInfo("", "", 0) }))
+        host.attachVideo("display:1", "g", "surface")
+        val dispatch = Thread { host.dispatchInput("c", "display:1", "g", 1,
+            """{"Touch":{"action":"Down","pointer_id":0,"normalized_x":0.5,"normalized_y":0.5}}""") }
+        dispatch.start(); assertTrue(entered.await(3, java.util.concurrent.TimeUnit.SECONDS))
+        val detach = Thread { host.detachVideo("c") }; detach.start()
+        unblock.countDown(); dispatch.join(3000); detach.join(3000)
+        assertFalse(dispatch.isAlive); assertFalse(detach.isAlive)
+        assertEquals(listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_CANCEL), actions)
+        assertFalse(host.isHumanActive("display:1"))
+        assertFalse(host.dispatchInput("c", "display:1", "g", 1, """{"Text":"x"}""").getBoolean("ok"))
+    }
+
 }

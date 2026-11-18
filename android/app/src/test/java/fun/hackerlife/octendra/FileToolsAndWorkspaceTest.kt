@@ -22,6 +22,42 @@ class FileToolsAndWorkspaceTest {
         }
     }
 
+    @Test fun unifiedPatchMatchesGitZeroContextAndEofBytes() {
+        val root = kotlin.io.path.createTempDirectory("git-patch-fixtures").toFile()
+        try {
+            val fixtures = listOf(
+                "a\nb\nc\n" to "a\ninsert\nb\nc\n",
+                "a\nb\n" to "head\na\nb\n",
+                "a\nb\n" to "a\nb\ntail\n",
+                "one\ntwo\nthree\n" to "one\nthree\n",
+                "first\nlast" to "first\nchanged",
+                "first\nlast" to "first\nlast\n",
+                "first\nlast\n" to "first\nlast",
+                "" to "new without newline",
+                "last without newline" to "",
+                "a\nb\nc\nd\ne\nf\n" to "A\nb\nc\nd\ne\nF\n"
+            )
+            for ((old, expected) in fixtures) {
+                val before = java.io.File(root, "before").apply { writeBytes(old.toByteArray()) }
+                val after = java.io.File(root, "after").apply { writeBytes(expected.toByteArray()) }
+                val process = ProcessBuilder("git", "diff", "--no-index", "--unified=0", "--", before.path, after.path)
+                    .redirectErrorStream(true).start()
+                val patch = process.inputStream.bufferedReader().readText()
+                assertEquals("git diff fixture failed: $patch", 1, process.waitFor())
+                assertArrayEquals("patch: $patch", expected.toByteArray(), FileTools.applyUnifiedPatch(old, patch).toByteArray())
+            }
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun unifiedPatchRejectsMismatchedCountsAndEof() {
+        for (patch in listOf("@@ -1,2 +1,1 @@\n-a\n+b\n", "@@ -1 +1 @@\n-a\n+b\n\\ No newline at end of file\n extra\n")) {
+            try {
+                FileTools.applyUnifiedPatch("a\n", patch)
+                fail("invalid patch accepted")
+            } catch (_: AgentError) { }
+        }
+    }
+
     @Test fun applyEditsSupportsCreateEditPatchDeleteAndOptimisticLock() {
         val root = Files.createTempDirectory("octendra-edits-test").toFile().canonicalFile
         try {

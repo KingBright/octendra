@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.database.Cursor
 import android.net.Uri
 import android.os.Binder
+import android.os.IBinder
 import android.os.Build
 import android.os.Bundle
 import android.os.Process
@@ -95,6 +96,9 @@ internal class AiHumanInputSession(
     private var cursorX = (width.coerceAtLeast(2) / 2f)
     private var cursorY = (height.coerceAtLeast(2) / 2f)
     private var downTimeMs = 0L
+    private var modifiers = 0
+
+    fun hasHeldInput(): Boolean = synchronized(lock) { contacts.isNotEmpty() || heldKeys.isNotEmpty() || modifiers != 0 }
 
     fun updateDimensions(newWidth: Int, newHeight: Int) = synchronized(lock) {
         width = newWidth.coerceAtLeast(2)
@@ -221,7 +225,7 @@ internal class AiHumanInputSession(
                 executeTouchFrame(JSONArray().put(obj))
             }
 
-            "ModifiersChanged" -> true
+            "ModifiersChanged" -> { modifiers = (value as? Number)?.toInt()?.and(0x1f) ?: return@synchronized false; true }
 
             "Key" -> {
                 val info = value as? JSONObject ?: return@synchronized false
@@ -287,6 +291,7 @@ internal class AiHumanInputSession(
             }
         }
         heldKeys.clear()
+        modifiers = 0
     }
 
     companion object {
@@ -371,6 +376,7 @@ internal class AiViewHost {
     private val registryLock = Any()
     private val views = LinkedHashMap<String, ActiveView>() // viewId -> ActiveView
     private val consumerToView = LinkedHashMap<String, String>() // consumerId -> viewId
+    private val consumerDeaths = LinkedHashMap<String, Pair<IBinder, IBinder.DeathRecipient>>()
 
     fun register(view: ActiveView) = synchronized(registryLock) {
         // Clear any stale entries for the same viewId or displayId
@@ -397,7 +403,10 @@ internal class AiViewHost {
             removed.activeHumanConsumerId = null
             cids
         }
-        ids.forEach { consumerToView.remove(it) }
+        ids.forEach { id ->
+            consumerToView.remove(id)
+            consumerDeaths.remove(id)?.let { (token, death) -> runCatching { token.unlinkToDeath(death, 0) } }
+        }
     }
 
     fun updateGeometry(viewId: String, generation: String, width: Int, height: Int, density: Int, rotation: Int = 0) {
@@ -475,7 +484,7 @@ internal class AiViewHost {
         return arr.toString()
     }
 
-    fun attachVideo(viewId: String?, generation: String?, surface: Any?): JSONObject {
+    fun attachVideo(viewId: String?, generation: String?, surface: Any?, owner: IBinder? = null): JSONObject {
         if (viewId.isNullOrEmpty() || generation.isNullOrEmpty() || surface == null) {
             return obj("ok" to false, "error" to "invalid_attach_arguments")
         }
@@ -497,6 +506,18 @@ internal class AiViewHost {
             synchronized(view.lock) {
                 view.consumers[consumerId] = AiHumanInputSession(view.displayId, view.width, view.height, view.inputSink)
                 consumerToView[consumerId] = viewId
+                if (owner != null) {
+                    val death = IBinder.DeathRecipient { detachVideo(consumerId) }
+                    try {
+                        owner.linkToDeath(death, 0)
+                        consumerDeaths[consumerId] = owner to death
+                    } catch (_: Exception) {
+                        view.consumers.remove(consumerId)
+                        consumerToView.remove(consumerId)
+                        runCatching { view.surfaceBridge.detachSurface(consumerId) }
+                        return obj("ok" to false, "error" to "consumer_disconnected")
+                    }
+                }
                 return obj(
                     "ok" to true,
                     "consumer_id" to consumerId,
@@ -517,17 +538,17 @@ internal class AiViewHost {
         if (consumerId.isNullOrEmpty()) return obj("ok" to false, "error" to "invalid_consumer_id")
         val view = synchronized(registryLock) {
             val vid = consumerToView.remove(consumerId)
+            consumerDeaths.remove(consumerId)?.let { (token, death) -> runCatching { token.unlinkToDeath(death, 0) } }
             vid?.let { views[it] }
         }
         if (view != null) {
-            val session = synchronized(view.lock) {
+            synchronized(view.lock) {
                 if (view.activeHumanConsumerId == consumerId) {
                     view.humanActive.set(false)
                     view.activeHumanConsumerId = null
                 }
-                view.consumers.remove(consumerId)
+                view.consumers.remove(consumerId)?.also { runCatching { it.release() } }
             }
-            session?.let { runCatching { it.release() } }
             runCatching { view.surfaceBridge.detachSurface(consumerId) }
         }
         return obj("ok" to true)
@@ -558,28 +579,30 @@ internal class AiViewHost {
         if (view.generation != generation) {
             return obj("ok" to false, "error" to "stale_view_or_consumer")
         }
-        val session: AiHumanInputSession
-        val newEpoch: Long
         synchronized(view.lock) {
             val currentRev = view.sourceRevision.get()
             if (sourceRevision != currentRev) {
                 return obj("ok" to false, "error" to "source_revision_mismatch", "source_revision" to currentRev)
             }
-            session = view.consumers[consumerId]
+            val session = view.consumers[consumerId]
                 ?: return obj("ok" to false, "error" to "stale_view_or_consumer")
-            newEpoch = view.resourceEpoch.incrementAndGet()
+            if (view.humanActive.get() && view.activeHumanConsumerId != consumerId) {
+                return obj("ok" to false, "error" to "human_input_owned")
+            }
+            val newEpoch = view.resourceEpoch.incrementAndGet()
             view.humanActive.set(true)
             view.activeHumanConsumerId = consumerId
             view.lastHumanTakeoverEpoch.set(newEpoch)
             runCatching { view.cancelAiInput() }
             runCatching { view.invalidateAiObservations() }
+            val accepted = runCatching { session.execute(eventObj) }.getOrDefault(false)
+            if (!accepted) runCatching { session.release() }
+            if (!session.hasHeldInput()) {
+                view.humanActive.set(false)
+                view.activeHumanConsumerId = null
+            }
+            return obj("ok" to true, "accepted" to accepted, "resource_epoch" to newEpoch)
         }
-        val accepted = try {
-            session.execute(eventObj)
-        } catch (_: Exception) {
-            false
-        }
-        return obj("ok" to true, "accepted" to accepted, "resource_epoch" to newEpoch)
     }
 
     fun releaseInput(consumerId: String?): JSONObject {
@@ -588,14 +611,13 @@ internal class AiViewHost {
             val vid = consumerToView[consumerId]
             vid?.let { views[it] }
         } ?: return obj("ok" to true)
-        val session = synchronized(view.lock) {
+        synchronized(view.lock) {
+            view.consumers[consumerId]?.let { runCatching { it.release() } }
             if (view.activeHumanConsumerId == consumerId) {
                 view.humanActive.set(false)
                 view.activeHumanConsumerId = null
             }
-            view.consumers[consumerId]
         }
-        session?.let { runCatching { it.release() } }
         return obj("ok" to true)
     }
 
@@ -671,8 +693,10 @@ class AiViewBridgeProvider : ContentProvider() {
                         @Suppress("DEPRECATION")
                         extras?.getParcelable("surface")
                     }
+                    val owner = extras?.getBinder("owner")
                     Bundle().apply {
-                        putString("result_json", host.attachVideo(arg, generation, surface).toString())
+                        putString("result_json", if (owner == null) obj("ok" to false, "error" to "missing_owner").toString()
+                            else host.attachVideo(arg, generation, surface, owner).toString())
                     }
                 }
 

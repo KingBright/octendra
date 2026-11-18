@@ -331,9 +331,10 @@ class UiControllerTest {
         assertTrue(staleAct.has("observation"))
         assertTrue(backend.nodeActionCalls.isEmpty())
 
-        // 4. Human releases input; AI observes fresh observation and resumes acting cleanly
-        val released = host.releaseInput("consumer-1")
-        assertTrue(released.getBoolean("ok"))
+        // 4. A normal pointer-up releases ownership without disconnecting video.
+        val released = host.dispatchInput("consumer-1", "display:5", "gen-bg-1", 1L,
+            """{"TouchFrame":[{"action":"Up","pointer_id":0,"normalized_x":0.5,"normalized_y":0.5,"pressure":1.0}]}""")
+        assertTrue(released.getBoolean("accepted"))
         assertFalse(host.isHumanActive("display:5"))
         val freshObs = controller.perform(job("ui_observe", obj("device" to "dev-1", "view" to "background")))
         val resumedAct = controller.perform(

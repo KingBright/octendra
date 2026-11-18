@@ -122,55 +122,72 @@ class FileTools(private val context: Context, private val transport: Transport) 
             return sb.toString()
         }
 
-        private fun applyUnifiedPatch(oldText: String, patch: String): String {
-            val patchLines = patch.split('\n')
-            val hadTrailingNewline = oldText.endsWith("\n")
-            val oldLines = if (oldText.isEmpty()) emptyList()
-            else oldText.split('\n').let { if (hadTrailingNewline) it.dropLast(1) else it }
-            val result = ArrayList<String>()
-            var oldIdx = 0
-            var i = 0
-            while (i < patchLines.size && !patchLines[i].startsWith("@@ ")) i++
-            demand(i < patchLines.size, "patch_conflict")
-            val hunkHeader = Regex("^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@.*$")
-            while (i < patchLines.size) {
-                val line = patchLines[i]
-                if (!line.startsWith("@@ ")) { i++; continue }
-                val m = hunkHeader.matchEntire(line) ?: throw AgentError("patch_conflict")
-                val oldStart = (m.groupValues[1].toIntOrNull() ?: throw AgentError("patch_conflict"))
-                val targetStartIdx = if (oldStart == 0) 0 else oldStart - 1
-                demand(targetStartIdx in oldIdx..oldLines.size, "patch_conflict")
-                while (oldIdx < targetStartIdx) {
-                    result.add(oldLines[oldIdx++])
+        internal fun applyUnifiedPatch(oldText: String, patch: String): String {
+            // Keep each line terminator attached so EOF is matched and reproduced exactly.
+            fun lines(text: String): List<String> {
+                if (text.isEmpty()) return emptyList()
+                val result = ArrayList<String>()
+                var start = 0
+                for (index in text.indices) if (text[index] == '\n') {
+                    result.add(text.substring(start, index + 1))
+                    start = index + 1
                 }
+                if (start < text.length) result.add(text.substring(start))
+                return result
+            }
+            val oldLines = lines(oldText)
+            val patchLines = patch.split('\n')
+            val header = Regex("^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@.*$")
+            val result = ArrayList<String>()
+            var oldIndex = 0
+            var i = patchLines.indexOfFirst { it.startsWith("@@ ") }
+            demand(i >= 0, "patch_conflict")
+            while (i < patchLines.size) {
+                if (patchLines[i].isEmpty() && i == patchLines.lastIndex) break
+                val match = header.matchEntire(patchLines[i]) ?: throw AgentError("patch_conflict")
+                fun number(group: Int, default: Int? = null): Int =
+                    match.groupValues[group].let { value ->
+                        if (value.isEmpty() && default != null) default
+                        else value.toIntOrNull() ?: throw AgentError("patch_conflict")
+                    }
+                val oldStart = number(1)
+                val oldCount = number(2, 1)
+                val newStart = number(3)
+                val newCount = number(4, 1)
+                val target = if (oldCount == 0) oldStart else oldStart - 1
+                val newTarget = if (newCount == 0) newStart else newStart - 1
+                demand(target in oldIndex..oldLines.size, "patch_conflict")
+                while (oldIndex < target) result.add(oldLines[oldIndex++])
+                demand(newTarget == result.size, "patch_conflict")
                 i++
-                while (i < patchLines.size && !patchLines[i].startsWith("@@ ")) {
-                    val hLine = patchLines[i]
-                    if (hLine.startsWith("\\")) { i++; continue }
-                    if (hLine.isEmpty()) { i++; continue }
-                    val prefix = hLine[0]
-                    val body = hLine.substring(1)
-                    when (prefix) {
+                var consumed = 0
+                var produced = 0
+                while (consumed < oldCount || produced < newCount) {
+                    demand(i < patchLines.size, "patch_conflict")
+                    val line = patchLines[i++]
+                    demand(line.isNotEmpty() && line[0] in " +-", "patch_conflict")
+                    val noNewline = i < patchLines.size && patchLines[i] == "\\ No newline at end of file"
+                    if (noNewline) i++
+                    val content = line.substring(1) + if (noNewline) "" else "\n"
+                    when (line[0]) {
                         ' ' -> {
-                            demand(oldIdx < oldLines.size && oldLines[oldIdx] == body, "patch_conflict")
-                            result.add(oldLines[oldIdx++])
+                            demand(consumed < oldCount && produced < newCount && oldIndex < oldLines.size && oldLines[oldIndex] == content, "patch_conflict")
+                            result.add(oldLines[oldIndex++]); consumed++; produced++
                         }
                         '-' -> {
-                            demand(oldIdx < oldLines.size && oldLines[oldIdx] == body, "patch_conflict")
-                            oldIdx++
+                            demand(consumed < oldCount && oldIndex < oldLines.size && oldLines[oldIndex] == content, "patch_conflict")
+                            oldIndex++; consumed++
                         }
-                        '+' -> result.add(body)
-                        else -> throw AgentError("patch_conflict")
+                        '+' -> {
+                            demand(produced < newCount, "patch_conflict")
+                            result.add(content); produced++
+                        }
                     }
-                    i++
                 }
             }
-            while (oldIdx < oldLines.size) {
-                result.add(oldLines[oldIdx++])
-            }
-            if (result.isEmpty()) return ""
-            val joined = result.joinToString("\n")
-            return if (hadTrailingNewline || patch.contains("\n+")) "$joined\n" else joined
+            while (oldIndex < oldLines.size) result.add(oldLines[oldIndex++])
+            demand(result.dropLast(1).all { it.endsWith("\n") }, "patch_conflict")
+            return result.joinToString("")
         }
 
         fun applyEdits(root: File, args: JSONObject, id: String): JSONObject = synchronized(publicationLock) {
