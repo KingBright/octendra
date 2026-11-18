@@ -118,10 +118,20 @@ class PinnedSourceTests(unittest.TestCase):
         with self.source() as (receipt, source):
             manifest = release_current.snapshot_evidence(None, source, receipt, self.root)
             self.assertEqual(manifest['source_commit'], self.commit)
+            self.assertEqual(manifest['producer_inputs'], pinned_source.read(receipt, self.root)['producer_inputs'])
             release_current.check_inputs(source, manifest)
             with self.assertRaises(ValueError):
                 release_current.primary(source)
         self.assertEqual(self.git('diff', '--binary'), self.before)
+
+    def test_build_only_receipt_keeps_pinned_producer_tooling_identity(self):
+        with self.source() as (receipt, source):
+            manifest = release_current.snapshot_evidence(None, source, receipt, self.root)
+            stages = {'macos_release': {'exit_code': 0}}
+            proof = runner.build_only_receipt(manifest, '0.12.1', ['macos'], stages)
+            binding = pinned_source.read(receipt, self.root)
+            self.assertEqual(proof['producer_commit'], binding['producer_commit'])
+            self.assertEqual(proof['producer_inputs'], binding['producer_inputs'])
 
     def test_pinned_pipeline_binds_all_stages_to_one_input_and_main_publication(self):
         stages = []; target = self.root/'existing-cache'; target.mkdir()

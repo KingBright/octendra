@@ -84,6 +84,7 @@ def snapshot_evidence(snapshot, root, source_binding=None, authority_root=None):
         if source_binding:
             manifest.update(source_binding=str(source_binding), authority_root=str(authority_root),
                             source_commit=binding['source_commit'], producer_commit=binding['producer_commit'],
+                            producer_inputs=binding['producer_inputs'],
                             scope='exact Git commit; producer-owned temporary input')
     else:
         try:
