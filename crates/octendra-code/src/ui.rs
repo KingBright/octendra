@@ -1070,35 +1070,23 @@ fn selector_matches(
     }
     if let Some(window) = &selector.window {
         let needle = window.to_lowercase();
-        let named_windows: Vec<_> = elements
-            .iter()
-            .filter(|e| {
-                let r = e.role.to_ascii_lowercase();
-                (r == "axwindow" || r == "window") && !e.name.trim().is_empty()
-            })
-            .collect();
-        if !named_windows.is_empty()
-            && !named_windows
-                .iter()
-                .any(|e| e.name.to_lowercase().contains(&needle))
-        {
+        if !elements.iter().any(|e| {
+            let role = e.role.to_ascii_lowercase();
+            (role == "axwindow" || role == "window")
+                && !e.name.trim().is_empty()
+                && e.name.to_lowercase().contains(&needle)
+        }) {
             return false;
         }
     }
     if let Some(app) = &selector.app {
         let needle = app.to_lowercase();
-        let named_apps: Vec<_> = elements
-            .iter()
-            .filter(|e| {
-                let r = e.role.to_ascii_lowercase();
-                (r == "axapplication" || r == "application") && !e.name.trim().is_empty()
-            })
-            .collect();
-        if !named_apps.is_empty()
-            && !named_apps
-                .iter()
-                .any(|e| e.name.to_lowercase().contains(&needle))
-        {
+        if !elements.iter().any(|e| {
+            let role = e.role.to_ascii_lowercase();
+            (role == "axapplication" || role == "application")
+                && !e.name.trim().is_empty()
+                && e.name.to_lowercase().contains(&needle)
+        }) {
             return false;
         }
     }

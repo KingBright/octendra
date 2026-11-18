@@ -62,6 +62,58 @@ fn action(value: Value) -> Action {
 }
 
 #[test]
+fn desktop_target_requires_matching_application_and_window_evidence() {
+    let elements = vec![
+        SemanticElement {
+            role: "AXApplication".into(),
+            name: "Notes".into(),
+            ..Default::default()
+        },
+        SemanticElement {
+            role: "AXWindow".into(),
+            name: "Draft".into(),
+            ..Default::default()
+        },
+    ];
+    let selector = |app: Option<&str>, window: Option<&str>| Selector {
+        app: app.map(str::to_owned),
+        window: window.map(str::to_owned),
+        instance: None,
+    };
+
+    assert!(selector_matches(
+        &selector(Some("notes"), Some("Draft")),
+        "window",
+        "computer",
+        &elements
+    ));
+    assert!(!selector_matches(
+        &selector(Some("Safari"), Some("Draft")),
+        "window",
+        "computer",
+        &elements
+    ));
+    assert!(!selector_matches(
+        &selector(Some("Notes"), Some("Untitled")),
+        "window",
+        "computer",
+        &elements
+    ));
+    assert!(!selector_matches(
+        &selector(Some("Safari"), None),
+        "window",
+        "computer",
+        &[]
+    ));
+    assert!(!selector_matches(
+        &selector(None, Some("Draft")),
+        "window",
+        "computer",
+        &[]
+    ));
+}
+
+#[test]
 fn image_pixels_map_once_and_stale_targets_never_produce_input() {
     let mut capture = capture();
     let saved = saved(&capture);
