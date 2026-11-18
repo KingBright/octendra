@@ -6,6 +6,20 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class UiContractTest {
+    @Test fun changedAccessibilityPathRefusesActionBeforeUsingStaleChild() {
+        var childLookups = 0
+        fun stale(block: () -> Unit) {
+            try { block(); fail("stale path accepted") }
+            catch (e: AgentError) { assertEquals("node_changed_observe_again", e.code) }
+        }
+        stale { UiContract.currentPathChild<String>(2, 2) { childLookups++; "wrong node" } }
+        stale { UiContract.currentPathChild<String>(-1, 2) { childLookups++; "wrong node" } }
+        assertEquals(0, childLookups)
+        stale { UiContract.currentPathChild<String>(0, 1) { null } }
+        stale { UiContract.currentPathChild<String>(0, 1) { throw ArrayIndexOutOfBoundsException() } }
+        assertEquals("current node", UiContract.currentPathChild(1, 2) { "current node" })
+    }
+
     @Test fun imageCoordinatesMapToDisplayEndpoints() {
         assertEquals(Pair(1079.0, 2399.0), UiContract.point(obj("x" to 539, "y" to 1199), 540, 1200, 1080, 2400))
         for (bad in listOf(obj("x" to 540, "y" to 0), obj("x" to -1, "y" to 0), obj("ref" to "n1", "x" to 1, "y" to 2))) {

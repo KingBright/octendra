@@ -9,6 +9,15 @@ import kotlin.math.roundToInt
 
 /** The same semantic intents as octendra-desktop-protocol::ui; no task/lease API. */
 object UiContract {
+    internal inline fun <T : Any> currentPathChild(index: Int, childCount: Int, getChild: (Int) -> T?): T {
+        if (index !in 0 until childCount) throw AgentError("node_changed_observe_again")
+        return try {
+            getChild(index) ?: throw AgentError("node_changed_observe_again")
+        } catch (_: IndexOutOfBoundsException) {
+            throw AgentError("node_changed_observe_again")
+        }
+    }
+
     private const val DISPLAY_STATE_OFF = 1
     private const val DISPLAY_STATE_DOZE = 3
     private const val DISPLAY_STATE_DOZE_SUSPEND = 4

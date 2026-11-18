@@ -427,7 +427,7 @@ class AccessService : AccessibilityService() {
                 demand(index in seen.nodes.indices, "unknown_node_id")
                 val ref = seen.nodes[index]
                 for (childIndex in ref.path) {
-                    val next = node.getChild(childIndex) ?: throw AgentError("node_changed_observe_again")
+                    val next = UiContract.currentPathChild(childIndex, node.childCount) { node.getChild(it) }
                     node.recycle(); node = next
                 }
                 demand(node.refresh() && signature(node) == ref.signature, "node_changed_observe_again")
@@ -624,7 +624,7 @@ class AccessService : AccessibilityService() {
             val index = args.getInt("node_id"); demand(index in seen.nodes.indices, "unknown_node_id")
             val ref = seen.nodes[index]
             for (child in ref.path) {
-                val next = node.getChild(child) ?: throw AgentError("node_changed_observe_again")
+                val next = UiContract.currentPathChild(child, node.childCount) { node.getChild(it) }
                 node.recycle(); node = next
             }
             demand(node.refresh() && signature(node) == ref.signature && node.isEnabled && node.isVisibleToUser, "node_changed_observe_again")

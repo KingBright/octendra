@@ -27,6 +27,8 @@ class UiControllerTest {
         var bgFrameSeq = 1L
         var tiles = listOf(100L, 200L)
         var dumpedPackage: String = "com.example.notes"
+        var staleNodePoint = false
+        var staleNodeAction = false
         var simulateConcurrentTakeoverInNodeAction: (() -> Unit)? = null
 
         override fun backgroundAvailable() = true
@@ -96,8 +98,12 @@ class UiControllerTest {
             val snap = backgroundSnapshot()
             return obj("tree" to tree, "image" to snap?.first, "tile_hashes" to arr(snap?.second ?: emptyList<Long>()))
         }
-        override fun nodePoint(args: JSONObject) = Pair(170.0, 140.0)
+        override fun nodePoint(args: JSONObject): Pair<Double, Double> {
+            if (staleNodePoint) throw AgentError("node_changed_observe_again")
+            return Pair(170.0, 140.0)
+        }
         override fun nodeAction(kind: String, args: JSONObject, persistent: Boolean): JSONObject {
+            if (staleNodeAction) throw AgentError("node_changed_observe_again")
             simulateConcurrentTakeoverInNodeAction?.let { hook ->
                 simulateConcurrentTakeoverInNodeAction = null
                 hook()
@@ -138,6 +144,22 @@ class UiControllerTest {
         "tool" to tool,
         "arguments" to args
     )
+
+    @Test fun staleRefPathNeverSendsOrReplaysInput() {
+        for (type in listOf("click", "double_click")) {
+            val backend = FakeBackend().apply { staleNodeAction = true; staleNodePoint = true }
+            val controller = UiController("dev-1", backend, AiViewHost())
+            val observation = controller.perform(job("ui_observe", obj("device" to "dev-1", "view" to "active")))
+            val args = obj("device" to "dev-1", "observation_id" to observation.getString("observation_id"),
+                "action" to obj("type" to type, "target" to obj("ref" to "n0")))
+            val result = controller.perform(job("ui_act", args))
+            assertEquals("stale_observation", result.getString("error"))
+            assertFalse(result.getBoolean("input_sent"))
+            assertEquals("stale_observation", controller.perform(job("ui_act", args)).getString("error"))
+            assertTrue(backend.nodeActionCalls.isEmpty())
+            assertTrue(backend.gestureCalls.isEmpty())
+        }
+    }
 
     @Test fun semanticFieldsAndZeroIoQueryPreserveObservations() {
         val backend = FakeBackend()
