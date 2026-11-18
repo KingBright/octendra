@@ -26,23 +26,32 @@ import java.util.concurrent.atomic.AtomicLong
 internal object AiViewCallerPolicy {
     const val AUTHORITY = "fun.hackerlife.octendra.aiview"
     const val OWNER_CERT_SHA256 = "f84d9b71f1a00f4b5e3084420e5cee3327053389983b2428d9bec71755e5539d"
+    const val WEAVELO_PACKAGE = "fun.hackerlife.weavelo"
+    const val WEAVELO_CERT_SHA256 = "215aedabf17f40a454ad381d9027772eef9446346cae3db031cac2a5ae51c3a5"
 
     fun isAllowed(
         callingUid: Int,
         selfUid: Int,
         ownCertsSha256: Set<String>,
         configuredPeerFingerprint: String?,
-        callerPackageSigners: List<Set<String>>
+        callerPackageSigners: List<Pair<String, Set<String>>>
     ): Boolean {
         if (callingUid == selfUid || callingUid == 2000) return true
         if (callerPackageSigners.isEmpty()) return false
+        // A Binder caller is identified by UID, not package. Only grant this new
+        // product-specific trust when no other package shares the calling UID.
+        if (callerPackageSigners.any { it.first == WEAVELO_PACKAGE }) {
+            if (callerPackageSigners.size != 1) return false
+            val signers = callerPackageSigners.single().second
+            return signers.map { it.lowercase() }.toSet() == setOf(WEAVELO_CERT_SHA256)
+        }
         val allowed = HashSet<String>(ownCertsSha256.size + 2)
         ownCertsSha256.forEach { allowed.add(it.lowercase()) }
         allowed.add(OWNER_CERT_SHA256)
         configuredPeerFingerprint?.trim()?.lowercase()
             ?.takeIf { it.matches(Regex("[0-9a-f]{64}")) }
             ?.let { allowed.add(it) }
-        return callerPackageSigners.any { signers ->
+        return callerPackageSigners.any { (_, signers) ->
             signers.isNotEmpty() && signers.all { it.lowercase() in allowed }
         }
     }
@@ -659,7 +668,7 @@ class AiViewBridgeProvider : ContentProvider() {
         val packages = pm.getPackagesForUid(callingUid)?.toList().orEmpty()
         val ownCerts = packageCertsSha256(pm, ctx.packageName)
         val configuredPeer = runCatching { controls(ctx).getString("ai_view_peer_sha256", null) }.getOrNull()
-        val callerCerts = packages.map { packageCertsSha256(pm, it) }
+        val callerCerts = packages.map { it to packageCertsSha256(pm, it) }
         if (!AiViewCallerPolicy.isAllowed(callingUid, selfUid, ownCerts, configuredPeer, callerCerts)) {
             throw SecurityException("unauthorized_aiview_caller")
         }

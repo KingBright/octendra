@@ -15,14 +15,28 @@ class AiViewBridgeProviderTest {
 
         assertTrue(AiViewCallerPolicy.isAllowed(10001, 10001, own, null, emptyList()))
         assertTrue(AiViewCallerPolicy.isAllowed(2000, 10001, own, null, emptyList()))
-        assertTrue(AiViewCallerPolicy.isAllowed(10055, 10001, own, null, listOf(own)))
-        assertTrue(AiViewCallerPolicy.isAllowed(10055, 10001, own, null, listOf(setOf(owner))))
-        assertTrue(AiViewCallerPolicy.isAllowed(10055, 10001, own, peer, listOf(setOf(peer))))
+        assertTrue(AiViewCallerPolicy.isAllowed(10055, 10001, own, null, listOf("existing.own" to own)))
+        assertTrue(AiViewCallerPolicy.isAllowed(10055, 10001, own, null, listOf("existing.owner" to setOf(owner))))
+        assertTrue(AiViewCallerPolicy.isAllowed(10055, 10001, own, peer, listOf("configured.peer" to setOf(peer))))
 
         assertFalse(AiViewCallerPolicy.isAllowed(10055, 10001, own, peer, emptyList()))
-        assertFalse(AiViewCallerPolicy.isAllowed(10055, 10001, own, peer, listOf(setOf(evil))))
+        assertFalse(AiViewCallerPolicy.isAllowed(10055, 10001, own, peer, listOf("wrong.peer" to setOf(evil))))
         // Multi-signer package with an untrusted co-signer must be rejected
-        assertFalse(AiViewCallerPolicy.isAllowed(10055, 10001, own, peer, listOf(setOf(owner, evil))))
+        assertFalse(AiViewCallerPolicy.isAllowed(10055, 10001, own, peer, listOf("mixed.peer" to setOf(owner, evil))))
+    }
+
+    @Test fun officialWeaveloTrustRequiresExactPackageSignerAndExclusiveUid() {
+        val pkg = AiViewCallerPolicy.WEAVELO_PACKAGE
+        val cert = AiViewCallerPolicy.WEAVELO_CERT_SHA256
+        fun allowed(packages: List<Pair<String, Set<String>>>) =
+            AiViewCallerPolicy.isAllowed(10055, 10001, setOf(AiViewCallerPolicy.OWNER_CERT_SHA256), null, packages)
+        assertTrue(allowed(listOf(pkg to setOf(cert))))
+        assertFalse(allowed(listOf("other.package" to setOf(cert))))
+        assertFalse(allowed(listOf(pkg to setOf("0".repeat(64)))))
+        assertFalse(allowed(listOf(pkg to setOf(AiViewCallerPolicy.OWNER_CERT_SHA256))))
+        assertFalse(allowed(listOf(pkg to setOf(cert, "0".repeat(64)))))
+        assertFalse(allowed(listOf(pkg to setOf(cert), "shared.uid.other" to setOf(cert))))
+        assertFalse(allowed(emptyList()))
     }
 
     @Test fun providerBridgeContractSupportsDescribeAttachInputReleaseAndNonDestructiveDetach() {
