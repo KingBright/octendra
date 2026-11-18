@@ -1411,6 +1411,8 @@ mod tests {
                 plane_lengths: vec![131072, 65536],
                 plane_sha256: vec![hash(&data[..131072]), hash(&data[131072..])],
             },
+            elements: vec![],
+            takeover_state: None,
         };
         sqlx::query("INSERT INTO jobs(id,device,idem,fingerprint,request,result,state,updated) VALUES(?,?,?,?,?,?,'done',?)")
             .bind(&observe.id).bind(&observe.device_id).bind(&observe.id).bind(hash(serde_json::to_vec(&observe).unwrap()))

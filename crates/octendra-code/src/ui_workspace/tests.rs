@@ -167,6 +167,70 @@ async fn ui_job_recovery_and_input_keep_original_context_without_remapping() {
 }
 
 #[tokio::test]
+async fn ui_observe_query_routes_to_saved_observation_context_without_remapping() {
+    let (_dir, gateway, principal) = fixture().await;
+    let host_obs = uuid::Uuid::new_v4().to_string();
+    let host_id = gateway.config.devices[0].id.clone();
+    let host_ctx = ExecutionContext {
+        id: format!("host:{host_id}"),
+        name: "Studio".into(),
+        host_device_id: host_id.clone(),
+        execution_device_id: host_id.clone(),
+        isolation: Isolation::HostSession,
+    };
+    gateway
+        .store
+        .put(
+            "ui_observation_route",
+            &observation_key(&principal.owner, &host_obs),
+            &host_ctx,
+            i64::MAX,
+        )
+        .await
+        .unwrap();
+
+    // Passing observation_id + query to ui_observe must resolve to the original HostSession
+    // without defaulting to FullVm or remapping to the guest device.
+    let mut query_args = json!({
+        "device": "Studio",
+        "observation_id": host_obs,
+        "query": {"role": "button", "interactive_only": true}
+    });
+    let resolved = resolve(&gateway, &principal, "ui_observe", &mut query_args)
+        .await
+        .unwrap();
+    assert_eq!(resolved.isolation, Isolation::HostSession);
+    assert_eq!(query_args["device"], host_id);
+
+    let mut wrong_context = json!({
+        "device": "Studio",
+        "context": "isolated",
+        "observation_id": host_obs,
+        "query": {"text": "Save"}
+    });
+    assert!(
+        resolve(&gateway, &principal, "ui_observe", &mut wrong_context)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("ui_observation_context_mismatch")
+    );
+
+    let mut wrong_device = json!({
+        "device": "Other guest",
+        "observation_id": host_obs,
+        "query": {"text": "Save"}
+    });
+    assert!(
+        resolve(&gateway, &principal, "ui_observe", &mut wrong_device)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("ui_observation_device_mismatch")
+    );
+}
+
+#[tokio::test]
 async fn full_vm_registration_rejects_self_aliases_and_missing_guests() {
     let (_dir, gateway, _principal) = fixture().await;
     let mut config = (*gateway.config).clone();

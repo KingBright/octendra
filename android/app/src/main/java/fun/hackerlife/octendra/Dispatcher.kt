@@ -6,12 +6,41 @@ import org.json.JSONObject
 import java.io.File
 import java.util.UUID
 
+internal object WorkspaceResolution {
+    fun canonicalDefaultId(deviceId: String, root: File, rawWorkspaceId: String): String? {
+        val canonicalRoot = root.canonicalFile
+        return when {
+            rawWorkspaceId == "default" || rawWorkspaceId == ":default" || rawWorkspaceId == "$deviceId:default" ->
+                "$deviceId:default"
+            rawWorkspaceId == "$deviceId:${canonicalRoot.path}" || rawWorkspaceId == "$deviceId:${root.path}" ->
+                "$deviceId:${canonicalRoot.path}"
+            rawWorkspaceId.startsWith("$deviceId:/") -> {
+                val candidatePath = rawWorkspaceId.removePrefix("$deviceId:")
+                if (runCatching { File(candidatePath).canonicalFile == canonicalRoot }.getOrDefault(false)) {
+                    "$deviceId:${canonicalRoot.path}"
+                } else null
+            }
+            else -> null
+        }
+    }
+}
+
 class Dispatcher(private val context: Context, private val config: GatewayConfig, private val journal: Journal, private val transport: Transport) {
     private val root = exposedRoot(context, config)
     private val files = FileTools(context, transport)
     private val packages = PackageActions(context)
     private val ui = UiController(context, config)
     fun close() { ui.close() }
+
+    private fun resolveWorkspace(rawWs: String, owner: String): String {
+        val canonicalDefault = WorkspaceResolution.canonicalDefaultId(config.deviceId, root, rawWs)
+        if (canonicalDefault != null) {
+            return journal.ensureDefaultWorkspace(canonicalDefault, owner, root)
+        }
+        demand(journal.workspace(rawWs, owner).canonicalFile == root, "workspace_root_changed")
+        return rawWs
+    }
+
     fun perform(job: JSONObject): JSONObject {
         demand(AgentRuntime.running && controls(context).getBoolean("remote_enabled", false), "stopped_locally")
         demand(job.getString("device_id") == config.deviceId, "wrong_device")
@@ -21,12 +50,16 @@ class Dispatcher(private val context: Context, private val config: GatewayConfig
             demand(args.getString("device_id") == config.deviceId && File(args.getString("root")).canonicalFile == root, "root_not_authorized")
             val ws = config.deviceId + ":" + UUID.randomUUID()
             journal.putWorkspace(ws, owner, root)
-            return obj("workspace" to obj("id" to ws, "device_id" to config.deviceId, "root" to root.path), "allow_write" to true,
-                "allow_exec" to true, "agent_version" to BuildConfig.VERSION_NAME, "file_transfer" to true,
-                "terminal_authority" to "Android command dispatcher; android help lists commands; shell requires explicit local activation")
+            return obj(
+                "workspace" to obj("id" to ws, "device_id" to config.deviceId, "root" to root.path),
+                "allow_write" to true,
+                "allow_exec" to true,
+                "agent_version" to BuildConfig.VERSION_NAME,
+                "file_transfer" to true,
+                "terminal_authority" to "Android command dispatcher; android help lists commands; shell requires explicit local activation"
+            )
         }
-        val ws = args.getString("workspace_id")
-        demand(journal.workspace(ws, owner).canonicalFile == root, "workspace_root_changed")
+        val ws = resolveWorkspace(args.getString("workspace_id"), owner)
         return when (tool) {
             "terminal_exec" -> terminal(job, args, ws, owner, id)
             "terminal_read" -> {
@@ -42,16 +75,31 @@ class Dispatcher(private val context: Context, private val config: GatewayConfig
                 val saved = journal.terminal(args.getString("terminal_id"), ws, owner)
                 obj("state" to "already_exited", "terminal_id" to saved.getString("terminal_id"), "cancelled" to false)
             }
-            "workspace_context" -> obj("workspace" to obj("id" to ws, "root" to root.path), "runtime" to status(), "journal" to journal.counts(),
-                "supported_tools" to arr(listOf("workspace_open", "workspace_context", "terminal_exec", "terminal_read", "terminal_cancel", "code_list", "code_read", "file_upload", "file_download")),
-                "workspace_gc_supported" to false, "help" to "terminal_exec command: android help")
+            "workspace_context" -> obj(
+                "workspace" to obj("id" to ws, "root" to root.path),
+                "runtime" to status(),
+                "journal" to journal.counts(),
+                "supported_tools" to arr(
+                    listOf(
+                        "workspace_open", "workspace_context",
+                        "terminal_exec", "terminal_read", "terminal_cancel",
+                        "code_list", "code_read", "code_apply_edits",
+                        "file_upload", "file_download", "file_delete"
+                    )
+                ),
+                "workspace_gc_supported" to false,
+                "help" to "terminal_exec command: android help"
+            )
             "file_upload" -> files.upload(root, args, id)
             "file_download" -> files.download(root, args, id)
+            "file_delete" -> files.delete(root, args)
             "code_list" -> files.list(root, args)
             "code_read" -> files.read(root, args)
-            else -> throw AgentError("unsupported_android_tool", "Use terminal_exec with android help. This APK does not advertise desktop code-editing or resumable-transfer features.")
+            "code_apply_edits" -> files.applyEdits(root, args, id)
+            else -> throw AgentError("unsupported_android_tool", "Use terminal_exec with android help.")
         }
     }
+
     private fun terminal(job: JSONObject, args: JSONObject, ws: String, owner: String, id: String): JSONObject {
         demand(!args.optBoolean("pty", false), "android_pty_not_supported")
         val created = now()
@@ -60,19 +108,26 @@ class Dispatcher(private val context: Context, private val config: GatewayConfig
         demand(output.toByteArray().size <= Policy.MAX_OUTPUT, "terminal_output_budget_exceeded")
         val unknown = value.optString("state").contains("unknown") || value.optString("error").contains("unknown")
         val exit: Int? = if (unknown) null else if (value.has("error")) 1 else value.optInt("exit_code", 0)
-        val terminal = obj("id" to id, "workspace_id" to ws, "state" to if (unknown) "runtime_lost" else "exited", "exit_code" to exit,
+        val terminal = obj(
+            "id" to id, "workspace_id" to ws, "state" to if (unknown) "runtime_lost" else "exited", "exit_code" to exit,
             "output_truncated" to false, "created_at" to created, "updated_at" to now(), "process_id" to null,
-            "working_directory" to root.path, "pty" to false, "log_format" to 1, "output_complete" to true)
-        val result = obj("terminal_id" to id, "state" to terminal.getString("state"), "terminal" to terminal, "output" to output,
+            "working_directory" to root.path, "pty" to false, "log_format" to 1, "output_complete" to true
+        )
+        val result = obj(
+            "terminal_id" to id, "state" to terminal.getString("state"), "terminal" to terminal, "output" to output,
             "output_stream" to "combined", "output_view" to "full", "cursor" to output.toByteArray().size, "raw_cursor_start" to 0,
-            "cursor_format" to "sanitized_utf8_v1", "has_more" to false, "pty" to false, "next_action" to null)
+            "cursor_format" to "sanitized_utf8_v1", "has_more" to false, "pty" to false, "next_action" to null
+        )
         if (unknown) result.put("error", "outcome_unknown").put("automatic_replay", false)
         journal.saveTerminal(id, ws, owner, result)
         return result
     }
+
     private fun screen(): AccessService = AccessService.instance ?: throw AgentError("accessibility_permission_required", "在手机上启用 Octendra 无障碍服务后重试。")
     private fun bridge(): ShellBridge = AgentRuntime.bridge?.takeIf { it.connected() } ?: throw AgentError("shell_activation_required")
-    fun status(): JSONObject = obj("platform" to "android", "android_sdk" to Build.VERSION.SDK_INT, "android_version" to Build.VERSION.RELEASE,
+
+    fun status(): JSONObject = obj(
+        "platform" to "android", "android_sdk" to Build.VERSION.SDK_INT, "android_version" to Build.VERSION.RELEASE,
         "manufacturer" to Build.MANUFACTURER, "model" to Build.MODEL, "agent_version" to BuildConfig.VERSION_NAME,
         "remote_enabled" to controls(context).getBoolean("remote_enabled", false), "accessibility" to (AccessService.instance != null),
         "start_at_boot" to controls(context).getBoolean("start_at_boot", false),
@@ -82,24 +137,30 @@ class Dispatcher(private val context: Context, private val config: GatewayConfig
         "wireless_adb" to AgentRuntime.wirelessAdb?.status(),
         "background_ui_ready" to (AgentRuntime.bridge?.ui() != null),
         "permissions_are_independent" to true, "transfer_resume" to false, "continuous_recording" to false,
-        "connection_diagnostics" to AgentRuntime.connectionDiagnostics?.let { JSONObject(it.snapshot()) })
+        "connection_diagnostics" to AgentRuntime.connectionDiagnostics?.let { JSONObject(it.snapshot()) }
+    )
+
     private fun command(text: String, id: String): JSONObject {
         demand(text.length <= 65536 && text.startsWith("android "), "android_command_required", "Use android help; arbitrary desktop shell text is not executed on the phone.")
         val command = text.removePrefix("android ").trim()
         val space = command.indexOf(' '); val name = if (space < 0) command else command.substring(0, space)
         val args = if (space < 0) obj() else JSONObject(command.substring(space + 1).trim())
         return when (name) {
-            "help" -> obj("protocol" to 1, "syntax" to "android VERB {JSON arguments}", "commands" to obj(
-                "status" to "Local capability and permission states", "reconnect" to "Rebuild this agent's network connections; never replays an operation",
-                "adb_pairing" to "Discover this phone's wireless pairing port and show a local code-entry notification; pairing codes must stay in the phone UI",
-                "adb_reconnect" to "Reconnect this phone's already paired wireless ADB and activate the shell helper",
-                "observe" to "Read visible UI tree; returns observation_id + node IDs (30s lifetime)",
-                "click / long_click" to "{observation_id,node_id}", "text" to "{observation_id,node_id,text}", "scroll" to "{observation_id,node_id,direction:forward|backward}",
-                "tap" to "{observation_id,x,y,duration_ms?}", "swipe" to "{observation_id,x,y,to_x,to_y,duration_ms?}",
-                "screenshot" to "PNG in shared workspace; use file_download(path) afterwards", "back / home / recents / notifications / quick_settings / lock" to "No arguments",
-                "apps" to "{offset?:0,limit?:80}", "launch" to "{package}", "install" to "{path,sha256?}; shell bridge or local notification confirmation",
-                "shell" to "{command,timeout_seconds?:30}; requires locally activated ADB/shell bridge", "pull" to "{source:absolute_shell_readable_path,path:shared_relative_destination}; requires shell bridge"),
-                "safety" to "Actions are not replayed after uncertain interruption. Re-observe to verify. System security boundaries remain enforced.")
+            "help" -> obj(
+                "protocol" to 1, "syntax" to "android VERB {JSON arguments}", "commands" to obj(
+                    "status" to "Local capability and permission states", "reconnect" to "Rebuild this agent's network connections; never replays an operation",
+                    "adb_pairing" to "Discover this phone's wireless pairing port and show a local code-entry notification; pairing codes must stay in the phone UI",
+                    "adb_reconnect" to "Reconnect this phone's already paired wireless ADB and activate the shell helper",
+                    "observe" to "Read visible UI tree; returns observation_id + node IDs (30s lifetime)",
+                    "click / long_click" to "{observation_id,node_id}", "text" to "{observation_id,node_id,text}", "scroll" to "{observation_id,node_id,direction:forward|backward}",
+                    "tap" to "{observation_id,x,y,duration_ms?}", "swipe" to "{observation_id,x,y,to_x,to_y,duration_ms?}",
+                    "screenshot" to "PNG in shared workspace; use file_download(path) afterwards", "back / home / recents / notifications / quick_settings / lock" to "No arguments",
+                    "apps" to "{offset?:0,limit?:80}", "launch" to "{package}", "install" to "{path,sha256?}; shell bridge or local notification confirmation",
+                    "rm" to "{path,expected_version?}; delete a file inside the shared workspace",
+                    "shell" to "{command,timeout_seconds?:30}; requires locally activated ADB/shell bridge", "pull" to "{source:absolute_shell_readable_path,path:shared_relative_destination}; requires shell bridge"
+                ),
+                "safety" to "Actions are not replayed after uncertain interruption. Re-observe to verify. System security boundaries remain enforced."
+            )
             "status" -> status()
             "reconnect" -> obj("network_generation" to (AgentRuntime.reconnectNetwork?.invoke() ?: throw AgentError("transport_stopped")), "automatic_replay" to false)
             "adb_pairing" -> (AgentRuntime.wirelessAdb ?: throw AgentError("transport_stopped")).let { it.requestPairing(); it.status() }
@@ -116,6 +177,7 @@ class Dispatcher(private val context: Context, private val config: GatewayConfig
             "apps" -> packages.apps(args)
             "launch" -> packages.launch(args)
             "install" -> packages.install(root, args)
+            "rm" -> files.delete(root, args)
             "shell" -> bridge().execute(obj("op" to "shell", "command" to args.getString("command"), "timeout_seconds" to args.optInt("timeout_seconds", 30)))
             "pull" -> {
                 val file = Policy.within(root, args.getString("path")); demand(!file.exists(), "destination_exists")

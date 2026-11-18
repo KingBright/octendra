@@ -404,6 +404,25 @@ struct Session {
     buttons: BTreeSet<Button>,
     source: CGEventSource,
     pointer: CGPoint,
+    last_click: Option<(Button, CGPoint, Instant, i64)>,
+}
+fn next_click_state(
+    previous: Option<(Button, CGPoint, Instant, i64)>,
+    button: Button,
+    pointer: CGPoint,
+    now: Instant,
+) -> i64 {
+    if let Some((prev_button, prev_pt, prev_at, prev_count)) = previous
+        && prev_button == button
+        && now.saturating_duration_since(prev_at) <= Duration::from_millis(450)
+    {
+        let dx = pointer.x - prev_pt.x;
+        let dy = pointer.y - prev_pt.y;
+        if dx * dx + dy * dy <= 16.0 {
+            return (prev_count + 1).clamp(1, 3);
+        }
+    }
+    1
 }
 fn request_wait_budget(
     deadline: Instant,
@@ -446,6 +465,11 @@ pub(super) fn mac_key(usage: u16) -> Option<u16> {
         54 => Some(43),
         55 => Some(47),
         56 => Some(44),
+        74 => Some(115),
+        75 => Some(116),
+        76 => Some(117),
+        77 => Some(119),
+        78 => Some(121),
         79 => Some(124),
         80 => Some(123),
         81 => Some(125),
@@ -581,6 +605,7 @@ struct PreparedInput {
     event: CGEvent,
     action: Action,
     pointer: CGPoint,
+    click_state: i64,
 }
 struct MacInput<'a> {
     session: &'a mut Session,
@@ -612,6 +637,7 @@ impl InputBackend for MacInput<'_> {
         let s = &self.session;
         let mut pointer = s.pointer;
         let mut flags = s.flags();
+        let mut click_state = 1i64;
         let event = match *action {
             Action::Unicode { ref text, key_down } => {
                 let event = CGEvent::new_keyboard_event(s.source.clone(), 0, key_down)
@@ -649,8 +675,23 @@ impl InputBackend for MacInput<'_> {
                 CGEvent::new_keyboard_event(s.source.clone(), code, down)
             }
             Action::ButtonDown { button } | Action::ButtonUp { button } => {
-                let (native, kind) = mouse(button, matches!(action, Action::ButtonDown { .. }));
-                CGEvent::new_mouse_event(s.source.clone(), kind, pointer, native)
+                let down = matches!(action, Action::ButtonDown { .. });
+                click_state = if down {
+                    next_click_state(s.last_click, button, pointer, Instant::now())
+                } else {
+                    s.last_click
+                        .filter(|(b, _, _, _)| *b == button)
+                        .map_or(1, |(_, _, _, count)| count)
+                };
+                let (native, kind) = mouse(button, down);
+                let ev = CGEvent::new_mouse_event(s.source.clone(), kind, pointer, native);
+                if let Ok(ref event) = ev {
+                    event.set_integer_value_field(
+                        core_graphics::event::EventField::MOUSE_EVENT_CLICK_STATE,
+                        click_state,
+                    );
+                }
+                ev
             }
             Action::Wheel {
                 horizontal,
@@ -676,6 +717,7 @@ impl InputBackend for MacInput<'_> {
             event,
             action: action.clone(),
             pointer,
+            click_state,
         })
     }
     fn post(&mut self, pending: PreparedInput) {
@@ -695,7 +737,12 @@ impl InputBackend for MacInput<'_> {
                     self.session.holds.released(Control::Key(4));
                 }
             }
-            Action::PointerMove { .. } => self.session.pointer = pending.pointer,
+            Action::PointerMove { .. } => {
+                self.session.pointer = pending.pointer;
+                if !self.session.buttons.is_empty() {
+                    self.session.last_click = None;
+                }
+            }
             Action::KeyDown { usage } => {
                 self.session.keys.insert(usage);
                 self.session.holds.posted(Control::Key(usage));
@@ -706,6 +753,8 @@ impl InputBackend for MacInput<'_> {
             }
             Action::ButtonDown { button } => {
                 self.session.buttons.insert(button);
+                self.session.last_click =
+                    Some((button, pending.pointer, Instant::now(), pending.click_state));
                 self.session.holds.posted(Control::Button(button as u8));
             }
             Action::ButtonUp { button } => {
@@ -767,18 +816,28 @@ impl Worker {
     async fn handle(
         &mut self,
         request: Request,
-    ) -> (std::result::Result<Response, ErrorCode>, Option<Pixels>) {
+    ) -> (
+        std::result::Result<Response, ErrorCode>,
+        Option<Pixels>,
+        Vec<ui::SemanticElement>,
+    ) {
         let result = self.perform(request).await;
         match result {
             Ok(v) => v,
-            Err(e) => (Err(e), None),
+            Err(e) => (Err(e), None, Vec::new()),
         }
     }
     async fn perform(
         &mut self,
         request: Request,
-    ) -> std::result::Result<(std::result::Result<Response, ErrorCode>, Option<Pixels>), ErrorCode>
-    {
+    ) -> std::result::Result<
+        (
+            std::result::Result<Response, ErrorCode>,
+            Option<Pixels>,
+            Vec<ui::SemanticElement>,
+        ),
+        ErrorCode,
+    > {
         if self.poisoned {
             return Err(ErrorCode::OutcomeUnknown);
         }
@@ -792,6 +851,7 @@ impl Worker {
                     },
                 }),
                 None,
+                Vec::new(),
             ));
         }
         if request.identity() != Some(&self.approval.identity) {
@@ -907,6 +967,7 @@ impl Worker {
                     buttons: BTreeSet::new(),
                     source,
                     pointer,
+                    last_click: None,
                 });
                 Ok((
                     Ok(Response::Opened {
@@ -914,6 +975,7 @@ impl Worker {
                         expires_at_ms: now_ms() + remaining,
                     }),
                     None,
+                    Vec::new(),
                 ))
             }
             Request::Observe { binding } => {
@@ -963,9 +1025,14 @@ impl Worker {
                         rotation: Rotation::R0,
                     },
                 };
+                let elements = s.lifetime.semantic_elements(
+                    self.approval.logical_position,
+                    self.approval.logical_size,
+                    pixels.metadata.size,
+                );
                 s.last = Some(frame.clone());
                 s.observed = Some(pixels.captured);
-                Ok((Ok(Response::Observed { frame }), Some(pixels)))
+                Ok((Ok(Response::Observed { frame }), Some(pixels), elements))
             }
             Request::Act {
                 frame,
@@ -1100,6 +1167,7 @@ impl Worker {
                         effect_confirmed: false,
                     }),
                     None,
+                    Vec::new(),
                 ))
             }
             Request::Close { binding } => {
@@ -1107,7 +1175,7 @@ impl Worker {
                     return Err(ErrorCode::IdentityMismatch);
                 }
                 self.close()?;
-                Ok((Ok(Response::Closed {}), None))
+                Ok((Ok(Response::Closed {}), None, Vec::new()))
             }
             Request::Capabilities {} => unreachable!(),
         }
@@ -1214,15 +1282,22 @@ pub async fn run(path: &Path) -> Result<()> {
                 )
                 .min(s.holds.budget(s.deadline, Instant::now()))
             });
-        let (result, pixels) = tokio::select! {biased;_=term.recv()=>break,_=tokio::signal::ctrl_c()=>break,
-        v=tokio::time::timeout(handling_budget,worker.handle(envelope.request))=>match v{Ok(v)=>v,Err(_)=>{worker.poisoned=true;(Err(ErrorCode::OutcomeUnknown),None)}}};
+        let (result, pixels, elements) = tokio::select! {biased;_=term.recv()=>break,_=tokio::signal::ctrl_c()=>break,
+        v=tokio::time::timeout(handling_budget,worker.handle(envelope.request))=>match v{Ok(v)=>v,Err(_)=>{worker.poisoned=true;(Err(ErrorCode::OutcomeUnknown),None,Vec::new())}}};
         let closing = worker.finish_reply(&result);
-        let reply = WorkerReply {
+        let mut reply = WorkerReply {
             request_id: envelope.request_id,
             result,
             pixels: pixels.as_ref().map(|p| p.metadata.clone()),
+            elements,
+            takeover_state: None,
         };
-        let header = serde_json::to_vec(&reply)?;
+        reply.bound_elements_for_header();
+        let mut header = serde_json::to_vec(&reply)?;
+        while header.len() > MAX_WORKER_HEADER && !reply.elements.is_empty() {
+            reply.elements.pop();
+            header = serde_json::to_vec(&reply)?;
+        }
         let send = async {
             write_all(&output, &(header.len() as u32).to_be_bytes()).await?;
             write_all(&output, &header).await?;
@@ -1387,9 +1462,10 @@ mod tests {
         assert!(!worker.spent);
         assert!(worker.finish_reply(&Err(ErrorCode::OutcomeUnknown)));
         assert!(worker.spent && worker.poisoned && worker.session.is_none());
-        let (reply, pixels) = worker.handle(Request::Capabilities {}).await;
+        let (reply, pixels, elements) = worker.handle(Request::Capabilities {}).await;
         assert!(matches!(reply, Err(ErrorCode::OutcomeUnknown)));
         assert!(pixels.is_none());
+        assert!(elements.is_empty());
         assert!(worker.finish_reply(&Err(ErrorCode::OutcomeUnknown)));
         assert!(worker.spent && worker.poisoned);
     }
@@ -1398,5 +1474,34 @@ mod tests {
         let count = 3840usize * 2160;
         assert!(count + count / 2 <= MAX_WORKER_PIXELS);
         const { assert!(3840usize * 2160 * 4 > MAX_WORKER_PIXELS) };
+    }
+    #[test]
+    fn consecutive_clicks_advance_cocoa_click_state_and_reset_on_move_or_delay() {
+        let t0 = Instant::now();
+        let pt = CGPoint::new(100.0, 200.0);
+        assert_eq!(next_click_state(None, Button::Left, pt, t0), 1);
+        let c1 = Some((Button::Left, pt, t0, 1));
+        assert_eq!(
+            next_click_state(c1, Button::Left, pt, t0 + Duration::from_millis(80)),
+            2
+        );
+        let c2 = Some((Button::Left, pt, t0 + Duration::from_millis(80), 2));
+        assert_eq!(
+            next_click_state(c2, Button::Left, pt, t0 + Duration::from_millis(160)),
+            3
+        );
+        assert_eq!(
+            next_click_state(
+                c1,
+                Button::Left,
+                CGPoint::new(110.0, 200.0),
+                t0 + Duration::from_millis(80)
+            ),
+            1
+        );
+        assert_eq!(
+            next_click_state(c1, Button::Left, pt, t0 + Duration::from_millis(500)),
+            1
+        );
     }
 }

@@ -111,11 +111,15 @@ async fn exchange(route: &Route, request: Value, maximum: usize) -> Result<(Valu
         s.read_exact(&mut body).await?;
         let body: Value = serde_json::from_slice(&body)?;
         if body["ok"] != true {
-            if let Some(code) = body["error"].as_str().filter(|code| {
-                !code.is_empty()
-                    && code.len() <= 96
-                    && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
-            }) {
+            if let Some(code) = body["error"]
+                .as_str()
+                .or_else(|| body["code"].as_str())
+                .filter(|code| {
+                    !code.is_empty()
+                        && code.len() <= 96
+                        && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+                })
+            {
                 bail!("{code}");
             }
             bail!("GUI request unavailable");
@@ -199,7 +203,7 @@ fn load(path: &Path) -> Result<super::transport::WorkerApproval> {
     route.validate(owner)?;
     ensure!(
         a.enabled
-            && (!a.allow_input || route.input_platform == Some(InputPlatform::Macos))
+            && (!a.allow_input || route.input_platform.is_some())
             && a.app_id == "fun.hackerlife.octendra.desktop-worker"
             && a.capability_version.is_some_and(|v| v > 0)
             && a.desktop_uid == owner
@@ -266,6 +270,69 @@ struct Session {
     last_sequence: u64,
     last_frame: Option<FrameRef>,
     consumed: bool,
+    paused_by_human: bool,
+}
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct WorkerOutcome {
+    result: std::result::Result<Response, ErrorCode>,
+    pixels: Option<RawPixels>,
+    raw: Vec<u8>,
+    takeover_state: Option<String>,
+}
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct PausedByHuman;
+#[cfg(target_os = "macos")]
+impl std::fmt::Display for PausedByHuman {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("paused_by_human")
+    }
+}
+#[cfg(target_os = "macos")]
+impl std::error::Error for PausedByHuman {}
+
+#[cfg(target_os = "macos")]
+fn value_is_paused_by_human(value: &Value) -> bool {
+    value["computer_use_mode"].as_str() == Some("paused_by_human")
+        || value["takeover_state"].as_str() == Some("paused_by_human")
+        || value["mode"].as_str() == Some("paused_by_human")
+}
+#[cfg(target_os = "macos")]
+fn session_list_paused(sessions: &Value, route: &Route) -> bool {
+    let Some(items) = sessions.as_array() else {
+        return false;
+    };
+    items.iter().any(|s| {
+        s["computer_use_mode"].as_str() == Some("paused_by_human")
+            && (s["connection_id"].as_u64() == Some(u64::from(route.target.connection_id))
+                || s["device_id"].as_str() == Some(route.target.peer_device_id.as_str()))
+    })
+}
+#[cfg(target_os = "macos")]
+fn status_reports_paused_by_human(status: &Value, route: &Route) -> bool {
+    if value_is_paused_by_human(status)
+        || value_is_paused_by_human(&status["computer_use"])
+        || value_is_paused_by_human(&status["sessions"])
+        || session_list_paused(&status["sessions"]["sessions"], route)
+        || session_list_paused(&status["sessions"], route)
+    {
+        return true;
+    }
+    if let Some(viewers) = status["viewers"].as_array() {
+        for viewer in viewers {
+            if value_is_paused_by_human(&viewer["sessions"])
+                || session_list_paused(&viewer["sessions"]["sessions"], route)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+#[cfg(target_os = "macos")]
+fn is_paused_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<PausedByHuman>().is_some() || err.to_string() == "paused_by_human"
 }
 #[cfg(target_os = "macos")]
 pub async fn run(path: &Path) -> Result<()> {
@@ -287,38 +354,48 @@ pub async fn run(path: &Path) -> Result<()> {
         let request: WorkerRequest = serde_json::from_slice(&bytes)?;
         let close = matches!(&request.request, Request::Close { .. });
         let is_act = matches!(&request.request, Request::Act { .. });
-        let response = handle(
+        let outcome = match handle_outcome(
             &a,
             route,
             &mut session,
             request.request_id,
             &request.request,
         )
-        .await;
-        let (result, pixels, raw) = match response {
-            Ok((r, p, b)) => (Ok(r), p, b),
+        .await
+        {
+            Ok(outcome) => outcome,
             // Once an input RPC may have been sent, failures are never reported
             // as proof of no effect. Agent lifecycle/journal forbids automatic replay.
-            Err(_) => (
-                Err(if is_act {
+            Err(err) if is_paused_error(&err) => WorkerOutcome {
+                result: Err(ErrorCode::Unavailable),
+                pixels: None,
+                raw: Vec::new(),
+                takeover_state: Some("paused_by_human".into()),
+            },
+            Err(_) => WorkerOutcome {
+                result: Err(if is_act {
                     ErrorCode::OutcomeUnknown
                 } else {
                     ErrorCode::Unavailable
                 }),
-                None,
-                Vec::new(),
-            ),
+                pixels: None,
+                raw: Vec::new(),
+                takeover_state: None,
+            },
         };
-        let reply = WorkerReply {
+        let mut reply = WorkerReply {
             request_id: request.request_id,
-            result,
-            pixels,
+            result: outcome.result,
+            pixels: outcome.pixels,
+            elements: Vec::new(),
+            takeover_state: outcome.takeover_state,
         };
+        reply.bound_elements_for_header();
         let header = serde_json::to_vec(&reply)?;
         ensure!(header.len() <= MAX_WORKER_HEADER, "worker reply bound");
         output.write_u32(header.len() as u32).await?;
         output.write_all(&header).await?;
-        output.write_all(&raw).await?;
+        output.write_all(&outcome.raw).await?;
         output.flush().await?;
         if close {
             break;
@@ -327,6 +404,7 @@ pub async fn run(path: &Path) -> Result<()> {
     Ok(())
 }
 #[cfg(target_os = "macos")]
+#[cfg_attr(not(test), allow(dead_code))]
 async fn handle(
     a: &super::transport::WorkerApproval,
     route: &Route,
@@ -334,6 +412,20 @@ async fn handle(
     operation: uuid::Uuid,
     request: &Request,
 ) -> Result<(Response, Option<RawPixels>, Vec<u8>)> {
+    let outcome = handle_outcome(a, route, session, operation, request).await?;
+    let response = outcome
+        .result
+        .map_err(|e| anyhow::anyhow!("worker error: {e:?}"))?;
+    Ok((response, outcome.pixels, outcome.raw))
+}
+#[cfg(target_os = "macos")]
+async fn handle_outcome(
+    a: &super::transport::WorkerApproval,
+    route: &Route,
+    session: &mut Option<Session>,
+    operation: uuid::Uuid,
+    request: &Request,
+) -> Result<WorkerOutcome> {
     let closing = matches!(request, Request::Close { .. });
     ensure!(
         !operation.is_nil()
@@ -378,15 +470,17 @@ async fn handle(
                 last_sequence: 0,
                 last_frame: None,
                 consumed: false,
+                paused_by_human: false,
             });
-            Ok((
-                Response::Opened {
+            Ok(WorkerOutcome {
+                result: Ok(Response::Opened {
                     binding,
                     expires_at_ms,
-                },
-                None,
-                vec![],
-            ))
+                }),
+                pixels: None,
+                raw: vec![],
+                takeover_state: None,
+            })
         }
         Request::Observe { binding } | Request::Close { binding } => {
             let current = session.as_mut().context("observer closed")?;
@@ -405,7 +499,12 @@ async fn handle(
             let (body,bytes)=exchange(route,envelope(route,operation,json!({"operation":if close {"close"} else {"observe"},"actor":actor,"lease_id":binding.epoch})),a.max_frame_bytes).await?;
             if close {
                 *session = None;
-                return Ok((Response::Closed {}, None, vec![]));
+                return Ok(WorkerOutcome {
+                    result: Ok(Response::Closed {}),
+                    pixels: None,
+                    raw: vec![],
+                    takeover_state: None,
+                });
             }
             ensure!(
                 Instant::now() < current.expires && now() < current.expires_at_ms,
@@ -427,6 +526,17 @@ async fn handle(
             current.last_sequence = sequence;
             let encoding = body["encoding"].as_str().context("RGBA encoding")?;
             rgba_layout(size, encoding, bytes.len(), a.max_frame_bytes)?;
+            let mut paused = value_is_paused_by_human(&body);
+            if !paused {
+                match exchange(route, json!("Status"), 0).await {
+                    Ok((status, _)) => {
+                        paused = status_reports_paused_by_human(&status, route);
+                    }
+                    Err(err) if err.to_string() == "paused_by_human" => paused = true,
+                    Err(_) => {}
+                }
+            }
+            current.paused_by_human = paused;
             let pixels = RawPixels {
                 encoding: encoding.into(),
                 size,
@@ -452,7 +562,12 @@ async fn handle(
                 },
             };
             current.last_frame = Some(frame.clone());
-            Ok((Response::Observed { frame }, Some(pixels), bytes))
+            Ok(WorkerOutcome {
+                result: Ok(Response::Observed { frame }),
+                pixels: Some(pixels),
+                raw: bytes,
+                takeover_state: paused.then(|| "paused_by_human".to_string()),
+            })
         }
         Request::Act {
             frame,
@@ -460,7 +575,7 @@ async fn handle(
             actions,
         } => {
             ensure!(
-                a.allow_input && route.input_platform == Some(InputPlatform::Macos),
+                a.allow_input && route.input_platform.is_some(),
                 "remote input not approved"
             );
             let current = session.as_mut().context("observer closed")?;
@@ -473,34 +588,89 @@ async fn handle(
                     && now() < current.expires_at_ms,
                 "gesture frame/binding/sequence/expiry"
             );
-            let action = atomic_input(frame, actions)?;
+            let call_payload = weavelo_call(frame, actions, actor, frame.binding.epoch)?;
+            if current.paused_by_human {
+                current.consumed = true;
+                current.last_frame.take();
+                return Err(PausedByHuman.into());
+            }
+            match exchange(route, json!("Status"), 0).await {
+                Ok((status, _)) if status_reports_paused_by_human(&status, route) => {
+                    current.paused_by_human = true;
+                    current.consumed = true;
+                    current.last_frame.take();
+                    return Err(PausedByHuman.into());
+                }
+                Err(err) if err.to_string() == "paused_by_human" => {
+                    current.paused_by_human = true;
+                    current.consumed = true;
+                    current.last_frame.take();
+                    return Err(PausedByHuman.into());
+                }
+                _ => {}
+            }
             current.consumed = true;
             current.last_frame.take();
-            let (body, _) = exchange(route, envelope(route, operation, json!({
-                "operation":"act", "actor":actor, "lease_id":frame.binding.epoch,
-                "source_revision":frame.source_revision, "frame_sequence":frame.frame_sequence, "action":action,
-            })), 0).await?;
+            let (body, _) = exchange(route, envelope(route, operation, call_payload), 0).await?;
             ensure!(
                 body["effect_confirmed"] == false,
                 "input acknowledgement mismatch"
             );
-            Ok((
-                Response::Accepted {
+            Ok(WorkerOutcome {
+                result: Ok(Response::Accepted {
                     sequence: *sequence,
                     accepted_actions: actions.len(),
                     effect_confirmed: false,
-                },
-                None,
-                vec![],
-            ))
+                }),
+                pixels: None,
+                raw: vec![],
+                takeover_state: None,
+            })
         }
         _ => anyhow::bail!("unsupported Weavelo request"),
     }
 }
-/// One complete gesture per observed receipt/lease. No held keys, dragging,
-/// modifiers or arbitrary batch can cross the owner-local bounded action API.
 #[cfg(target_os = "macos")]
-fn atomic_input(frame: &FrameRef, actions: &[Action]) -> Result<Value> {
+fn weavelo_button(button: Button) -> u8 {
+    match button {
+        Button::Left => 0,
+        Button::Right => 1,
+        Button::Middle => 2,
+    }
+}
+#[cfg(target_os = "macos")]
+fn weavelo_modifier_bit(usage: u16) -> Option<u8> {
+    match usage {
+        225 | 229 => Some(1 << 0), // SHIFT
+        224 | 228 => Some(1 << 1), // CONTROL
+        226 | 230 => Some(1 << 2), // ALT
+        227 | 231 => Some(1 << 3), // META
+        _ => None,
+    }
+}
+#[cfg(target_os = "macos")]
+fn utf8_chunks(text: &str, max_bytes: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut cur = String::new();
+    for ch in text.chars() {
+        if cur.len() + ch.len_utf8() > max_bytes && !cur.is_empty() {
+            chunks.push(std::mem::take(&mut cur));
+        }
+        cur.push(ch);
+    }
+    if !cur.is_empty() {
+        chunks.push(cur);
+    }
+    chunks
+}
+/// Parses bounded Octendra UI desktop actions into one or more complete Weavelo
+/// owner-local actions (no held keys/buttons left open across the lease).
+#[cfg(target_os = "macos")]
+fn parse_weavelo_steps(frame: &FrameRef, actions: &[Action]) -> Result<Vec<Value>> {
+    ensure!(
+        !actions.is_empty() && actions.len() <= MAX_ACTIONS,
+        "one complete bounded gesture required"
+    );
     let point = |x, y| -> Result<(u16, u16)> {
         let p = frame
             .mapping
@@ -518,38 +688,195 @@ fn atomic_input(frame: &FrameRef, actions: &[Action]) -> Result<Value> {
             axis(p.y, frame.mapping.logical_size[1]),
         ))
     };
-    match actions {
-        [
-            Action::PointerMove { x, y },
-            Action::ButtonDown { button },
-            Action::ButtonUp { button: up },
-        ] if button == up => {
-            let (x, y) = point(*x, *y)?;
-            let button = match button {
-                Button::Left => 0,
-                Button::Right => 1,
-                Button::Middle => 2,
-            };
-            Ok(json!({"kind":"click","x":x,"y":y,"button":button}))
+    let mut steps = Vec::new();
+    let mut i = 0;
+    while i < actions.len() {
+        match &actions[i..] {
+            [
+                Action::PointerMove { x, y },
+                Action::ButtonDown { button: b1 },
+                Action::ButtonUp { button: b2 },
+                Action::ButtonDown { button: b3 },
+                Action::ButtonUp { button: b4 },
+                Action::ButtonDown { button: b5 },
+                Action::ButtonUp { button: b6 },
+                ..,
+            ] if b1 == b2 && b2 == b3 && b3 == b4 && b4 == b5 && b5 == b6 => {
+                let (x, y) = point(*x, *y)?;
+                steps.push(json!({
+                    "kind": "triple_click",
+                    "x": x,
+                    "y": y,
+                    "button": weavelo_button(*b1),
+                }));
+                i += 7;
+            }
+            [
+                Action::PointerMove { x, y },
+                Action::ButtonDown { button: b1 },
+                Action::ButtonUp { button: b2 },
+                Action::ButtonDown { button: b3 },
+                Action::ButtonUp { button: b4 },
+                ..,
+            ] if b1 == b2 && b2 == b3 && b3 == b4 => {
+                let (x, y) = point(*x, *y)?;
+                steps.push(json!({
+                    "kind": "double_click",
+                    "x": x,
+                    "y": y,
+                    "button": weavelo_button(*b1),
+                }));
+                i += 5;
+            }
+            [
+                Action::PointerMove { x: fx, y: fy },
+                Action::ButtonDown {
+                    button: Button::Left,
+                },
+                Action::PointerMove { x: tx, y: ty },
+                Action::ButtonUp {
+                    button: Button::Left,
+                },
+                ..,
+            ] => {
+                let (from_x, from_y) = point(*fx, *fy)?;
+                let (to_x, to_y) = point(*tx, *ty)?;
+                steps.push(
+                    json!({"kind":"drag","from_x":from_x,"from_y":from_y,"to_x":to_x,"to_y":to_y}),
+                );
+                i += 4;
+            }
+            [
+                Action::PointerMove { x, y },
+                Action::ButtonDown { button },
+                Action::ButtonUp { button: up },
+                ..,
+            ] if button == up => {
+                let (x, y) = point(*x, *y)?;
+                steps.push(json!({"kind":"click","x":x,"y":y,"button":weavelo_button(*button)}));
+                i += 3;
+            }
+            [
+                Action::PointerMove { x, y },
+                Action::Wheel {
+                    horizontal,
+                    vertical,
+                },
+                ..,
+            ] if i32::from(*horizontal).unsigned_abs() <= 1200
+                && i32::from(*vertical).unsigned_abs() <= 1200 =>
+            {
+                let (x, y) = point(*x, *y)?;
+                steps.push(
+                    json!({"kind":"scroll","x":x,"y":y,"delta_x":horizontal,"delta_y":vertical}),
+                );
+                i += 2;
+            }
+            [
+                Action::Unicode {
+                    text,
+                    key_down: true,
+                },
+                Action::Unicode {
+                    text: release,
+                    key_down: false,
+                },
+                ..,
+            ] if !text.is_empty() && text.len() <= 8192 && release.is_empty() => {
+                for chunk in utf8_chunks(text, 1024) {
+                    steps.push(json!({"kind":"commit_text","text":chunk}));
+                }
+                i += 2;
+            }
+            [Action::KeyDown { usage }, Action::KeyUp { usage: up }, ..]
+                if usage == up && *usage < 224 =>
+            {
+                let key = super::macos_worker::mac_key(*usage).context("unsupported HID key")?;
+                steps.push(json!({"kind":"key_press","key_code":key}));
+                i += 2;
+            }
+            rest => {
+                // Balanced modifier chord: KeyDown(mod1..modK), KeyDown(key), KeyUp(key), KeyUp(modK..mod1).
+                let mut mods = Vec::new();
+                let mut mask = 0u8;
+                let mut k = 0;
+                while k < rest.len() {
+                    if let Action::KeyDown { usage } = rest[k]
+                        && let Some(bit) = weavelo_modifier_bit(usage)
+                    {
+                        ensure!(!mods.contains(&usage), "duplicate modifier");
+                        mods.push(usage);
+                        mask |= bit;
+                        k += 1;
+                    } else {
+                        break;
+                    }
+                }
+                ensure!(
+                    !mods.is_empty() && rest.len() >= k * 2 + 2,
+                    "one complete bounded gesture required"
+                );
+                let (Action::KeyDown { usage }, Action::KeyUp { usage: up }) =
+                    (&rest[k], &rest[k + 1])
+                else {
+                    anyhow::bail!("one complete bounded gesture required");
+                };
+                ensure!(
+                    usage == up && *usage < 224,
+                    "one complete bounded gesture required"
+                );
+                for (offset, expected) in mods.iter().rev().enumerate() {
+                    ensure!(
+                        rest[k + 2 + offset] == Action::KeyUp { usage: *expected },
+                        "unbalanced modifier chord"
+                    );
+                }
+                let key = super::macos_worker::mac_key(*usage).context("unsupported HID key")?;
+                steps.push(json!({"kind":"key_combo","key_code":key,"modifiers":mask}));
+                i += k * 2 + 2;
+            }
         }
-        [Action::KeyDown { usage }, Action::KeyUp { usage: up }] if usage == up && *usage < 224 => {
-            let key = super::macos_worker::mac_key(*usage).context("unsupported HID key")?;
-            Ok(json!({"kind":"key_press","key_code":key}))
-        }
-        [
-            Action::PointerMove { x, y },
-            Action::Wheel {
-                horizontal,
-                vertical,
-            },
-        ] if i32::from(*horizontal).unsigned_abs() <= 1200
-            && i32::from(*vertical).unsigned_abs() <= 1200 =>
-        {
-            let (x, y) = point(*x, *y)?;
-            Ok(json!({"kind":"scroll","x":x,"y":y,"delta_x":horizontal,"delta_y":vertical}))
-        }
-        _ => anyhow::bail!("one complete bounded gesture required"),
     }
+    ensure!(
+        !steps.is_empty() && steps.len() <= 32,
+        "one complete bounded gesture required"
+    );
+    Ok(steps)
+}
+#[cfg(target_os = "macos")]
+fn weavelo_call(
+    frame: &FrameRef,
+    actions: &[Action],
+    actor: Value,
+    lease_id: uuid::Uuid,
+) -> Result<Value> {
+    let mut steps = parse_weavelo_steps(frame, actions)?;
+    if steps.len() == 1 {
+        Ok(json!({
+            "operation": "act",
+            "actor": actor,
+            "lease_id": lease_id,
+            "source_revision": frame.source_revision,
+            "frame_sequence": frame.frame_sequence,
+            "action": steps.pop().unwrap(),
+        }))
+    } else {
+        Ok(json!({
+            "operation": "batch_act",
+            "actor": actor,
+            "lease_id": lease_id,
+            "source_revision": frame.source_revision,
+            "frame_sequence": frame.frame_sequence,
+            "keep_lease": false,
+            "actions": steps,
+        }))
+    }
+}
+#[cfg(all(target_os = "macos", test))]
+fn atomic_input(frame: &FrameRef, actions: &[Action]) -> Result<Value> {
+    let mut steps = parse_weavelo_steps(frame, actions)?;
+    ensure!(steps.len() == 1, "one complete bounded gesture required");
+    Ok(steps.pop().unwrap())
 }
 fn rgba_layout(size: [u32; 2], encoding: &str, length: usize, maximum: usize) -> Result<()> {
     ensure!(
@@ -709,21 +1036,30 @@ mod tests {
         };
         let executor = identity.device_id;
         let server = tokio::spawn(async move {
-            let operations = if control {
-                vec!["open", "observe", "act", "close"]
-            } else {
-                vec!["open", "observe", "close"]
-            };
-            for operation in operations {
+            let mut act_calls = 0usize;
+            loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let size = stream.read_u32().await.unwrap() as usize;
                 assert!(size <= 4096);
                 let mut raw = vec![0; size];
                 stream.read_exact(&mut raw).await.unwrap();
                 let value: Value = serde_json::from_slice(&raw).unwrap();
+                if value == json!("Status") {
+                    let body = json!({
+                        "ok": true,
+                        "generation": "1-2",
+                        "executable_sha256": "0".repeat(64),
+                        "computer_use": {"protocol": 1, "observe": true, "input": control},
+                        "sessions": {"computer_use_mode": if control { "controlling" } else { "observing" }, "sessions": []}
+                    });
+                    let bytes = serde_json::to_vec(&body).unwrap();
+                    stream.write_u32(bytes.len() as u32).await.unwrap();
+                    stream.write_all(&bytes).await.unwrap();
+                    continue;
+                }
                 let call = &value["ComputerUse"]["call"];
                 assert_eq!(value["ComputerUse"]["generation"], "1-2");
-                assert_eq!(call["operation"], operation);
+                let operation = call["operation"].as_str().unwrap();
                 assert_eq!(call["actor"]["executor_device_id"], executor.to_string());
                 let (body, data) = match operation {
                     "open" => {
@@ -740,18 +1076,25 @@ mod tests {
                         vec![17; 16],
                     ),
                     "act" => {
+                        assert!(control);
+                        act_calls += 1;
                         assert_eq!(call["source_revision"], 7);
                         assert_eq!(call["frame_sequence"], 1);
                         assert_eq!(call["action"], json!({"kind":"key_press","key_code":0}));
                         (json!({"ok":true,"effect_confirmed":false}), vec![])
                     }
-                    _ => (json!({"ok":true}), vec![]),
+                    "close" => (json!({"ok":true}), vec![]),
+                    other => panic!("unexpected operation {other}"),
                 };
                 let bytes = serde_json::to_vec(&body).unwrap();
                 stream.write_u32(bytes.len() as u32).await.unwrap();
                 stream.write_all(&bytes).await.unwrap();
                 stream.write_all(&data).await.unwrap();
+                if operation == "close" {
+                    break;
+                }
             }
+            assert_eq!(act_calls, usize::from(control));
         });
         // Synthetic permission data exercises handle/IPC only; production run()
         // independently checks the real approved parent and owned authority file.
@@ -1025,6 +1368,354 @@ mod tests {
         single.mapping.content.width = 1;
         single.mapping.content.height = 1;
         assert_eq!(atomic_input(&single, &click(0., 0.)).unwrap()["x"], 32768);
+        // DoubleClick, Drag, KeyCombo, CommitText, and compound Fill map cleanly.
+        assert_eq!(
+            atomic_input(
+                &frame,
+                &[
+                    Action::PointerMove { x: 50., y: 25. },
+                    Action::ButtonDown {
+                        button: Button::Left
+                    },
+                    Action::ButtonUp {
+                        button: Button::Left
+                    },
+                    Action::ButtonDown {
+                        button: Button::Left
+                    },
+                    Action::ButtonUp {
+                        button: Button::Left
+                    },
+                ]
+            )
+            .unwrap(),
+            json!({"kind":"double_click","x":32768,"y":32768,"button":0})
+        );
+        assert_eq!(
+            atomic_input(
+                &frame,
+                &[
+                    Action::PointerMove { x: 0., y: 0. },
+                    Action::ButtonDown {
+                        button: Button::Left
+                    },
+                    Action::PointerMove { x: 100., y: 50. },
+                    Action::ButtonUp {
+                        button: Button::Left
+                    },
+                ]
+            )
+            .unwrap(),
+            json!({"kind":"drag","from_x":0,"from_y":0,"to_x":65535,"to_y":65535})
+        );
+        assert_eq!(
+            atomic_input(
+                &frame,
+                &[
+                    Action::KeyDown { usage: 0xe3 },
+                    Action::KeyDown { usage: 6 },
+                    Action::KeyUp { usage: 6 },
+                    Action::KeyUp { usage: 0xe3 },
+                ]
+            )
+            .unwrap(),
+            json!({"kind":"key_combo","key_code":8,"modifiers":8})
+        );
+        let fill_call = weavelo_call(
+            &frame,
+            &[
+                Action::PointerMove { x: 50., y: 25. },
+                Action::ButtonDown {
+                    button: Button::Left,
+                },
+                Action::ButtonUp {
+                    button: Button::Left,
+                },
+                Action::KeyDown { usage: 0xe3 },
+                Action::KeyDown { usage: 4 },
+                Action::KeyUp { usage: 4 },
+                Action::KeyUp { usage: 0xe3 },
+                Action::Unicode {
+                    text: "你好 Weavelo".into(),
+                    key_down: true,
+                },
+                Action::Unicode {
+                    text: String::new(),
+                    key_down: false,
+                },
+            ],
+            json!({"owner":"fixture"}),
+            uuid::Uuid::nil(),
+        )
+        .unwrap();
+        assert_eq!(fill_call["operation"], "batch_act");
+        assert_eq!(fill_call["keep_lease"], false);
+        assert_eq!(fill_call["actions"].as_array().unwrap().len(), 3);
+
+        // TripleClick, Right DoubleClick, Ctrl+A KeyCombo, and UTF-8 <=1024B chunked CommitText.
+        assert_eq!(
+            atomic_input(
+                &frame,
+                &[
+                    Action::PointerMove { x: 50., y: 25. },
+                    Action::ButtonDown {
+                        button: Button::Left
+                    },
+                    Action::ButtonUp {
+                        button: Button::Left
+                    },
+                    Action::ButtonDown {
+                        button: Button::Left
+                    },
+                    Action::ButtonUp {
+                        button: Button::Left
+                    },
+                    Action::ButtonDown {
+                        button: Button::Left
+                    },
+                    Action::ButtonUp {
+                        button: Button::Left
+                    },
+                ]
+            )
+            .unwrap(),
+            json!({"kind":"triple_click","x":32768,"y":32768,"button":0})
+        );
+        assert_eq!(
+            atomic_input(
+                &frame,
+                &[
+                    Action::PointerMove { x: 50., y: 25. },
+                    Action::ButtonDown {
+                        button: Button::Right
+                    },
+                    Action::ButtonUp {
+                        button: Button::Right
+                    },
+                    Action::ButtonDown {
+                        button: Button::Right
+                    },
+                    Action::ButtonUp {
+                        button: Button::Right
+                    },
+                ]
+            )
+            .unwrap(),
+            json!({"kind":"double_click","x":32768,"y":32768,"button":1})
+        );
+        assert_eq!(
+            atomic_input(
+                &frame,
+                &[
+                    Action::KeyDown { usage: 0xe0 },
+                    Action::KeyDown { usage: 4 },
+                    Action::KeyUp { usage: 4 },
+                    Action::KeyUp { usage: 0xe0 },
+                ]
+            )
+            .unwrap(),
+            json!({"kind":"key_combo","key_code":0,"modifiers":2})
+        );
+        let long_text = "你好🙂Weavelo".repeat(250);
+        let chunk_call = weavelo_call(
+            &frame,
+            &[
+                Action::Unicode {
+                    text: long_text.clone(),
+                    key_down: true,
+                },
+                Action::Unicode {
+                    text: String::new(),
+                    key_down: false,
+                },
+            ],
+            json!({"owner":"fixture"}),
+            uuid::Uuid::nil(),
+        )
+        .unwrap();
+        assert_eq!(chunk_call["operation"], "batch_act");
+        let chunk_actions = chunk_call["actions"].as_array().unwrap();
+        assert!(chunk_actions.len() >= 3);
+        let mut rebuilt = String::new();
+        for step in chunk_actions {
+            assert_eq!(step["kind"], "commit_text");
+            let piece = step["text"].as_str().unwrap();
+            assert!(!piece.is_empty() && piece.len() <= 1024);
+            rebuilt.push_str(piece);
+        }
+        assert_eq!(rebuilt, long_text);
+    }
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn weavelo_paused_by_human_sets_takeover_state_on_observe_and_blocks_act_without_ipc() {
+        use std::os::unix::fs::PermissionsExt;
+        for detect_stage in ["observe_status", "pre_act_status", "ipc_paused_code"] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let listener =
+                tokio::net::UnixListener::bind(dir.path().join("gui-receive.sock")).unwrap();
+            std::fs::set_permissions(
+                dir.path().join("gui-receive.sock"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            let route = Route {
+                input_platform: Some(InputPlatform::Windows),
+                profile: dir.path().to_owned(),
+                generation: "1-2".into(),
+                gui_executable_sha256: "0".repeat(64),
+                target: Target {
+                    peer_device_id: "win-peer".into(),
+                    source: Source::Window(99),
+                    connection_id: 12,
+                },
+            };
+            let identity = Identity {
+                owner: "fixture".into(),
+                task_id: uuid::Uuid::new_v4(),
+                device_id: uuid::Uuid::new_v4(),
+                desktop_id: route.desktop_id(),
+            };
+            let stage = detect_stage.to_string();
+            let server = tokio::spawn(async move {
+                let mut status_calls = 0usize;
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let size = stream.read_u32().await.unwrap() as usize;
+                    let mut raw = vec![0; size];
+                    stream.read_exact(&mut raw).await.unwrap();
+                    let value: Value = serde_json::from_slice(&raw).unwrap();
+                    if value == json!("Status") {
+                        status_calls += 1;
+                        let mode = match stage.as_str() {
+                            "observe_status" => json!({"computer_use_mode": "paused_by_human"}),
+                            "pre_act_status" if status_calls >= 2 => {
+                                json!({"sessions": [{"device_id": "win-peer", "connection_id": 12, "computer_use_mode": "paused_by_human"}]})
+                            }
+                            _ => json!({"computer_use_mode": "controlling"}),
+                        };
+                        let body = json!({
+                            "ok": true,
+                            "generation": "1-2",
+                            "executable_sha256": "0".repeat(64),
+                            "computer_use": {"protocol": 1, "observe": true, "input": true},
+                            "sessions": mode
+                        });
+                        let bytes = serde_json::to_vec(&body).unwrap();
+                        stream.write_u32(bytes.len() as u32).await.unwrap();
+                        stream.write_all(&bytes).await.unwrap();
+                        continue;
+                    }
+                    let call = &value["ComputerUse"]["call"];
+                    let operation = call["operation"].as_str().unwrap();
+                    if stage != "ipc_paused_code" {
+                        assert_ne!(operation, "act", "act must never be sent after paused_by_human");
+                        assert_ne!(
+                            operation, "batch_act",
+                            "batch_act must never be sent after paused_by_human"
+                        );
+                    }
+                    let (body, data) = match operation {
+                        "open" => (
+                            json!({"ok":true,"lease_id":call["lease_id"],"lease_ms":call["lease_ms"]}),
+                            vec![],
+                        ),
+                        "observe" => (
+                            json!({"ok":true,"lease_id":call["lease_id"],"source_revision":7,"frame_sequence":1,"size":[2,2],"bytes":16,"encoding":"rgba8_srgb"}),
+                            vec![17; 16],
+                        ),
+                        "act" => (
+                            json!({"ok":false,"code":"paused_by_human"}),
+                            vec![],
+                        ),
+                        "close" => (json!({"ok":true}), vec![]),
+                        other => panic!("unexpected operation {other}"),
+                    };
+                    let bytes = serde_json::to_vec(&body).unwrap();
+                    stream.write_u32(bytes.len() as u32).await.unwrap();
+                    stream.write_all(&bytes).await.unwrap();
+                    stream.write_all(&data).await.unwrap();
+                    if operation == "close" {
+                        break;
+                    }
+                }
+            });
+            let approval = super::super::transport::WorkerApproval {
+                weavelo: Some(route.clone()),
+                capability_version: Some(7),
+                enabled: true,
+                app_id: "fun.hackerlife.octendra.desktop-worker".into(),
+                desktop_uid: uid(),
+                desktop_session: "weavelo".into(),
+                identity: identity.clone(),
+                worker_sha256: "0".repeat(64),
+                agent_sha256: "0".repeat(64),
+                expires_at_ms: now() + 30_000,
+                logical_size: [2, 2],
+                logical_position: [0, 0],
+                max_frame_bytes: 16,
+                allow_input: true,
+            };
+            let mut session = None;
+            let open_out = handle_outcome(
+                &approval,
+                &route,
+                &mut session,
+                uuid::Uuid::new_v4(),
+                &Request::Open {
+                    identity,
+                    lease_ms: 5000,
+                },
+            )
+            .await
+            .unwrap();
+            let Response::Opened { binding, .. } = open_out.result.unwrap() else {
+                panic!("not opened");
+            };
+            let obs_out = handle_outcome(
+                &approval,
+                &route,
+                &mut session,
+                uuid::Uuid::new_v4(),
+                &Request::Observe {
+                    binding: binding.clone(),
+                },
+            )
+            .await
+            .unwrap();
+            if detect_stage == "observe_status" {
+                assert_eq!(obs_out.takeover_state.as_deref(), Some("paused_by_human"));
+            } else {
+                assert_eq!(obs_out.takeover_state, None);
+            }
+            let Response::Observed { frame } = obs_out.result.unwrap() else {
+                panic!("not observed");
+            };
+            let act_err = handle_outcome(
+                &approval,
+                &route,
+                &mut session,
+                uuid::Uuid::new_v4(),
+                &Request::Act {
+                    frame,
+                    sequence: 1,
+                    actions: vec![Action::KeyDown { usage: 4 }, Action::KeyUp { usage: 4 }],
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(is_paused_error(&act_err));
+            handle_outcome(
+                &approval,
+                &route,
+                &mut session,
+                uuid::Uuid::new_v4(),
+                &Request::Close { binding },
+            )
+            .await
+            .unwrap();
+            server.await.unwrap();
+        }
     }
     #[test]
     fn weavelo_input_platform_is_an_explicit_remote_grant_not_an_executor_inference() {
@@ -1032,13 +1723,22 @@ mod tests {
             "target":{"peer_device_id":"remote-peer","source":{"Window":42},"connection_id":7}});
         let route: Route = serde_json::from_value(base.clone()).unwrap();
         assert_eq!(route.input_platform, None);
-        let mut mac = base.clone();
-        mac["input_platform"] = json!("macos");
-        assert_eq!(
-            serde_json::from_value::<Route>(mac).unwrap().input_platform,
-            Some(InputPlatform::Macos)
-        );
-        for value in [json!("linux"), json!("executor"), json!(true)] {
+        for (raw, expected) in [
+            ("macos", InputPlatform::Macos),
+            ("windows", InputPlatform::Windows),
+            ("linux", InputPlatform::Linux),
+            ("android", InputPlatform::Android),
+        ] {
+            let mut valid = base.clone();
+            valid["input_platform"] = json!(raw);
+            assert_eq!(
+                serde_json::from_value::<Route>(valid)
+                    .unwrap()
+                    .input_platform,
+                Some(expected)
+            );
+        }
+        for value in [json!("executor"), json!("auto"), json!("unknown"), json!(true)] {
             let mut invalid = base.clone();
             invalid["input_platform"] = value;
             assert!(serde_json::from_value::<Route>(invalid).is_err());

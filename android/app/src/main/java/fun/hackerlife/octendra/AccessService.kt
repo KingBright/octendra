@@ -3,11 +3,13 @@ package `fun`.hackerlife.octendra
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
-import android.os.Bundle
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -24,19 +26,78 @@ import java.util.concurrent.Executors
 import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
 
+internal object ImeIsolationPolicy {
+    fun canUseInputMethodConnection(
+        displayId: Int,
+        sdkInt: Int,
+        nodeFocused: Boolean,
+        imePackage: String?,
+        seenPackage: String,
+        focusedWindowOnDisplayMatches: Boolean
+    ): Boolean {
+        // Strict dual-display IME isolation: AccessibilityService.inputMethod is attached
+        // to the main display IME and MUST NEVER be used for a secondary virtual display.
+        if (displayId != Display.DEFAULT_DISPLAY) return false
+        if (sdkInt < 33) return false
+        if (!nodeFocused || !focusedWindowOnDisplayMatches) return false
+        return !imePackage.isNullOrEmpty() && imePackage == seenPackage
+    }
+}
+
 class AccessService : AccessibilityService() {
     data class NodeRef(val path: List<Int>, val signature: String)
-    data class Observation(val id: String, val at: Long, val window: Int, val pkg: String, val nodes: List<NodeRef>, val display: String, val epoch: Long, val displayId: Int)
+    data class Observation(
+        val id: String,
+        val at: Long,
+        val window: Int,
+        val pkg: String,
+        val nodes: List<NodeRef>,
+        val display: String,
+        val epoch: Long,
+        val displayId: Int
+    )
+
     private val handler = Handler(Looper.getMainLooper())
     private val pictures = Executors.newSingleThreadExecutor()
-    private val observations = HashMap<Int,Observation>()
+    private val observations = HashMap<Int, Observation>()
     private var screenshotRequestedAt = 0L
-    private val windowEpochs = HashMap<Int,Long>()
+    private val windowEpochs = HashMap<Int, Long>()
     private fun epoch(displayId: Int) = windowEpochs[displayId] ?: 0L
-    override fun onServiceConnected() {
-        if (Build.VERSION.SDK_INT >= 33) serviceInfo = serviceInfo.apply { flags = flags or AccessibilityServiceInfo.FLAG_INPUT_METHOD_EDITOR }
-        instance = this; AgentRuntime.changed()
+    fun currentEpoch(displayId: Int = Display.DEFAULT_DISPLAY): Long = main { epoch(displayId) }
+
+    fun invalidateDisplay(displayId: Int) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            observations.remove(displayId)
+            windowEpochs[displayId] = epoch(displayId) + 1
+        } else {
+            handler.post {
+                observations.remove(displayId)
+                windowEpochs[displayId] = epoch(displayId) + 1
+            }
+        }
     }
+
+    fun foregroundPackage(displayId: Int): String? = runCatching {
+        main {
+            val root = rootFor(displayId) ?: return@main null
+            try {
+                root.packageName?.toString()
+            } finally {
+                root.recycle()
+            }
+        }
+    }.getOrNull()
+
+    override fun onServiceConnected() {
+        if (Build.VERSION.SDK_INT >= 33) {
+            serviceInfo = serviceInfo.apply {
+                flags = flags or AccessibilityServiceInfo.FLAG_INPUT_METHOD_EDITOR
+            }
+        }
+        instance = this
+        AgentRuntime.changed()
+    }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event?.packageName?.toString() == "com.android.settings") AgentRuntime.wirelessAdb?.pairFromSettings()
         // Only an invalidation counter, never keystrokes or page contents.
@@ -44,21 +105,34 @@ class AccessService : AccessibilityService() {
             val all = windowsOnAllDisplays
             val id = (0 until all.size()).firstOrNull { index -> all.valueAt(index).any { it.id == event.windowId } }
                 ?.let { all.keyAt(it) } ?: Display.DEFAULT_DISPLAY
-            windowEpochs[id] = epoch(id)+1
+            windowEpochs[id] = epoch(id) + 1
         }
     }
+
     override fun onInterrupt() { observations.clear() }
-    override fun onDestroy() { if (instance === this) instance = null; observations.clear(); pictures.shutdownNow(); super.onDestroy(); AgentRuntime.changed() }
-    private fun enabled() { demand(controls(this).getBoolean("remote_enabled", false) && AgentRuntime.running, "remote_control_stopped_locally") }
+
+    override fun onDestroy() {
+        if (instance === this) instance = null
+        observations.clear()
+        pictures.shutdownNow()
+        super.onDestroy()
+        AgentRuntime.changed()
+    }
+
+    private fun enabled() {
+        demand(controls(this).getBoolean("remote_enabled", false) && AgentRuntime.running, "remote_control_stopped_locally")
+    }
+
     private fun scheduleScreenshot(callback: TakeScreenshotCallback) {
         val at = maxOf(SystemClock.elapsedRealtime(), screenshotRequestedAt + 350)
         val delay = at - SystemClock.elapsedRealtime(); screenshotRequestedAt = at
         handler.postDelayed({
             if (AgentRuntime.running && controls(this).getBoolean("remote_enabled", false))
-                takeScreenshot(Display.DEFAULT_DISPLAY,pictures,callback)
+                takeScreenshot(Display.DEFAULT_DISPLAY, pictures, callback)
             else callback.onFailure(ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR)
-        },delay.coerceAtLeast(0))
+        }, delay.coerceAtLeast(0))
     }
+
     private fun <T> main(block: () -> T): T {
         if (Looper.myLooper() == Looper.getMainLooper()) return block()
         val task = FutureTask { enabled(); block() }
@@ -73,17 +147,41 @@ class AccessService : AccessibilityService() {
             throw e
         }
     }
+
     private fun signature(n: AccessibilityNodeInfo): String {
         val b = Rect(); n.getBoundsInScreen(b)
-        return listOf(n.windowId.toString(), n.packageName?.toString() ?: "", n.className?.toString() ?: "",
-            n.viewIdResourceName ?: "", if (n.isPassword) "<password>" else n.text?.toString()?.take(200) ?: "",
-            n.contentDescription?.toString()?.take(200) ?: "", b.flattenToString(), n.isPassword.toString()).joinToString("\u001f")
+        return listOf(
+            n.windowId.toString(),
+            n.packageName?.toString() ?: "",
+            n.className?.toString() ?: "",
+            n.viewIdResourceName ?: "",
+            if (n.isPassword) "<password>" else n.text?.toString()?.take(200) ?: "",
+            n.contentDescription?.toString()?.take(200) ?: "",
+            b.flattenToString(),
+            n.isPassword.toString(),
+            n.isCheckable.toString(),
+            if (n.isCheckable) n.isChecked.toString() else ""
+        ).joinToString("\u001f")
     }
+
     private fun rootFor(displayId: Int): AccessibilityNodeInfo? {
         val candidates = windowsOnAllDisplays[displayId] ?: return null
-        return candidates.sortedWith(compareByDescending<android.view.accessibility.AccessibilityWindowInfo> { it.isActive }
-            .thenByDescending { it.isFocused }.thenByDescending { it.layer }).firstNotNullOfOrNull { it.root }
+        return candidates.sortedWith(
+            compareByDescending<android.view.accessibility.AccessibilityWindowInfo> { it.isActive }
+                .thenByDescending { it.isFocused }.thenByDescending { it.layer }
+        ).firstNotNullOfOrNull { it.root }
     }
+
+    private fun windowOnDisplay(displayId: Int, windowId: Int): Boolean {
+        val candidates = windowsOnAllDisplays[displayId] ?: return false
+        return candidates.any { it.id == windowId }
+    }
+
+    private fun focusedWindowMatches(displayId: Int, windowId: Int): Boolean {
+        val candidates = windowsOnAllDisplays[displayId] ?: return false
+        return candidates.any { it.id == windowId && (it.isFocused || it.isActive) }
+    }
+
     /** Only used during an explicitly requested local ADB pairing; never returned over MCP. */
     fun localWirelessPairingCode(): CharArray? = main {
         if (Build.VERSION.SDK_INT >= 33) clearCache()
@@ -97,6 +195,7 @@ class AccessService : AccessibilityService() {
             } finally { nodes.forEach { it.recycle() } }
         } finally { root.recycle() }
     }
+
     fun dump(displayId: Int = Display.DEFAULT_DISPLAY): JSONObject = main {
         enabled()
         val manager = getSystemService(android.hardware.display.DisplayManager::class.java)
@@ -105,14 +204,23 @@ class AccessService : AccessibilityService() {
         // The framework cache can therefore outlive a changed label. Refresh
         // on explicit observation instead of continuously collecting contents.
         val freshCache = Build.VERSION.SDK_INT >= 33 && clearCache()
+        val disp = displayInfo(displayId)
         val root = rootFor(displayId)
         if (root == null) {
-            demand(displayId != Display.DEFAULT_DISPLAY,"screen_tree_unavailable")
+            demand(displayId != Display.DEFAULT_DISPLAY, "screen_tree_unavailable")
             val id = nonce().take(24)
-            observations[displayId] = Observation(id,SystemClock.elapsedRealtime(),-1,"",emptyList(),displayInfo(displayId).toString(),epoch(displayId),displayId)
-            return@main obj("observation_id" to id,"display" to displayInfo(displayId),"nodes" to JSONArray(),"truncated" to false,
-                "window_id" to -1,"window_epoch" to epoch(displayId),"observed_at_ms" to System.currentTimeMillis())
+            observations[displayId] = Observation(id, SystemClock.elapsedRealtime(), -1, "", emptyList(), disp.toString(), epoch(displayId), displayId)
+            return@main obj(
+                "observation_id" to id,
+                "display" to disp,
+                "nodes" to JSONArray(),
+                "truncated" to false,
+                "window_id" to -1,
+                "window_epoch" to epoch(displayId),
+                "observed_at_ms" to System.currentTimeMillis()
+            )
         }
+        val dispW = disp.getInt("width"); val dispH = disp.getInt("height")
         val refs = mutableListOf<NodeRef>()
         val nodes = JSONArray()
         var estimate = 0
@@ -120,18 +228,46 @@ class AccessService : AccessibilityService() {
         val epoch = epoch(displayId)
         val deadline = SystemClock.elapsedRealtime() + 3000
         fun visit(n: AccessibilityNodeInfo, path: List<Int>, depth: Int) {
-            if (refs.size >= 300 || estimate > 58000 || depth > 35 || SystemClock.elapsedRealtime() >= deadline) { truncated = true; return }
+            if (refs.size >= 300 || estimate > 58000 || depth > 40 || SystemClock.elapsedRealtime() >= deadline) { truncated = true; return }
             // API 30-32 have no public cache invalidation API; refresh only the
             // bounded nodes we actually return. Never silently return stale data.
             if (!freshCache && !n.refresh()) { truncated = true; return }
             val bounds = Rect(); n.getBoundsInScreen(bounds)
-            val item = obj("id" to refs.size, "class" to n.className?.toString(), "resource_id" to n.viewIdResourceName,
-                "text" to if (n.isPassword) "<redacted>" else n.text?.toString()?.take(180),
-                "description" to if (n.isPassword) null else n.contentDescription?.toString()?.take(180),
-                "bounds" to arr(listOf(bounds.left, bounds.top, bounds.right, bounds.bottom)), "clickable" to n.isClickable,
-                "editable" to n.isEditable, "scrollable" to n.isScrollable, "enabled" to n.isEnabled,
-                "visible" to n.isVisibleToUser, "password" to n.isPassword)
-            refs += NodeRef(path, signature(n)); nodes.put(item); estimate += item.toString().toByteArray().size
+            val textVal = if (n.isPassword) "<redacted>" else n.text?.toString()?.take(180)
+            val descVal = if (n.isPassword) null else n.contentDescription?.toString()?.take(180)
+            val hintVal = if (n.isPassword) null else n.hintText?.toString()?.take(120)
+            if (UiContract.shouldEmitNode(
+                    n.isVisibleToUser, bounds.left, bounds.top, bounds.right, bounds.bottom,
+                    dispW, dispH, n.isClickable, n.isLongClickable, n.isEditable, n.isScrollable, n.isCheckable,
+                    n.isPassword, textVal, descVal
+                )) {
+                val clamped = listOf(
+                    bounds.left.coerceIn(0, dispW),
+                    bounds.top.coerceIn(0, dispH),
+                    bounds.right.coerceIn(0, dispW),
+                    bounds.bottom.coerceIn(0, dispH)
+                )
+                val item = obj(
+                    "id" to refs.size,
+                    "class" to n.className?.toString(),
+                    "resource_id" to n.viewIdResourceName,
+                    "text" to textVal,
+                    "description" to descVal,
+                    "hint" to hintVal,
+                    "bounds" to arr(clamped),
+                    "clickable" to n.isClickable,
+                    "editable" to n.isEditable,
+                    "scrollable" to n.isScrollable,
+                    "checkable" to n.isCheckable,
+                    "checked" to if (n.isCheckable) n.isChecked else JSONObject.NULL,
+                    "selected" to n.isSelected,
+                    "focused" to n.isFocused,
+                    "enabled" to n.isEnabled,
+                    "visible" to n.isVisibleToUser,
+                    "password" to n.isPassword
+                )
+                refs += NodeRef(path, signature(n)); nodes.put(item); estimate += item.toString().toByteArray().size
+            }
             for (i in 0 until n.childCount.coerceAtMost(300)) {
                 if (refs.size >= 300 || estimate > 58000) { truncated = true; break }
                 val child = n.getChild(i) ?: continue
@@ -141,19 +277,37 @@ class AccessService : AccessibilityService() {
         try {
             visit(root, emptyList(), 0)
             val id = nonce().take(24)
-            observations[displayId] = Observation(id, SystemClock.elapsedRealtime(), root.windowId, root.packageName?.toString() ?: "", refs, displayInfo(displayId).toString(), epoch,displayId)
-            obj("observation_id" to id, "observed_at_ms" to System.currentTimeMillis(), "valid_for_ms" to 30000,
-                "package" to root.packageName?.toString(), "window_id" to root.windowId, "window_epoch" to epoch,
-                "display" to displayInfo(displayId), "nodes" to nodes, "truncated" to truncated,
-                "password_text_redacted" to true, "actions_require_observation_id" to true)
+            observations[displayId] = Observation(id, SystemClock.elapsedRealtime(), root.windowId, root.packageName?.toString() ?: "", refs, disp.toString(), epoch, displayId)
+            obj(
+                "observation_id" to id,
+                "observed_at_ms" to System.currentTimeMillis(),
+                "valid_for_ms" to 30000,
+                "package" to root.packageName?.toString(),
+                "window_id" to root.windowId,
+                "window_epoch" to epoch,
+                "display" to disp,
+                "nodes" to nodes,
+                "truncated" to truncated,
+                "password_text_redacted" to true,
+                "actions_require_observation_id" to true
+            )
         } finally { root.recycle() }
     }
+
+    @Suppress("DEPRECATION")
     private fun displayInfo(displayId: Int = Display.DEFAULT_DISPLAY): JSONObject {
         val manager = getSystemService(android.hardware.display.DisplayManager::class.java)
         val display = manager.getDisplay(displayId) ?: throw AgentError("ui_view_lost")
         val metrics = android.util.DisplayMetrics(); display.getRealMetrics(metrics)
-        return obj("width" to metrics.widthPixels, "height" to metrics.heightPixels, "rotation" to display.rotation,"display_id" to displayId)
+        return obj(
+            "width" to metrics.widthPixels,
+            "height" to metrics.heightPixels,
+            "rotation" to display.rotation,
+            "display_id" to displayId,
+            "state" to display.state
+        )
     }
+
     private fun currentMeta(args: JSONObject, persistent: Boolean = false): Observation {
         val seen = observations.values.firstOrNull { it.id == args.optString("observation_id") }
             ?: throw AgentError("observation_required", "先执行 ui_observe 或 android observe。")
@@ -161,12 +315,109 @@ class AccessService : AccessibilityService() {
         demand(seen.display == displayInfo(seen.displayId).toString() && (!persistent || seen.epoch == epoch(seen.displayId)), "stale_observation")
         return seen
     }
+
     private fun current(args: JSONObject, persistent: Boolean = false): Pair<Observation, AccessibilityNodeInfo> {
-        val seen = currentMeta(args,persistent)
+        val seen = currentMeta(args, persistent)
         val root = rootFor(seen.displayId) ?: throw AgentError("screen_tree_unavailable")
-        if (root.windowId != seen.window || root.packageName?.toString() != seen.pkg) { root.recycle(); throw AgentError("screen_changed_observe_again") }
+        if (root.windowId != seen.window || root.packageName?.toString() != seen.pkg) {
+            root.recycle(); throw AgentError("screen_changed_observe_again")
+        }
         return seen to root
     }
+
+    private fun withClipboardPaste(node: AccessibilityNodeInfo, text: String, replaceAll: Boolean): Boolean {
+        if (node.isPassword) return false
+        val cm = getSystemService(ClipboardManager::class.java) ?: return false
+        return ClipboardGuard.withTemporaryClip(
+            isPassword = node.isPassword,
+            temporaryText = text,
+            readCurrentText = { cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString() },
+            savePrevious = { cm.primaryClip },
+            writeTemporary = { cm.setPrimaryClip(ClipData.newPlainText("octendra", it)) },
+            restorePrevious = { prev ->
+                if (prev != null) cm.setPrimaryClip(prev) else cm.clearPrimaryClip()
+            }
+        ) {
+            if (replaceAll && !node.isShowingHintText) {
+                val len = node.text?.length ?: 0
+                if (len > 0) {
+                    node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, Bundle().apply {
+                        putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
+                        putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, len)
+                    })
+                }
+            }
+            node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+        }
+    }
+
+    private fun findCheckableNode(start: AccessibilityNodeInfo, seen: Observation): AccessibilityNodeInfo? {
+        if (start.isCheckable) return AccessibilityNodeInfo.obtain(start)
+        // Walk up ancestors (e.g. a label inside a CheckedTextView / CheckBox).
+        var cur = AccessibilityNodeInfo.obtain(start)
+        var depth = 0
+        while (depth++ < 35) {
+            val parent = cur.parent
+            cur.recycle()
+            if (parent == null) break
+            if (parent.windowId != seen.window || parent.packageName?.toString() != seen.pkg) {
+                parent.recycle(); break
+            }
+            if (parent.isCheckable) return parent
+            cur = parent
+        }
+        // Bounded BFS down into a container row (e.g. LinearLayout wrapping a single Switch).
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.addLast(AccessibilityNodeInfo.obtain(start))
+        val found = mutableListOf<AccessibilityNodeInfo>()
+        var visited = 0
+        try {
+            while (queue.isNotEmpty() && visited < 20) {
+                val item = queue.removeFirst()
+                visited++
+                try {
+                    if (item !== start && item.isCheckable && item.isVisibleToUser) {
+                        found.add(AccessibilityNodeInfo.obtain(item))
+                        if (found.size > 1) break
+                    }
+                    for (i in 0 until item.childCount.coerceAtMost(12)) {
+                        val c = item.getChild(i) ?: continue
+                        queue.addLast(c)
+                    }
+                } finally {
+                    item.recycle()
+                }
+            }
+        } finally {
+            while (queue.isNotEmpty()) queue.removeFirst().recycle()
+        }
+        return if (found.size == 1) found[0] else {
+            found.forEach { it.recycle() }
+            null
+        }
+    }
+
+    private fun performClickWithAncestor(target: AccessibilityNodeInfo, seen: Observation): Boolean {
+        if (target.isClickable && target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+        var cur = AccessibilityNodeInfo.obtain(target)
+        var depth = 0
+        while (depth++ < 35) {
+            val parent = cur.parent
+            cur.recycle()
+            if (parent == null) break
+            if (parent.windowId != seen.window || parent.packageName?.toString() != seen.pkg) {
+                parent.recycle(); break
+            }
+            if (parent.isClickable && parent.isEnabled && parent.isVisibleToUser) {
+                val ok = parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                parent.recycle()
+                return ok
+            }
+            cur = parent
+        }
+        return target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    }
+
     fun nodeAction(kind: String, args: JSONObject, persistent: Boolean = false): JSONObject = main {
         val (seen, root) = current(args, persistent)
         var node = root
@@ -185,7 +436,8 @@ class AccessService : AccessibilityService() {
                 val focused = node.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: throw AgentError("focused_editor_unavailable")
                 node.recycle(); node = focused
             }
-            if (persistent) {
+            demand(windowOnDisplay(seen.displayId, node.windowId), "node_changed_observe_again")
+            if (persistent && kind != "set_checked") {
                 // A label's ref may belong to its actionable ancestor, as in WebViews.
                 fun actionable(n: AccessibilityNodeInfo) = when (kind) {
                     "click" -> n.isClickable; "long_click" -> n.isLongClickable
@@ -199,37 +451,80 @@ class AccessService : AccessibilityService() {
                 }
             }
             demand(node.refresh() && node.isEnabled && node.isVisibleToUser, "node_changed_observe_again")
+            if (kind == "set_checked") {
+                val desired = args.getBoolean("checked")
+                val checkNode = findCheckableNode(node, seen)
+                try {
+                    if (checkNode != null && checkNode.refresh() && checkNode.isCheckable && checkNode.isChecked == desired) {
+                        observations.remove(seen.displayId)
+                        return@main obj(
+                            "action" to "set_checked",
+                            "accepted" to true,
+                            "already_satisfied" to true,
+                            "checked" to desired,
+                            "input_sent" to false,
+                            "verified" to true,
+                            "next_action" to "android observe"
+                        )
+                    }
+                    val clickTarget = checkNode ?: node
+                    val accepted = performClickWithAncestor(clickTarget, seen)
+                    demand(accepted, "android_rejected_node_action")
+                    observations.remove(seen.displayId)
+                    return@main obj(
+                        "action" to "set_checked",
+                        "accepted" to true,
+                        "already_satisfied" to false,
+                        "checked" to desired,
+                        "input_sent" to true,
+                        "verified" to false,
+                        "next_action" to "android observe"
+                    )
+                } finally {
+                    checkNode?.recycle()
+                }
+            }
             val accepted = when (kind) {
                 "click" -> node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 "long_click" -> node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
                 "text" -> {
                     demand(node.isEditable, "node_not_editable")
                     val text = args.getString("text"); demand(text.length <= 8192, "text_too_long")
-                    node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text) })
+                    val direct = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
+                        putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+                    })
+                    if (direct) true else (!node.isPassword && text.isNotEmpty() && withClipboardPaste(node, text, replaceAll = true))
                 }
                 "insert" -> {
                     demand(node.isEditable, "node_not_editable")
                     val text = args.getString("text"); demand(text.toByteArray().size <= 8192, "text_too_long")
-                    val input = if (Build.VERSION.SDK_INT >= 33 && node.isFocused && inputMethod?.currentInputEditorInfo?.packageName == seen.pkg)
-                        inputMethod?.currentInputConnection else null
-                    if (Build.VERSION.SDK_INT >= 33 && input != null) { input.commitText(text, 1, null); true }
-                    else {
-                        demand(!node.isPassword, "editor_input_connection_required")
-                        val merged = UiContract.insert(node.text?.toString() ?: "", node.textSelectionStart, node.textSelectionEnd, text)
-                        val accepted = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
-                            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, merged)
-                        })
-                        if (accepted) {
-                            val end = minOf(node.textSelectionStart, node.textSelectionEnd).coerceAtLeast(0) + text.length
-                            node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, Bundle().apply {
-                                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, end)
-                                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, end)
-                            })
+                    val canUseIme = ImeIsolationPolicy.canUseInputMethodConnection(
+                        displayId = seen.displayId,
+                        sdkInt = Build.VERSION.SDK_INT,
+                        nodeFocused = node.isFocused,
+                        imePackage = if (seen.displayId == Display.DEFAULT_DISPLAY && Build.VERSION.SDK_INT >= 33)
+                            inputMethod?.currentInputEditorInfo?.packageName else null,
+                        seenPackage = seen.pkg,
+                        focusedWindowOnDisplayMatches = focusedWindowMatches(seen.displayId, node.windowId)
+                    )
+                    if (canUseIme && Build.VERSION.SDK_INT >= 33) {
+                        val conn = inputMethod?.currentInputConnection
+                        if (conn != null) {
+                            conn.commitText(text, 1, null)
+                            true
+                        } else {
+                            insertViaAccessibility(node, text)
                         }
-                        accepted
+                    } else {
+                        insertViaAccessibility(node, text)
                     }
                 }
-                "scroll" -> node.performAction(if (args.optString("direction", "forward") == "backward") AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD else AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+                "scroll" -> node.performAction(
+                    if (args.optString("direction", "forward") == "backward")
+                        AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                    else
+                        AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                )
                 else -> throw AgentError("unsupported_node_action")
             }
             demand(accepted, "android_rejected_node_action")
@@ -237,26 +532,105 @@ class AccessService : AccessibilityService() {
             obj("action" to kind, "accepted" to true, "verified" to false, "next_action" to "android observe")
         } finally { node.recycle() }
     }
+
+    private fun insertViaAccessibility(node: AccessibilityNodeInfo, text: String): Boolean {
+        demand(!node.isPassword, "editor_input_connection_required")
+        val existing = node.text?.toString() ?: ""
+        val (merged, cursor) = UiContract.insertInEditor(
+            existing = existing,
+            showingHint = node.isShowingHintText,
+            start = node.textSelectionStart,
+            end = node.textSelectionEnd,
+            text = text
+        )
+        val setOk = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, merged)
+        })
+        if (setOk) {
+            if (cursor < merged.length) {
+                node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, Bundle().apply {
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, cursor)
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, cursor)
+                })
+            }
+            return true
+        }
+        return text.isNotEmpty() && withClipboardPaste(node, text, replaceAll = false)
+    }
+
+    /** Display-isolated UTF-8 text commit for Weavelo human takeover on a virtual display. */
+    fun commitTextOnDisplay(displayId: Int, text: String): Boolean {
+        if (text.isEmpty() || text.toByteArray(Charsets.UTF_8).size > 4096) return false
+        return runCatching {
+            main {
+                val windows = windowsOnAllDisplays[displayId] ?: return@main false
+                var target: AccessibilityNodeInfo? = null
+                for (w in windows) {
+                    val r = w.root ?: continue
+                    try {
+                        val f = r.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                        if (f != null) {
+                            if (f.refresh() && f.isFocused && f.isEditable && !f.isPassword) {
+                                target = f
+                                break
+                            }
+                            f.recycle()
+                        }
+                    } finally {
+                        r.recycle()
+                    }
+                }
+                val node = target ?: return@main false
+                try {
+                    val existing = node.text?.toString() ?: ""
+                    val (merged, cursor) = UiContract.insertInEditor(
+                        existing = existing,
+                        showingHint = node.isShowingHintText,
+                        start = node.textSelectionStart,
+                        end = node.textSelectionEnd,
+                        text = text
+                    )
+                    val ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
+                        putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, merged)
+                    })
+                    if (!ok) {
+                        return@main withClipboardPaste(node, text, replaceAll = false)
+                    }
+                    if (cursor != merged.length) {
+                        node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, Bundle().apply {
+                            putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, cursor)
+                            putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, cursor)
+                        })
+                    }
+                    true
+                } finally {
+                    node.recycle()
+                }
+            }
+        }.getOrDefault(false)
+    }
+
     fun checkObservation(args: JSONObject) = main {
-        val seen = currentMeta(args,true)
+        val seen = currentMeta(args, true)
         if (seen.window < 0) {
             val root = rootFor(seen.displayId)
-            try { demand(root == null,"stale_observation") } finally { root?.recycle() }
-        } else current(args,true).second.recycle()
+            try { demand(root == null, "stale_observation") } finally { root?.recycle() }
+        } else current(args, true).second.recycle()
     }
-    fun nodePoint(args: JSONObject): Pair<Double,Double> = main {
-        val (seen,root) = current(args,true); var node = root
+
+    fun nodePoint(args: JSONObject): Pair<Double, Double> = main {
+        val (seen, root) = current(args, true); var node = root
         try {
-            val index = args.getInt("node_id"); demand(index in seen.nodes.indices,"unknown_node_id")
+            val index = args.getInt("node_id"); demand(index in seen.nodes.indices, "unknown_node_id")
             val ref = seen.nodes[index]
             for (child in ref.path) {
                 val next = node.getChild(child) ?: throw AgentError("node_changed_observe_again")
                 node.recycle(); node = next
             }
-            demand(node.refresh() && signature(node) == ref.signature && node.isEnabled && node.isVisibleToUser,"node_changed_observe_again")
+            demand(node.refresh() && signature(node) == ref.signature && node.isEnabled && node.isVisibleToUser, "node_changed_observe_again")
             val bounds = Rect(); node.getBoundsInScreen(bounds)
-            demand(bounds.width()>0 && bounds.height()>0,"invalid_coordinates")
-            Pair(bounds.exactCenterX().toDouble(),bounds.exactCenterY().toDouble())
+            demand(bounds.width() > 0 && bounds.height() > 0, "invalid_coordinates")
+            Pair(bounds.exactCenterX().toDouble(), bounds.exactCenterY().toDouble())
         } finally { node.recycle() }
     }
 
@@ -275,8 +649,16 @@ class AccessService : AccessibilityService() {
                 else -> if (key.length == 1 && key[0] in 'a'..'z') KeyEvent.KEYCODE_A + (key[0] - 'a')
                     else if (key.length == 1 && key[0] in '0'..'9') KeyEvent.KEYCODE_0 + (key[0] - '0') else throw AgentError("unsupported_key")
             }
-            if (Build.VERSION.SDK_INT < 33) throw AgentError("editor_input_connection_required")
-            demand(inputMethod?.currentInputEditorInfo?.packageName == seen.pkg, "editor_input_connection_required")
+            val canUseIme = ImeIsolationPolicy.canUseInputMethodConnection(
+                displayId = seen.displayId,
+                sdkInt = Build.VERSION.SDK_INT,
+                nodeFocused = true,
+                imePackage = if (seen.displayId == Display.DEFAULT_DISPLAY && Build.VERSION.SDK_INT >= 33)
+                    inputMethod?.currentInputEditorInfo?.packageName else null,
+                seenPackage = seen.pkg,
+                focusedWindowOnDisplayMatches = focusedWindowMatches(seen.displayId, seen.window)
+            )
+            if (Build.VERSION.SDK_INT < 33 || !canUseIme) throw AgentError("editor_input_connection_required")
             val connection = inputMethod?.currentInputConnection ?: throw AgentError("editor_input_connection_required")
             var meta = 0; val modifiers = action.optJSONArray("modifiers")
             if (modifiers != null) for (i in 0 until modifiers.length()) meta = meta or when (modifiers.getString(i)) {
@@ -303,21 +685,22 @@ class AccessService : AccessibilityService() {
             val x = coordinate("x", width); val y = coordinate("y", height)
             val builder = GestureDescription.Builder().setDisplayId(seen.displayId)
             fun stroke(x1: Float, y1: Float, x2: Float, y2: Float, start: Long, duration: Long) {
-                val path = Path().apply { moveTo(x1,y1); if (x1 != x2 || y1 != y2) lineTo(x2,y2) }
-                builder.addStroke(GestureDescription.StrokeDescription(path,start,duration))
+                val path = Path().apply { moveTo(x1, y1); if (x1 != x2 || y1 != y2) lineTo(x2, y2) }
+                builder.addStroke(GestureDescription.StrokeDescription(path, start, duration))
             }
             when (kind) {
-                "drag" -> stroke(x,y,coordinate("to_x",width),coordinate("to_y",height),0,400)
-                "double_click" -> { stroke(x,y,x,y,0,60); stroke(x,y,x,y,140,60) }
-                "long_press" -> stroke(x,y,x,y,0,650)
+                "drag" -> stroke(x, y, coordinate("to_x", width), coordinate("to_y", height), 0, 400)
+                "double_click" -> { stroke(x, y, x, y, 0, 60); stroke(x, y, x, y, 140, 60) }
+                "triple_click" -> { stroke(x, y, x, y, 0, 50); stroke(x, y, x, y, 110, 50); stroke(x, y, x, y, 220, 50) }
+                "long_press" -> stroke(x, y, x, y, 0, 650)
                 "pinch" -> {
                     val scale = args.getDouble("scale"); demand(scale.isFinite() && scale > 0, "invalid_pinch_scale")
-                    val radius = minOf(x,y,width-1-x,height-1-y) * 0.5f / maxOf(1.0,scale).toFloat()
+                    val radius = minOf(x, y, width - 1 - x, height - 1 - y) * 0.5f / maxOf(1.0, scale).toFloat()
                     demand(radius >= 1, "pinch_outside_display")
-                    stroke(x-radius,y,x-radius*scale.toFloat(),y,0,450)
-                    stroke(x+radius,y,x+radius*scale.toFloat(),y,0,450)
+                    stroke(x - radius, y, x - radius * scale.toFloat(), y, 0, 450)
+                    stroke(x + radius, y, x + radius * scale.toFloat(), y, 0, 450)
                 }
-                else -> stroke(x,y,x,y,0,60)
+                else -> stroke(x, y, x, y, 0, 60)
             }
             demand(dispatchGesture(builder.build(), object : GestureResultCallback() {
                 override fun onCompleted(gestureDescription: GestureDescription?) { future.complete(true) }
@@ -325,7 +708,7 @@ class AccessService : AccessibilityService() {
             }, handler), "gesture_rejected")
             observations.remove(seen.displayId)
         }
-        demand(future.get(7,TimeUnit.SECONDS), "gesture_cancelled_outcome_unknown")
+        demand(future.get(7, TimeUnit.SECONDS), "gesture_cancelled_outcome_unknown")
         return obj("gesture_completed" to true, "verified" to false)
     }
 
@@ -341,22 +724,34 @@ class AccessService : AccessibilityService() {
                         if (future.isCancelled) return
                         enabled()
                         val source = Bitmap.wrapHardwareBuffer(hardware, result.colorSpace) ?: throw AgentError("screenshot_bitmap_unavailable")
-                        val bitmap = try { source.copy(Bitmap.Config.ARGB_8888,false) } finally { source.recycle() }
+                        val bitmap = try { source.copy(Bitmap.Config.ARGB_8888, false) } finally { source.recycle() }
                         try {
                             val display = observed.getJSONObject("display")
                             demand(bitmap.width == display.getInt("width") && bitmap.height == display.getInt("height"), "stale_observation")
                             val image = UiImage.encode(bitmap)
+                            val tiles = UiImage.tileHashes(bitmap)
                             checkObservation(obj("observation_id" to id))
-                            future.complete(obj("tree" to observed,"image" to image))
+                            future.complete(obj("tree" to observed, "image" to image, "tile_hashes" to arr(tiles)))
                         } finally { bitmap.recycle() }
                     } catch (e: Exception) { future.completeExceptionally(e) }
                     finally { hardware.close() }
                 }
-                override fun onFailure(errorCode: Int) { future.completeExceptionally(AgentError("screenshot_denied_$errorCode")) }
+                override fun onFailure(errorCode: Int) {
+                    val state = observed.getJSONObject("display").optInt("state", Display.STATE_ON)
+                    if (errorCode != ERROR_TAKE_SCREENSHOT_SECURE_WINDOW && UiContract.isDisplaySleeping(state)) {
+                        future.complete(obj("tree" to observed, "image" to null))
+                        return
+                    }
+                    val err = if (errorCode == ERROR_TAKE_SCREENSHOT_SECURE_WINDOW)
+                        AgentError("secure_window_takeover_required", "当前界面受 FLAG_SECURE 保护（如密码或支付页），系统禁止截图，请在手机端手动完成该步。")
+                    else AgentError("screenshot_denied_$errorCode")
+                    future.completeExceptionally(err)
+                }
             })
         }
-        try { return future.get(10,TimeUnit.SECONDS) } catch(e: Exception) { future.cancel(false); throw e }
+        try { return future.get(10, TimeUnit.SECONDS) } catch (e: Exception) { future.cancel(false); throw e }
     }
+
     fun gesture(kind: String, args: JSONObject): JSONObject {
         val future = CompletableFuture<Boolean>()
         main {
@@ -382,6 +777,7 @@ class AccessService : AccessibilityService() {
         demand(future.get(7, TimeUnit.SECONDS), "gesture_cancelled")
         return obj("action" to kind, "gesture_completed" to true, "verified" to false, "next_action" to "android observe")
     }
+
     fun global(action: String): JSONObject = main {
         val code = when (action) {
             "back" -> GLOBAL_ACTION_BACK; "home" -> GLOBAL_ACTION_HOME; "recents" -> GLOBAL_ACTION_RECENTS
@@ -393,6 +789,7 @@ class AccessService : AccessibilityService() {
         observations.remove(Display.DEFAULT_DISPLAY)
         obj("action" to action, "accepted" to true, "verified" to false, "next_action" to "android observe")
     }
+
     fun screenshot(root: File, operation: String): JSONObject {
         val observed = dump()
         val directory = File(root, "screenshots").apply { mkdirs() }
@@ -410,9 +807,11 @@ class AccessService : AccessibilityService() {
                         val bitmap = try { source.copy(Bitmap.Config.ARGB_8888, false) } finally { source.recycle() }
                         try {
                             FileOutputStream(file).use { output -> demand(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output), "screenshot_encode_failed"); output.fd.sync() }
-                            val receipt = obj("path" to "screenshots/${file.name}", "width" to bitmap.width, "height" to bitmap.height,
+                            val receipt = obj(
+                                "path" to "screenshots/${file.name}", "width" to bitmap.width, "height" to bitmap.height,
                                 "size" to file.length(), "observation_id" to observed.getString("observation_id"), "package" to observed.opt("package"),
-                                "captured_at_ms" to System.currentTimeMillis(), "secure_windows_bypassed" to false)
+                                "captured_at_ms" to System.currentTimeMillis(), "secure_windows_bypassed" to false
+                            )
                             if (!future.complete(receipt)) file.delete()
                         } finally { bitmap.recycle() }
                     } catch (e: Exception) { file.delete(); future.completeExceptionally(e) }
@@ -424,5 +823,6 @@ class AccessService : AccessibilityService() {
         try { return future.get(10, TimeUnit.SECONDS) }
         catch (e: Exception) { future.cancel(false); throw e }
     }
+
     companion object { @Volatile var instance: AccessService? = null; private set }
 }

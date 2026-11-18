@@ -1,9 +1,16 @@
 //! WGC HWND pixels and UIA standard controls; no focus, SendInput or UIPI workaround.
 use super::{
-    windows_session::{Backend, Pixels, WindowAuthority},
+    windows_session::{
+        Backend, HitNode, MAX_UIA_DEPTH, MAX_UIA_DURATION, MAX_UIA_ELEMENTS, MAX_UIA_VISITS,
+        Pixels, ScrollStep, WindowAuthority, redact_uia_value, scroll_steps,
+        scrollable_control_ancestor, standard_control_ancestor, uia_is_interactive,
+        uia_is_title_or_text, uia_role_name, value_control_ancestor, window_bounds,
+    },
     windows_target::Target,
 };
-use octendra_desktop_protocol::{ErrorCode, MAX_WORKER_PIXELS, RawPixels, SourcePoint};
+use octendra_desktop_protocol::{
+    ErrorCode, MAX_WORKER_PIXELS, RawPixels, SourcePoint, ui::SemanticElement,
+};
 use std::{
     marker::PhantomData,
     rc::Rc,
@@ -31,7 +38,7 @@ use windows::{
         },
         UI::{Accessibility::*, HiDpi::*},
     },
-    core::{Interface, factory},
+    core::{BSTR, Interface, factory},
 };
 
 /// UIA hit testing virtualizes coordinates for unaware clients. Set only this
@@ -304,13 +311,11 @@ impl Native {
         let live = PhysicalDpi::active() && self.live();
         super::windows_session::valid_input(live, captured, deadline, Instant::now())
     }
-    /// Inspect only ancestors below the pinned window. An occluding/foreign
-    /// process, disabled nearest control or unproven root has no fallback.
-    unsafe fn control_at(
+    unsafe fn raw_ancestors(
         &self,
         point: [i32; 2],
-    ) -> windows::core::Result<(IUIAutomationElement, super::windows_session::Activation)> {
-        use super::windows_session::{HitNode, standard_control_ancestor};
+        include_root: bool,
+    ) -> windows::core::Result<(Vec<IUIAutomationElement>, Vec<HitNode>, bool)> {
         let denied =
             || windows::core::Error::from_hresult(windows::core::HRESULT(0x80070005u32 as i32));
         if !PhysicalDpi::active() {
@@ -328,7 +333,8 @@ impl Native {
             let (mut elements, mut nodes) = (Vec::new(), Vec::new());
             let mut root_reached = false;
             for _ in 0..64 {
-                if self.automation.CompareElements(&root, &element)?.as_bool() {
+                let is_root = self.automation.CompareElements(&root, &element)?.as_bool();
+                if is_root && !include_root {
                     root_reached = true;
                     break;
                 }
@@ -345,13 +351,95 @@ impl Native {
                     bounds: [rect.left, rect.top, rect.right, rect.bottom],
                 });
                 elements.push(element.clone());
+                if is_root {
+                    root_reached = true;
+                    break;
+                }
                 element = walker.GetParentElement(&element)?;
             }
-            let (index, operation) =
-                standard_control_ancestor(&nodes, root_reached, self.authority.process_id, point)
-                    .ok_or_else(denied)?;
-            Ok((elements[index].clone(), operation))
+            Ok((elements, nodes, root_reached))
         }
+    }
+    /// Inspect only ancestors below the pinned window. An occluding/foreign
+    /// process, disabled nearest control or unproven root has no fallback.
+    unsafe fn control_at(
+        &self,
+        point: [i32; 2],
+    ) -> windows::core::Result<(IUIAutomationElement, super::windows_session::Activation)> {
+        let denied =
+            || windows::core::Error::from_hresult(windows::core::HRESULT(0x80070005u32 as i32));
+        let (elements, nodes, root_reached) = unsafe { self.raw_ancestors(point, false)? };
+        let (index, operation) =
+            standard_control_ancestor(&nodes, root_reached, self.authority.process_id, point)
+                .ok_or_else(denied)?;
+        Ok((elements[index].clone(), operation))
+    }
+    unsafe fn value_control_at(
+        &self,
+        point: [i32; 2],
+    ) -> windows::core::Result<(IUIAutomationElement, IUIAutomationValuePattern)> {
+        let denied =
+            || windows::core::Error::from_hresult(windows::core::HRESULT(0x80070005u32 as i32));
+        let (elements, nodes, root_reached) = unsafe { self.raw_ancestors(point, false)? };
+        let index = value_control_ancestor(&nodes, root_reached, self.authority.process_id, point)
+            .ok_or_else(denied)?;
+        let element = elements[index].clone();
+        let pattern = unsafe {
+            element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)?
+        };
+        if unsafe { pattern.CurrentIsReadOnly()?.as_bool() } {
+            return Err(denied());
+        }
+        Ok((element, pattern))
+    }
+    unsafe fn scroll_control_at(
+        &self,
+        point: [i32; 2],
+        horizontal: i16,
+        vertical: i16,
+    ) -> windows::core::Result<(IUIAutomationElement, IUIAutomationScrollPattern)> {
+        let denied =
+            || windows::core::Error::from_hresult(windows::core::HRESULT(0x80070005u32 as i32));
+        let (elements, nodes, root_reached) = unsafe { self.raw_ancestors(point, true)? };
+        let mut patterns: Vec<Option<IUIAutomationScrollPattern>> =
+            Vec::with_capacity(elements.len());
+        let mut scrollable = Vec::with_capacity(elements.len());
+        for element in &elements {
+            let pat = unsafe {
+                element
+                    .GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
+                    .ok()
+            };
+            let ok = pat.as_ref().is_some_and(|p| unsafe {
+                (horizontal == 0
+                    || p.CurrentHorizontallyScrollable()
+                        .is_ok_and(|b| b.as_bool()))
+                    && (vertical == 0
+                        || p.CurrentVerticallyScrollable()
+                            .is_ok_and(|b| b.as_bool()))
+            });
+            scrollable.push(ok);
+            patterns.push(pat);
+        }
+        let index = scrollable_control_ancestor(
+            &nodes,
+            root_reached,
+            self.authority.process_id,
+            point,
+            &scrollable,
+        )
+        .ok_or_else(denied)?;
+        let pattern = patterns[index].clone().ok_or_else(denied)?;
+        Ok((elements[index].clone(), pattern))
+    }
+}
+fn to_scroll_amount(step: ScrollStep) -> ScrollAmount {
+    match step {
+        ScrollStep::NoAmount => ScrollAmount_NoAmount,
+        ScrollStep::SmallDecrement => ScrollAmount_SmallDecrement,
+        ScrollStep::LargeDecrement => ScrollAmount_LargeDecrement,
+        ScrollStep::SmallIncrement => ScrollAmount_SmallIncrement,
+        ScrollStep::LargeIncrement => ScrollAmount_LargeIncrement,
     }
 }
 enum Pattern {
@@ -387,6 +475,161 @@ impl Backend for Native {
             return Err(ErrorCode::StaleFrame);
         }
         Ok(pixels)
+    }
+    fn elements(&self) -> Vec<SemanticElement> {
+        if !PhysicalDpi::active() || !self.live() {
+            return Vec::new();
+        }
+        struct WalkCtx {
+            pid: i32,
+            position: [i32; 2],
+            size: [u32; 2],
+            started: Instant,
+            visited: usize,
+            elements: Vec<SemanticElement>,
+        }
+        unsafe fn walk(
+            walker: &IUIAutomationTreeWalker,
+            element: &IUIAutomationElement,
+            depth: usize,
+            ctx: &mut WalkCtx,
+        ) {
+            if depth > MAX_UIA_DEPTH
+                || ctx.elements.len() >= MAX_UIA_ELEMENTS
+                || ctx.visited >= MAX_UIA_VISITS
+                || ctx.started.elapsed() >= MAX_UIA_DURATION
+            {
+                return;
+            }
+            ctx.visited += 1;
+            let Ok(pid) = (unsafe { element.CurrentProcessId() }) else {
+                return;
+            };
+            if pid != ctx.pid {
+                return;
+            }
+            if unsafe { element.CurrentIsOffscreen() }.is_ok_and(|b| b.as_bool()) {
+                return;
+            }
+            if let Ok(rect) = unsafe { element.CurrentBoundingRectangle() }
+                && let Some(bounds) =
+                    window_bounds(ctx.position, ctx.size, [rect.left, rect.top, rect.right, rect.bottom])
+                && let Ok(ct) = unsafe { element.CurrentControlType() }
+            {
+                let control_type = ct.0;
+                let interactive = uia_is_interactive(control_type);
+                let is_title = uia_is_title_or_text(control_type);
+                if interactive || is_title {
+                    let name = unsafe { element.CurrentName() }
+                        .ok()
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
+                    let enabled =
+                        unsafe { element.CurrentIsEnabled() }.map_or(true, |b| b.as_bool());
+                    let focused =
+                        unsafe { element.CurrentHasKeyboardFocus() }.is_ok_and(|b| b.as_bool());
+                    let is_password =
+                        unsafe { element.CurrentIsPassword() }.is_ok_and(|b| b.as_bool());
+                    let raw_value = if is_password {
+                        None
+                    } else {
+                        unsafe {
+                            element
+                                .GetCurrentPatternAs::<IUIAutomationValuePattern>(
+                                    UIA_ValuePatternId,
+                                )
+                                .ok()
+                                .and_then(|p| p.CurrentValue().ok())
+                                .map(|s| s.to_string().chars().take(240).collect())
+                        }
+                    };
+                    let value = redact_uia_value(is_password, raw_value);
+                    let checked = unsafe {
+                        element
+                            .GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+                            .ok()
+                            .and_then(|p| p.CurrentToggleState().ok())
+                            .and_then(|state| {
+                                if state == ToggleState_On {
+                                    Some(true)
+                                } else if state == ToggleState_Off {
+                                    Some(false)
+                                } else {
+                                    None
+                                }
+                            })
+                    };
+                    let selected = unsafe {
+                        element
+                            .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                                UIA_SelectionItemPatternId,
+                            )
+                            .ok()
+                            .and_then(|p| p.CurrentIsSelected().ok())
+                            .map(|b| b.as_bool())
+                    };
+                    if interactive || !name.is_empty() || value.is_some() {
+                        ctx.elements.push(SemanticElement {
+                            ref_id: format!("n{}", ctx.elements.len() + 1),
+                            role: uia_role_name(control_type).to_string(),
+                            name,
+                            value,
+                            bounds,
+                            interactive,
+                            enabled,
+                            focused,
+                            checked,
+                            selected,
+                        });
+                        if ctx.elements.len() >= MAX_UIA_ELEMENTS {
+                            return;
+                        }
+                    }
+                }
+            }
+            if depth >= MAX_UIA_DEPTH || ctx.started.elapsed() >= MAX_UIA_DURATION {
+                return;
+            }
+            let Ok(mut child) = (unsafe { walker.GetFirstChildElement(element) }) else {
+                return;
+            };
+            loop {
+                unsafe {
+                    walk(walker, &child, depth + 1, ctx);
+                }
+                if ctx.elements.len() >= MAX_UIA_ELEMENTS
+                    || ctx.visited >= MAX_UIA_VISITS
+                    || ctx.started.elapsed() >= MAX_UIA_DURATION
+                {
+                    break;
+                }
+                let Ok(next) = (unsafe { walker.GetNextSiblingElement(&child) }) else {
+                    break;
+                };
+                child = next;
+            }
+        }
+        let Ok(root) = (unsafe {
+            self.automation
+                .ElementFromHandle(HWND(self.authority.window_id as usize as *mut _))
+        }) else {
+            return Vec::new();
+        };
+        let Ok(walker) = (unsafe { self.automation.ControlViewWalker() }) else {
+            return Vec::new();
+        };
+        let mut ctx = WalkCtx {
+            pid: self.authority.process_id as i32,
+            position: self.position,
+            size: self.size,
+            started: Instant::now(),
+            visited: 0,
+            elements: Vec::new(),
+        };
+        unsafe {
+            walk(&walker, &root, 0, &mut ctx);
+        }
+        ctx.elements
     }
     fn invoke(
         &mut self,
@@ -450,6 +693,78 @@ impl Backend for Native {
             }
         };
         effect.map_err(|_| ErrorCode::OutcomeUnknown)
+    }
+    fn set_value(
+        &mut self,
+        point: SourcePoint,
+        text: &str,
+        captured: Instant,
+        deadline: Instant,
+    ) -> Result<(), ErrorCode> {
+        if !self.valid_input(captured, deadline) {
+            return Err(ErrorCode::StaleFrame);
+        }
+        let point = super::windows_session::physical_point(self.position, self.size, point)
+            .ok_or(ErrorCode::InvalidCoordinates)?;
+        let pattern = (|| -> windows::core::Result<IUIAutomationValuePattern> {
+            unsafe {
+                let (element, pattern) = self.value_control_at(point)?;
+                let (current, _) = self.value_control_at(point)?;
+                if !self
+                    .automation
+                    .CompareElements(&element, &current)?
+                    .as_bool()
+                {
+                    return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+                        0x80070005u32 as i32,
+                    )));
+                }
+                Ok(pattern)
+            }
+        })()
+        .map_err(|_| ErrorCode::InvalidActions)?;
+        if !self.valid_input(captured, deadline) {
+            return Err(ErrorCode::StaleFrame);
+        }
+        let bstr = BSTR::from(text);
+        unsafe { pattern.SetValue(&bstr) }.map_err(|_| ErrorCode::OutcomeUnknown)
+    }
+    fn scroll(
+        &mut self,
+        point: SourcePoint,
+        horizontal: i16,
+        vertical: i16,
+        captured: Instant,
+        deadline: Instant,
+    ) -> Result<(), ErrorCode> {
+        if !self.valid_input(captured, deadline) {
+            return Err(ErrorCode::StaleFrame);
+        }
+        let point = super::windows_session::physical_point(self.position, self.size, point)
+            .ok_or(ErrorCode::InvalidCoordinates)?;
+        let pattern = (|| -> windows::core::Result<IUIAutomationScrollPattern> {
+            unsafe {
+                let (element, pattern) = self.scroll_control_at(point, horizontal, vertical)?;
+                let (current, _) = self.scroll_control_at(point, horizontal, vertical)?;
+                if !self
+                    .automation
+                    .CompareElements(&element, &current)?
+                    .as_bool()
+                {
+                    return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+                        0x80070005u32 as i32,
+                    )));
+                }
+                Ok(pattern)
+            }
+        })()
+        .map_err(|_| ErrorCode::InvalidActions)?;
+        if !self.valid_input(captured, deadline) {
+            return Err(ErrorCode::StaleFrame);
+        }
+        let (h_step, v_step) = scroll_steps(horizontal, vertical);
+        unsafe { pattern.Scroll(to_scroll_amount(h_step), to_scroll_amount(v_step)) }
+            .map_err(|_| ErrorCode::OutcomeUnknown)
     }
     fn close(&mut self) -> bool {
         self.capture.take().is_none_or(|c| c.close())

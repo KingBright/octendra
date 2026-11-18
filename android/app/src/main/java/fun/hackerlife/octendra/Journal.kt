@@ -83,6 +83,44 @@ class Journal(context: Context, val config: GatewayConfig) : SQLiteOpenHelper(co
         val v = ContentValues().apply { put("id", id); put("owner", owner); put("root", root.path) }
         writableDatabase.insertOrThrow("workspaces", null, v)
     }
+    @Synchronized fun ensureDefaultWorkspace(candidateId: String, owner: String, root: File): String {
+        demand(candidateId.startsWith(config.deviceId + ":"), "workspace_owner_mismatch")
+        val canonicalRoot = root.canonicalFile
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            var resolved: String? = null
+            db.rawQuery("SELECT owner,root FROM workspaces WHERE id=?", arrayOf(candidateId)).use { c ->
+                if (c.moveToFirst()) {
+                    if (c.getString(0) == owner) {
+                        demand(File(c.getString(1)).canonicalFile == canonicalRoot, "workspace_root_changed")
+                        resolved = candidateId
+                    }
+                } else {
+                    val v = ContentValues().apply { put("id", candidateId); put("owner", owner); put("root", canonicalRoot.path) }
+                    db.insertOrThrow("workspaces", null, v)
+                    resolved = candidateId
+                }
+            }
+            if (resolved == null) {
+                val scopedId = "$candidateId#${sha256(owner.toByteArray()).take(16)}"
+                db.rawQuery("SELECT owner,root FROM workspaces WHERE id=?", arrayOf(scopedId)).use { c ->
+                    if (c.moveToFirst()) {
+                        demand(c.getString(0) == owner, "workspace_owner_mismatch")
+                        demand(File(c.getString(1)).canonicalFile == canonicalRoot, "workspace_root_changed")
+                    } else {
+                        val v = ContentValues().apply { put("id", scopedId); put("owner", owner); put("root", canonicalRoot.path) }
+                        db.insertOrThrow("workspaces", null, v)
+                    }
+                }
+                resolved = scopedId
+            }
+            db.setTransactionSuccessful()
+            return checkNotNull(resolved)
+        } finally {
+            db.endTransaction()
+        }
+    }
     @Synchronized fun saveTerminal(id: String, ws: String, owner: String, result: JSONObject) {
         val v = ContentValues().apply { put("id", id); put("workspace", ws); put("owner", owner); put("result", result.toString()); put("created", now()) }
         writableDatabase.insertOrThrow("terminals", null, v)

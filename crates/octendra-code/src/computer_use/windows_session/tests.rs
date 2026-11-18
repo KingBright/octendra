@@ -254,6 +254,8 @@ struct Calls {
     open: usize,
     capture: usize,
     input: usize,
+    fill: Vec<(SourcePoint, String)>,
+    scroll: Vec<(SourcePoint, i16, i16)>,
     close: usize,
 }
 struct Recording {
@@ -262,6 +264,7 @@ struct Recording {
     fail_input: bool,
     stale: bool,
     bad_pixels: bool,
+    elements: Vec<ui::SemanticElement>,
 }
 impl Backend for Recording {
     fn live(&self) -> bool {
@@ -295,8 +298,44 @@ impl Backend for Recording {
                 },
         })
     }
+    fn elements(&self) -> Vec<ui::SemanticElement> {
+        self.elements.clone()
+    }
     fn invoke(&mut self, _: SourcePoint, _: Instant, _: Instant) -> Result<(), ErrorCode> {
         self.calls.lock().unwrap().input += 1;
+        if self.fail_input {
+            Err(ErrorCode::OutcomeUnknown)
+        } else {
+            Ok(())
+        }
+    }
+    fn set_value(
+        &mut self,
+        point: SourcePoint,
+        text: &str,
+        _: Instant,
+        _: Instant,
+    ) -> Result<(), ErrorCode> {
+        let mut c = self.calls.lock().unwrap();
+        c.input += 1;
+        c.fill.push((point, text.to_string()));
+        if self.fail_input {
+            Err(ErrorCode::OutcomeUnknown)
+        } else {
+            Ok(())
+        }
+    }
+    fn scroll(
+        &mut self,
+        point: SourcePoint,
+        horizontal: i16,
+        vertical: i16,
+        _: Instant,
+        _: Instant,
+    ) -> Result<(), ErrorCode> {
+        let mut c = self.calls.lock().unwrap();
+        c.input += 1;
+        c.scroll.push((point, horizontal, vertical));
         if self.fail_input {
             Err(ErrorCode::OutcomeUnknown)
         } else {
@@ -324,6 +363,7 @@ fn fixture() -> (Worker<Recording>, Arc<Mutex<Calls>>) {
                 fail_input: false,
                 stale: false,
                 bad_pixels: false,
+                elements: Vec::new(),
             },
             id,
             Instant::now() + Duration::from_secs(10),
@@ -348,7 +388,7 @@ fn open(w: &mut Worker<Recording>) -> Binding {
     }
 }
 fn frame(w: &mut Worker<Recording>, binding: &Binding) -> FrameRef {
-    let (r, p) = w.handle(Request::Observe {
+    let (r, p, _) = w.handle(Request::Observe {
         binding: binding.clone(),
     });
     assert_eq!(p.unwrap().bytes.len(), 16);
@@ -568,4 +608,245 @@ fn windows_capture_hash_and_pixel_budget_are_enforced() {
         assert!(w.handle(Request::Observe { binding: b }).0.is_err());
         assert_eq!(c.lock().unwrap().input, 0);
     }
+}
+
+#[test]
+fn windows_uia_value_and_scroll_ancestor_guards_enforce_same_process_and_no_fallback() {
+    let edit_nodes = [hit_node(50020), hit_node(50004), hit_node(50033)];
+    assert_eq!(value_control_ancestor(&edit_nodes, true, 7, [50, 50]), Some(1));
+    assert_eq!(value_control_ancestor(&edit_nodes, false, 7, [50, 50]), None);
+    assert_eq!(value_control_ancestor(&edit_nodes, true, 8, [50, 50]), None);
+
+    let mut disabled_edit = [hit_node(50020), hit_node(50004), hit_node(50030)];
+    disabled_edit[1].enabled = false;
+    assert_eq!(
+        value_control_ancestor(&disabled_edit, true, 7, [50, 50]),
+        None
+    );
+
+    let mut foreign_child = [hit_node(50020), hit_node(50004), hit_node(50033)];
+    foreign_child[0].process_id = 99;
+    assert_eq!(
+        value_control_ancestor(&foreign_child, true, 7, [50, 50]),
+        None
+    );
+
+    let scroll_nodes = [hit_node(50020), hit_node(50033), hit_node(50032)];
+    assert_eq!(
+        scrollable_control_ancestor(&scroll_nodes, true, 7, [50, 50], &[false, true, true]),
+        Some(1)
+    );
+    assert_eq!(
+        scrollable_control_ancestor(&scroll_nodes, true, 7, [50, 50], &[false, false, false]),
+        None
+    );
+    let mut disabled_scroll = [hit_node(50020), hit_node(50033), hit_node(50032)];
+    disabled_scroll[1].enabled = false;
+    assert_eq!(
+        scrollable_control_ancestor(&disabled_scroll, true, 7, [50, 50], &[false, true, true]),
+        None
+    );
+    assert_eq!(
+        scrollable_control_ancestor(&foreign_child, true, 7, [50, 50], &[false, false, true]),
+        None
+    );
+}
+
+#[test]
+fn windows_uia_semantic_bounds_redaction_and_scroll_steps_are_exact() {
+    assert_eq!(
+        window_bounds([100, 200], [800, 600], [120, 240, 320, 290]),
+        Some([20, 40, 220, 90])
+    );
+    assert_eq!(
+        window_bounds([100, 200], [800, 600], [50, 150, 140, 230]),
+        Some([0, 0, 40, 30])
+    );
+    assert_eq!(
+        window_bounds([100, 200], [800, 600], [0, 0, 50, 50]),
+        None
+    );
+    assert_eq!(
+        redact_uia_value(true, Some("secret".into())),
+        Some("<redacted>".into())
+    );
+    assert_eq!(redact_uia_value(true, None), Some("<redacted>".into()));
+    assert_eq!(
+        redact_uia_value(false, Some("hello".into())),
+        Some("hello".into())
+    );
+    assert_eq!(redact_uia_value(false, Some(String::new())), None);
+    assert_eq!(uia_role_name(50004), "Edit");
+    assert_eq!(uia_role_name(50000), "Button");
+    assert!(uia_is_interactive(50000) && uia_is_interactive(50004) && !uia_is_interactive(50020));
+    assert!(uia_is_title_or_text(50020) && uia_is_title_or_text(50032) && !uia_is_title_or_text(50000));
+    assert_eq!(
+        scroll_steps(0, -100),
+        (ScrollStep::NoAmount, ScrollStep::SmallIncrement)
+    );
+    assert_eq!(
+        scroll_steps(0, 100),
+        (ScrollStep::NoAmount, ScrollStep::SmallDecrement)
+    );
+    assert_eq!(
+        scroll_steps(-100, 0),
+        (ScrollStep::SmallIncrement, ScrollStep::NoAmount)
+    );
+    assert_eq!(
+        scroll_steps(300, -400),
+        (ScrollStep::LargeDecrement, ScrollStep::LargeIncrement)
+    );
+}
+
+#[test]
+fn windows_focus_free_fill_scroll_and_semantic_elements_dispatch_via_worker() {
+    let (mut w, c) = fixture();
+    w.backend.elements = vec![ui::SemanticElement {
+        ref_id: "n1".into(),
+        role: "Edit".into(),
+        name: "Search".into(),
+        value: Some("abc".into()),
+        bounds: [0, 0, 2, 2],
+        interactive: true,
+        enabled: true,
+        focused: false,
+        checked: None,
+        selected: None,
+    }];
+    let b = open(&mut w);
+    let (obs, _, elements) = w.handle(Request::Observe { binding: b.clone() });
+    let Response::Observed { frame: f1 } = obs.unwrap() else {
+        panic!();
+    };
+    assert_eq!(elements.len(), 1);
+    assert_eq!(elements[0].ref_id, "n1");
+
+    // Fill with Ctrl+A (0xe0) and Unicode text.
+    let fill_actions = vec![
+        Action::PointerMove { x: 1.0, y: 1.0 },
+        Action::ButtonDown {
+            button: Button::Left,
+        },
+        Action::ButtonUp {
+            button: Button::Left,
+        },
+        Action::KeyDown { usage: 0xe0 },
+        Action::KeyDown { usage: 4 },
+        Action::KeyUp { usage: 4 },
+        Action::KeyUp { usage: 0xe0 },
+        Action::Unicode {
+            text: "你好 UIA".into(),
+            key_down: true,
+        },
+        Action::Unicode {
+            text: String::new(),
+            key_down: false,
+        },
+    ];
+    assert!(matches!(
+        w.handle(Request::Act {
+            frame: f1,
+            sequence: 1,
+            actions: fill_actions
+        })
+        .0
+        .unwrap(),
+        Response::Accepted {
+            accepted_actions: 9,
+            effect_confirmed: false,
+            ..
+        }
+    ));
+    assert_eq!(
+        c.lock().unwrap().fill,
+        vec![(SourcePoint { x: 1.0, y: 1.0 }, "你好 UIA".to_string())]
+    );
+
+    // Next Observe + Fill clear (empty text via Ctrl+A + Backspace 42).
+    let f2 = frame(&mut w, &b);
+    let clear_actions = vec![
+        Action::PointerMove { x: 0.0, y: 0.0 },
+        Action::ButtonDown {
+            button: Button::Left,
+        },
+        Action::ButtonUp {
+            button: Button::Left,
+        },
+        Action::KeyDown { usage: 0xe0 },
+        Action::KeyDown { usage: 4 },
+        Action::KeyUp { usage: 4 },
+        Action::KeyUp { usage: 0xe0 },
+        Action::KeyDown { usage: 42 },
+        Action::KeyUp { usage: 42 },
+    ];
+    assert!(
+        w.handle(Request::Act {
+            frame: f2,
+            sequence: 2,
+            actions: clear_actions
+        })
+        .0
+        .is_ok()
+    );
+    assert_eq!(
+        c.lock().unwrap().fill.last(),
+        Some(&(SourcePoint { x: 0.0, y: 0.0 }, String::new()))
+    );
+
+    // Next Observe + Scroll.
+    let f3 = frame(&mut w, &b);
+    let scroll_actions = vec![
+        Action::PointerMove { x: 1.0, y: 0.0 },
+        Action::Wheel {
+            horizontal: 0,
+            vertical: -100,
+        },
+    ];
+    assert!(
+        w.handle(Request::Act {
+            frame: f3,
+            sequence: 3,
+            actions: scroll_actions
+        })
+        .0
+        .is_ok()
+    );
+    assert_eq!(
+        c.lock().unwrap().scroll,
+        vec![(SourcePoint { x: 1.0, y: 0.0 }, 0, -100)]
+    );
+
+    // Reject zero-wheel, NUL fill, and mismatched select-all keys without reaching backend.
+    let f4 = frame(&mut w, &b);
+    assert_eq!(
+        parse_actions(
+            &f4,
+            &[
+                Action::PointerMove { x: 0.0, y: 0.0 },
+                Action::Wheel {
+                    horizontal: 0,
+                    vertical: 0,
+                }
+            ]
+        ),
+        Err(ErrorCode::InvalidActions)
+    );
+    assert_eq!(
+        parse_actions(
+            &f4,
+            &[
+                Action::PointerMove { x: 0.0, y: 0.0 },
+                Action::Unicode {
+                    text: "a\0b".into(),
+                    key_down: true,
+                },
+                Action::Unicode {
+                    text: String::new(),
+                    key_down: false,
+                }
+            ]
+        ),
+        Err(ErrorCode::InvalidActions)
+    );
+    assert_eq!(c.lock().unwrap().input, 3);
 }

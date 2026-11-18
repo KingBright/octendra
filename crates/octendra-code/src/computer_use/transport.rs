@@ -166,9 +166,7 @@ impl LaunchApproval {
             if let Some(route) = &self.weavelo {
                 ensure!(
                     cfg!(target_os = "macos")
-                        && (!self.input
-                            || route.input_platform
-                                == Some(super::weavelo_route::InputPlatform::Macos))
+                        && (!self.input || route.input_platform.is_some())
                         && self.desktop_session == "weavelo"
                         && self.logical_position == [0, 0]
                         && route.desktop_id() == self.identity.desktop_id,
@@ -601,6 +599,15 @@ impl NativeWorkers {
             .as_ref()
             .map(|approval| (approval.capability_version, approval.identity.clone()))
     }
+    pub async fn weavelo_input_platform(&self) -> Option<super::weavelo_route::InputPlatform> {
+        self.state
+            .lock()
+            .await
+            .approval
+            .as_ref()
+            .and_then(|a| a.weavelo.as_ref())
+            .and_then(|r| r.input_platform)
+    }
     #[cfg(target_os = "macos")]
     pub async fn capabilities(&self) -> Capabilities {
         self.refresh_compatible_approval().await;
@@ -721,9 +728,9 @@ impl NativeWorkers {
             max_actions: if platform == "linux_portal_window_observe_only" {
                 0
             } else if platform == "windows_wgc_uia_standard_control_click_only" {
-                3
+                MAX_ACTIONS
             } else if a.weavelo.is_some() {
-                if a.input { 3 } else { 0 }
+                if a.input { MAX_ACTIONS } else { 0 }
             } else {
                 MAX_ACTIONS
             },
@@ -1048,9 +1055,14 @@ impl NativeWorkers {
             Err(error) => {
                 state.poisoned = matches!(error, ErrorCode::OutcomeUnknown);
                 let clean = self.close_state(state).await;
-                return Ok(
-                    serde_json::json!({"error":if clean {error}else{ErrorCode::OutcomeUnknown},"automatic_replay_safe":false}),
-                );
+                let mut out = serde_json::json!({
+                    "error": if clean { error } else { ErrorCode::OutcomeUnknown },
+                    "automatic_replay_safe": false,
+                });
+                if clean && let Some(takeover_state) = reply.takeover_state {
+                    out["takeover_state"] = serde_json::json!(takeover_state);
+                }
+                return Ok(out);
             }
         };
         let valid = match (&request, &value) {
@@ -1145,6 +1157,8 @@ impl NativeWorkers {
                     bytes: bytes.len(),
                     sha256: digest(&bytes),
                     pixels,
+                    elements: reply.elements,
+                    takeover_state: reply.takeover_state,
                 };
                 if self.write_frame(id, &bytes).is_err() {
                     state.poisoned = true;
@@ -1548,3 +1562,144 @@ impl NativeWorkers {
 #[cfg(test)]
 #[path = "transport_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod propagation_tests {
+    use super::*;
+    use octendra_desktop_protocol::ui::SemanticElement;
+
+    #[tokio::test]
+    async fn weavelo_input_platform_accessor_returns_explicit_platform() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = tests::identity();
+        let w = tests::fixture(dir.path(), &dir.path().join("desktop.lock"), &id, "normal");
+        assert!(w.weavelo_input_platform().await.is_none());
+        w.state.lock().await.approval.as_mut().unwrap().weavelo =
+            Some(super::super::weavelo_route::Route {
+                input_platform: Some(super::super::weavelo_route::InputPlatform::Windows),
+                profile: dir.path().to_owned(),
+                generation: "1-2".into(),
+                gui_executable_sha256: "0".repeat(64),
+                target: super::super::weavelo_route::Target {
+                    peer_device_id: "peer".into(),
+                    source: super::super::weavelo_route::Source::Window(1),
+                    connection_id: 1,
+                },
+            });
+        assert_eq!(
+            w.weavelo_input_platform().await,
+            Some(super::super::weavelo_route::InputPlatform::Windows)
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_propagates_elements_and_takeover_state_without_poisoning() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = tests::identity();
+        let w = tests::fixture(dir.path(), &dir.path().join("desktop.lock"), &id, "normal");
+        {
+            let mut st = w.state.lock().await;
+            let script = r#"
+import sys,struct,json,time,hashlib
+def exact(n):
+ b=b""
+ while len(b)<n:
+  v=sys.stdin.buffer.read(n-len(b))
+  if not v:return None
+  b+=v
+ return b
+binding=None
+while True:
+ head=exact(4)
+ if head is None:break
+ raw=exact(struct.unpack(">I",head)[0])
+ if raw is None:break
+ e=json.loads(raw); r=e["request"]; op=r["operation"]; pixels=None; data=b""
+ elements=[]; takeover=None
+ if op=="open":
+  binding={"identity":r["identity"],"epoch":"44444444-4444-4444-8444-444444444444"}
+  result={"Ok":{"state":"opened","binding":binding,"expires_at_ms":int(time.time()*1000)+r["lease_ms"]}}
+ elif op=="observe":
+  frame={"binding":binding,"source_revision":1,"frame_sequence":1,"mapping":{"frame_size":[2,2],"content":{"left":0,"top":0,"width":2,"height":2},"logical_size":[2,2],"desktop_position":[0,0],"rotation":"r0"}}
+  planes=[b"abcd",b"ef"]
+  pixels={"encoding":"nv12","size":[2,2],"color":[1,1,1,1],"plane_lengths":[4,2],"plane_sha256":[hashlib.sha256(p).hexdigest() for p in planes]}
+  data=b"".join(planes)
+  elements=[{"ref_id":"n1","role":"AXButton","name":"Save","bounds":[0,0,2,2],"interactive":True,"enabled":True,"focused":False}]
+  takeover="paused_by_human"
+  result={"Ok":{"state":"observed","frame":frame}}
+ elif op=="act":
+  takeover="paused_by_human"
+  result={"Err":"unavailable"}
+ elif op=="close":
+  result={"Ok":{"state":"closed"}}
+ else:sys.exit(10)
+ h=json.dumps({"request_id":e["request_id"],"result":result,"pixels":pixels,"elements":elements,"takeover_state":takeover}).encode()
+ sys.stdout.buffer.write(struct.pack(">I",len(h))+h+data);sys.stdout.buffer.flush()
+"#;
+            st.fixture = Some(script.into());
+        }
+        let opened = w
+            .dispatch(
+                Uuid::new_v4(),
+                &id,
+                7,
+                Request::Open {
+                    identity: id.clone(),
+                    lease_ms: 5000,
+                },
+            )
+            .await
+            .unwrap();
+        let binding: Binding = serde_json::from_value(opened["binding"].clone()).unwrap();
+        let obs_id = Uuid::new_v4();
+        let observed = w
+            .dispatch(
+                obs_id,
+                &id,
+                7,
+                Request::Observe {
+                    binding: binding.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        let artifact: FrameArtifact =
+            serde_json::from_value(observed["frame_artifact"].clone()).unwrap();
+        assert_eq!(
+            artifact.elements,
+            vec![SemanticElement {
+                ref_id: "n1".into(),
+                role: "AXButton".into(),
+                name: "Save".into(),
+                value: None,
+                bounds: [0, 0, 2, 2],
+                interactive: true,
+                enabled: true,
+                focused: false,
+                checked: None,
+                selected: None,
+            }]
+        );
+        assert_eq!(
+            artifact.takeover_state.as_deref(),
+            Some("paused_by_human")
+        );
+        let frame: FrameRef = serde_json::from_value(observed["frame"].clone()).unwrap();
+        let acted = w
+            .dispatch(
+                Uuid::new_v4(),
+                &id,
+                7,
+                Request::Act {
+                    frame,
+                    sequence: 1,
+                    actions: vec![Action::KeyDown { usage: 4 }, Action::KeyUp { usage: 4 }],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(acted["error"], "unavailable");
+        assert_eq!(acted["takeover_state"], "paused_by_human");
+        assert!(!w.state.lock().await.poisoned);
+    }
+}

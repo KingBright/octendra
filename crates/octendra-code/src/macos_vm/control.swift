@@ -214,6 +214,7 @@ extension VMHost: @preconcurrency VZVirtioSocketListenerDelegate {
         }
         controlBounds = view.bounds.size
         controlSize = [width, height]
+        recordLiveCapture()
         return ["size":controlSize, "encoding":"rgba8_srgb", "data":pixels.base64EncodedString()]
     }
 
@@ -247,6 +248,7 @@ extension VMHost: @preconcurrency VZVirtioSocketListenerDelegate {
         var flags: NSEvent.ModifierFlags = []
         var location = NSPoint(x: view.bounds.midX, y: view.bounds.midY)
         var held: String?
+        var lastClick: (button: String, point: NSPoint, time: TimeInterval, count: Int)?
         for action in actions {
             switch action.kind {
             case "key_down", "key_up":
@@ -266,20 +268,69 @@ extension VMHost: @preconcurrency VZVirtioSocketListenerDelegate {
                 if down { view.keyDown(with: event) } else { view.keyUp(with: event) }
             case "pointer_move", "button_down", "button_up":
                 var type: NSEvent.EventType = .mouseMoved
+                var clickCount = 0
+                let now = ProcessInfo.processInfo.systemUptime
                 if action.kind == "pointer_move" {
                     let x = action.x! / Double(max(1, controlSize[0] - 1)) * (view.bounds.width - 1)
                     let y = action.y! / Double(max(1, controlSize[1] - 1)) * (view.bounds.height - 1)
-                    location = view.convert(NSPoint(x: x, y: view.isFlipped ? y : view.bounds.height - 1 - y), to: nil)
-                    if let held { type = held == "left" ? .leftMouseDragged : held == "right" ? .rightMouseDragged : .otherMouseDragged }
+                    let targetLocation = view.convert(NSPoint(x: x, y: view.isFlipped ? y : view.bounds.height - 1 - y), to: nil)
+                    if held == "left" {
+                        let startLocation = location
+                        let steps = 6
+                        for step in 1...steps {
+                            let t = Double(step) / Double(steps)
+                            let stepLocation = NSPoint(
+                                x: startLocation.x + (targetLocation.x - startLocation.x) * t,
+                                y: startLocation.y + (targetLocation.y - startLocation.y) * t
+                            )
+                            guard let event = NSEvent.mouseEvent(
+                                with: .leftMouseDragged,
+                                location: stepLocation,
+                                modifierFlags: flags,
+                                timestamp: ProcessInfo.processInfo.systemUptime,
+                                windowNumber: window!.windowNumber,
+                                context: nil,
+                                eventNumber: 0,
+                                clickCount: 0,
+                                pressure: 1
+                            ) else {
+                                throw VMFailure(code: "guest_pointer_event_failed")
+                            }
+                            view.mouseDragged(with: event)
+                            if step < steps {
+                                try await Task.sleep(nanoseconds: 4_000_000)
+                            }
+                        }
+                        location = targetLocation
+                        lastClick = nil
+                        try await Task.sleep(nanoseconds: 5_000_000)
+                        continue
+                    }
+                    location = targetLocation
+                    if let held {
+                        lastClick = nil
+                        type = held == "right" ? .rightMouseDragged : .otherMouseDragged
+                    }
                 } else {
                     let down = action.kind == "button_down", button = action.button!
                     type = button == "left" ? (down ? .leftMouseDown : .leftMouseUp)
                         : button == "right" ? (down ? .rightMouseDown : .rightMouseUp) : (down ? .otherMouseDown : .otherMouseUp)
+                    if down {
+                        if let prev = lastClick, prev.button == button, now - prev.time <= 0.45,
+                           hypot(location.x - prev.point.x, location.y - prev.point.y) <= 4.0 {
+                            clickCount = min(3, prev.count + 1)
+                        } else {
+                            clickCount = 1
+                        }
+                        lastClick = (button, location, now, clickCount)
+                    } else {
+                        clickCount = lastClick?.button == button ? (lastClick?.count ?? 1) : 1
+                    }
                     held = down ? button : nil
                 }
                 guard let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: flags,
-                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window!.windowNumber,
-                    context: nil, eventNumber: 0, clickCount: action.kind == "pointer_move" ? 0 : 1, pressure: held == nil ? 0 : 1) else {
+                    timestamp: now, windowNumber: window!.windowNumber,
+                    context: nil, eventNumber: 0, clickCount: clickCount, pressure: held == nil ? 0 : 1) else {
                     throw VMFailure(code: "guest_pointer_event_failed")
                 }
                 switch type {

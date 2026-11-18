@@ -30,4 +30,7 @@ pub struct Route {
 #[serde(rename_all = "snake_case")]
 pub enum InputPlatform {
     Macos,
+    Windows,
+    Linux,
+    Android,
 }

@@ -1,9 +1,18 @@
 //! Window-only Windows worker policy, shared with deterministic backend tests.
-//! No global keyboard/mouse operations. One complete click maps to one UIA action.
+//! No global keyboard/mouse operations. Click, Fill, and Scroll map to bounded UIA patterns.
 use octendra_desktop_protocol::*;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(super) const MAX_UIA_DEPTH: usize = 20;
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(super) const MAX_UIA_ELEMENTS: usize = 200;
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(super) const MAX_UIA_VISITS: usize = 1500;
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(super) const MAX_UIA_DURATION: Duration = Duration::from_millis(350);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -80,6 +89,13 @@ pub(super) struct HitNode {
     pub offscreen: bool,
     pub bounds: [i32; 4],
 }
+pub(super) fn bounds_contain(bounds: [i32; 4], point: [i32; 2]) -> bool {
+    let [left, top, right, bottom] = bounds;
+    left <= point[0] && point[0] < right && top <= point[1] && point[1] < bottom
+}
+pub(super) fn is_value_control(control_type: i32) -> bool {
+    matches!(control_type, 50003 | 50004 | 50030)
+}
 /// The caller proves the raw ancestry ends at the pinned window. Text/content
 /// descendants may resolve to their nearest standard control, never past it.
 pub(super) fn standard_control_ancestor(
@@ -97,17 +113,154 @@ pub(super) fn standard_control_ancestor(
     }
     for (index, node) in nodes.iter().enumerate() {
         if let Some(operation) = activation(node.control_type) {
-            let [left, top, right, bottom] = node.bounds;
-            return (node.enabled
-                && !node.offscreen
-                && left <= point[0]
-                && point[0] < right
-                && top <= point[1]
-                && point[1] < bottom)
+            return (node.enabled && !node.offscreen && bounds_contain(node.bounds, point))
                 .then_some((index, operation));
         }
     }
     None
+}
+/// Nearest editable control ancestor (`Edit`, `ComboBox`, `Document`) below the pinned root.
+pub(super) fn value_control_ancestor(
+    nodes: &[HitNode],
+    root_reached: bool,
+    process_id: u32,
+    point: [i32; 2],
+) -> Option<usize> {
+    if !root_reached
+        || nodes.is_empty()
+        || nodes.len() > 64
+        || nodes.iter().any(|node| node.process_id != process_id)
+    {
+        return None;
+    }
+    for (index, node) in nodes.iter().enumerate() {
+        if is_value_control(node.control_type) {
+            return (node.enabled && !node.offscreen && bounds_contain(node.bounds, point))
+                .then_some(index);
+        }
+    }
+    None
+}
+/// Nearest scrollable container ancestor below/including the pinned root, verifying same process.
+pub(super) fn scrollable_control_ancestor(
+    nodes: &[HitNode],
+    root_reached: bool,
+    process_id: u32,
+    point: [i32; 2],
+    scrollable: &[bool],
+) -> Option<usize> {
+    if !root_reached
+        || nodes.is_empty()
+        || nodes.len() != scrollable.len()
+        || nodes.len() > 64
+        || nodes.iter().any(|node| node.process_id != process_id)
+    {
+        return None;
+    }
+    for (index, node) in nodes.iter().enumerate() {
+        if scrollable[index] {
+            return (node.enabled && !node.offscreen && bounds_contain(node.bounds, point))
+                .then_some(index);
+        }
+    }
+    None
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ScrollStep {
+    NoAmount,
+    SmallDecrement,
+    LargeDecrement,
+    SmallIncrement,
+    LargeIncrement,
+}
+pub(super) fn scroll_steps(horizontal: i16, vertical: i16) -> (ScrollStep, ScrollStep) {
+    let step = |delta: i16| match delta {
+        0 => ScrollStep::NoAmount,
+        1..=200 => ScrollStep::SmallDecrement,
+        201.. => ScrollStep::LargeDecrement,
+        -200..=-1 => ScrollStep::SmallIncrement,
+        ..=-201 => ScrollStep::LargeIncrement,
+    };
+    (step(horizontal), step(vertical))
+}
+pub(super) fn window_bounds(
+    position: [i32; 2],
+    size: [u32; 2],
+    rect: [i32; 4],
+) -> Option<[u32; 4]> {
+    if size[0] == 0 || size[1] == 0 || rect[2] <= rect[0] || rect[3] <= rect[1] {
+        return None;
+    }
+    let lx0 = (i64::from(rect[0]) - i64::from(position[0])).clamp(0, i64::from(size[0]));
+    let ly0 = (i64::from(rect[1]) - i64::from(position[1])).clamp(0, i64::from(size[1]));
+    let lx1 = (i64::from(rect[2]) - i64::from(position[0])).clamp(0, i64::from(size[0]));
+    let ly1 = (i64::from(rect[3]) - i64::from(position[1])).clamp(0, i64::from(size[1]));
+    (lx1 > lx0 && ly1 > ly0).then_some([lx0 as u32, ly0 as u32, lx1 as u32, ly1 as u32])
+}
+pub(super) fn uia_role_name(control_type: i32) -> &'static str {
+    match control_type {
+        50000 => "Button",
+        50002 => "CheckBox",
+        50003 => "ComboBox",
+        50004 => "Edit",
+        50005 => "Hyperlink",
+        50006 => "Image",
+        50007 => "ListItem",
+        50008 => "List",
+        50009 => "Menu",
+        50010 => "MenuBar",
+        50011 => "MenuItem",
+        50013 => "RadioButton",
+        50014 => "ScrollBar",
+        50015 => "Slider",
+        50016 => "Spinner",
+        50018 => "Tab",
+        50019 => "TabItem",
+        50020 => "Text",
+        50023 => "Tree",
+        50024 => "TreeItem",
+        50025 => "Custom",
+        50026 => "Group",
+        50028 => "DataGrid",
+        50030 => "Document",
+        50031 => "SplitButton",
+        50032 => "Window",
+        50033 => "Pane",
+        50036 => "DataItem",
+        50037 => "TitleBar",
+        50040 => "AppBar",
+        _ => "Control",
+    }
+}
+pub(super) fn uia_is_interactive(control_type: i32) -> bool {
+    matches!(
+        control_type,
+        50000
+            | 50002
+            | 50003
+            | 50004
+            | 50005
+            | 50007
+            | 50011
+            | 50013
+            | 50015
+            | 50016
+            | 50019
+            | 50024
+            | 50030
+            | 50031
+            | 50036
+    )
+}
+pub(super) fn uia_is_title_or_text(control_type: i32) -> bool {
+    matches!(control_type, 50006 | 50020 | 50032 | 50037)
+}
+pub(super) fn redact_uia_value(is_password: bool, raw: Option<String>) -> Option<String> {
+    if is_password {
+        Some("<redacted>".to_string())
+    } else {
+        raw.filter(|s| !s.is_empty())
+    }
 }
 pub(super) fn approval_budget(expires: u64, now: u64) -> Option<Duration> {
     let remaining = expires.checked_sub(now)?;
@@ -140,6 +293,9 @@ pub(super) trait Backend {
     fn live(&self) -> bool;
     fn open(&mut self) -> Result<(), ErrorCode>;
     fn capture(&mut self, maximum: usize) -> Result<Pixels, ErrorCode>;
+    fn elements(&self) -> Vec<ui::SemanticElement> {
+        Vec::new()
+    }
     /// Prepare a supported UIA pattern, then recheck deadline/freshness immediately
     /// before its one invocation. A failed invocation has an unknown effect.
     fn invoke(
@@ -148,10 +304,48 @@ pub(super) trait Backend {
         captured: Instant,
         deadline: Instant,
     ) -> Result<(), ErrorCode>;
+    fn set_value(
+        &mut self,
+        _point: SourcePoint,
+        _text: &str,
+        _captured: Instant,
+        _deadline: Instant,
+    ) -> Result<(), ErrorCode> {
+        Err(ErrorCode::InvalidActions)
+    }
+    fn scroll(
+        &mut self,
+        _point: SourcePoint,
+        _horizontal: i16,
+        _vertical: i16,
+        _captured: Instant,
+        _deadline: Instant,
+    ) -> Result<(), ErrorCode> {
+        Err(ErrorCode::InvalidActions)
+    }
     fn close(&mut self) -> bool;
 }
 
-pub(super) fn click(frame: &FrameRef, actions: &[Action]) -> Result<SourcePoint, ErrorCode> {
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum WindowsCommand {
+    Click {
+        point: SourcePoint,
+    },
+    Fill {
+        point: SourcePoint,
+        text: String,
+    },
+    Scroll {
+        point: SourcePoint,
+        horizontal: i16,
+        vertical: i16,
+    },
+}
+
+pub(super) fn parse_actions(
+    frame: &FrameRef,
+    actions: &[Action],
+) -> Result<WindowsCommand, ErrorCode> {
     match actions {
         [
             Action::PointerMove { x, y },
@@ -161,7 +355,93 @@ pub(super) fn click(frame: &FrameRef, actions: &[Action]) -> Result<SourcePoint,
             Action::ButtonUp {
                 button: Button::Left,
             },
-        ] => frame.mapping.map(*x, *y),
+        ] => Ok(WindowsCommand::Click {
+            point: frame.mapping.map(*x, *y)?,
+        }),
+        [
+            Action::PointerMove { x, y },
+            Action::ButtonDown {
+                button: Button::Left,
+            },
+            Action::ButtonUp {
+                button: Button::Left,
+            },
+            Action::KeyDown { usage: mod_down },
+            Action::KeyDown { usage: 4 },
+            Action::KeyUp { usage: 4 },
+            Action::KeyUp { usage: mod_up },
+            Action::Unicode {
+                text,
+                key_down: true,
+            },
+            Action::Unicode {
+                text: release,
+                key_down: false,
+            },
+        ] if mod_down == mod_up
+            && matches!(mod_down, 0xe0 | 0xe4 | 0xe3)
+            && !text.is_empty()
+            && text.len() <= 8192
+            && !text.contains('\0')
+            && release.is_empty() =>
+        {
+            Ok(WindowsCommand::Fill {
+                point: frame.mapping.map(*x, *y)?,
+                text: text.clone(),
+            })
+        }
+        [
+            Action::PointerMove { x, y },
+            Action::ButtonDown {
+                button: Button::Left,
+            },
+            Action::ButtonUp {
+                button: Button::Left,
+            },
+            Action::KeyDown { usage: mod_down },
+            Action::KeyDown { usage: 4 },
+            Action::KeyUp { usage: 4 },
+            Action::KeyUp { usage: mod_up },
+            Action::KeyDown { usage: 42 },
+            Action::KeyUp { usage: 42 },
+        ] if mod_down == mod_up && matches!(mod_down, 0xe0 | 0xe4 | 0xe3) => {
+            Ok(WindowsCommand::Fill {
+                point: frame.mapping.map(*x, *y)?,
+                text: String::new(),
+            })
+        }
+        [
+            Action::PointerMove { x, y },
+            Action::Unicode {
+                text,
+                key_down: true,
+            },
+            Action::Unicode {
+                text: release,
+                key_down: false,
+            },
+        ] if text.len() <= 8192 && !text.contains('\0') && release.is_empty() => {
+            Ok(WindowsCommand::Fill {
+                point: frame.mapping.map(*x, *y)?,
+                text: text.clone(),
+            })
+        }
+        [
+            Action::PointerMove { x, y },
+            Action::Wheel {
+                horizontal,
+                vertical,
+            },
+        ] if (*horizontal != 0 || *vertical != 0)
+            && horizontal.unsigned_abs() <= 1200
+            && vertical.unsigned_abs() <= 1200 =>
+        {
+            Ok(WindowsCommand::Scroll {
+                point: frame.mapping.map(*x, *y)?,
+                horizontal: *horizontal,
+                vertical: *vertical,
+            })
+        }
         _ => Err(ErrorCode::InvalidActions),
     }
 }
@@ -229,10 +509,17 @@ impl<B: Backend> Worker<B> {
         }
         Ok(epoch)
     }
-    pub fn handle(&mut self, request: Request) -> (Result<Response, ErrorCode>, Option<Pixels>) {
+    pub fn handle(
+        &mut self,
+        request: Request,
+    ) -> (
+        Result<Response, ErrorCode>,
+        Option<Pixels>,
+        Vec<ui::SemanticElement>,
+    ) {
         let result = self.perform(request);
         match result {
-            Ok((reply, pixels)) => (Ok(reply), pixels),
+            Ok((reply, pixels, elements)) => (Ok(reply), pixels, elements),
             Err(error) => {
                 // Once an effect may have been sent, this process cannot admit a
                 // fresh epoch. The Agent journal fences the original operation.
@@ -253,11 +540,15 @@ impl<B: Backend> Worker<B> {
                         error
                     }),
                     None,
+                    Vec::new(),
                 )
             }
         }
     }
-    fn perform(&mut self, request: Request) -> Result<(Response, Option<Pixels>), ErrorCode> {
+    fn perform(
+        &mut self,
+        request: Request,
+    ) -> Result<(Response, Option<Pixels>, Vec<ui::SemanticElement>), ErrorCode> {
         if self.poisoned {
             return Err(ErrorCode::OutcomeUnknown);
         }
@@ -267,11 +558,12 @@ impl<B: Backend> Worker<B> {
                     capabilities: Capabilities {
                         available: !self.spent && self.backend.live() && !self.budget().is_zero(),
                         backend: "windows_wgc_uia_standard_control_click_only".into(),
-                        max_actions: 3,
+                        max_actions: MAX_ACTIONS,
                         ..Capabilities::default()
                     },
                 },
                 None,
+                Vec::new(),
             ));
         }
         if Instant::now() >= self.authorization_deadline {
@@ -318,6 +610,7 @@ impl<B: Backend> Worker<B> {
                         expires_at_ms,
                     },
                     None,
+                    Vec::new(),
                 ))
             }
             Request::Observe { binding } => {
@@ -341,6 +634,7 @@ impl<B: Backend> Worker<B> {
                 {
                     return Err(ErrorCode::Unavailable);
                 }
+                let elements = self.backend.elements();
                 let epoch = self.epoch.as_mut().ok_or(ErrorCode::SessionClosed)?;
                 epoch.frame_sequence = epoch
                     .frame_sequence
@@ -364,7 +658,7 @@ impl<B: Backend> Worker<B> {
                     },
                 };
                 epoch.latest = Some((frame.clone(), pixels.captured));
-                Ok((Response::Observed { frame }, Some(pixels)))
+                Ok((Response::Observed { frame }, Some(pixels), elements))
             }
             Request::Act {
                 frame,
@@ -385,13 +679,27 @@ impl<B: Backend> Worker<B> {
                 {
                     return Err(ErrorCode::StaleFrame);
                 }
-                let point = click(&frame, &actions)?;
+                let command = parse_actions(&frame, &actions)?;
                 let captured = *captured;
                 let deadline = epoch.deadline;
                 // Invalidate the frame before the first effect. Another Act must
                 // observe again, even with a new operation/sequence.
                 self.epoch.as_mut().ok_or(ErrorCode::SessionClosed)?.latest = None;
-                self.backend.invoke(point, captured, deadline)?;
+                match command {
+                    WindowsCommand::Click { point } => {
+                        self.backend.invoke(point, captured, deadline)?
+                    }
+                    WindowsCommand::Fill { point, text } => {
+                        self.backend.set_value(point, &text, captured, deadline)?
+                    }
+                    WindowsCommand::Scroll {
+                        point,
+                        horizontal,
+                        vertical,
+                    } => self
+                        .backend
+                        .scroll(point, horizontal, vertical, captured, deadline)?,
+                }
                 self.epoch
                     .as_mut()
                     .ok_or(ErrorCode::SessionClosed)?
@@ -403,6 +711,7 @@ impl<B: Backend> Worker<B> {
                         effect_confirmed: false,
                     },
                     None,
+                    Vec::new(),
                 ))
             }
             Request::Close { binding } => {
@@ -410,7 +719,7 @@ impl<B: Backend> Worker<B> {
                 if !self.shutdown() {
                     return Err(ErrorCode::OutcomeUnknown);
                 }
-                Ok((Response::Closed {}, None))
+                Ok((Response::Closed {}, None, Vec::new()))
             }
             Request::Capabilities {} => unreachable!(),
         }

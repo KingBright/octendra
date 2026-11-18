@@ -111,6 +111,8 @@ private final class RestoreDownload: NSObject, URLSessionDownloadDelegate {
     var controlSize: [Int] = []
     var controlBounds = NSSize.zero
     var phase = "not_started"
+    var graphicalAcceptance = "not_verified"
+    var lastCaptureAtMs: UInt64?
     init(root: URL) { self.root = root }
     func path(_ name: String) -> URL { root.appendingPathComponent(name) }
     func load() throws -> VMProfile {
@@ -125,11 +127,30 @@ private final class RestoreDownload: NSObject, URLSessionDownloadDelegate {
         try privateWrite(JSONEncoder().encode(value), to: path("workspace.json"))
         profile = value
     }
+    private func runtimePayload() -> [String: Any] {
+        var value: [String: Any] = [
+            "state": phase,
+            "workspace_id": profile?.id ?? "",
+            "pid": ProcessInfo.processInfo.processIdentifier,
+            "isolation": "full_vm",
+            "graphical_acceptance": graphicalAcceptance,
+            "control_generation": controlGeneration,
+        ]
+        if let lastCaptureAtMs {
+            value["last_capture_at_ms"] = lastCaptureAtMs
+        }
+        return value
+    }
+    func recordLiveCapture() {
+        graphicalAcceptance = "verified_live_capture"
+        lastCaptureAtMs = UInt64(Date().timeIntervalSince1970 * 1000.0)
+        if let data = try? JSONSerialization.data(withJSONObject: runtimePayload(), options: [.sortedKeys]) {
+            try? privateWrite(data, to: path("runtime.json"))
+        }
+    }
     func state(_ phase: String) {
         self.phase = phase
-        let value: [String: Any] = ["state": phase, "workspace_id": profile?.id ?? "",
-            "pid": ProcessInfo.processInfo.processIdentifier, "isolation": "full_vm",
-            "graphical_acceptance": "not_verified"]
+        let value = runtimePayload()
         if let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) {
             try? privateWrite(data, to: path("runtime.json"))
         }

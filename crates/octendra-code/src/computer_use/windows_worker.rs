@@ -154,14 +154,21 @@ pub fn run(path: &Path) -> Result<()> {
             "duplicate/bounded worker request"
         );
         let closing = matches!(request.request, Request::Close { .. });
-        let (response, pixels) = worker.handle(request.request);
+        let (response, pixels, elements) = worker.handle(request.request);
         unknown = response == Err(ErrorCode::OutcomeUnknown);
-        let reply = WorkerReply {
+        let mut reply = WorkerReply {
             request_id: request.request_id,
             result: response,
             pixels: pixels.as_ref().map(|p| p.metadata.clone()),
+            elements,
+            takeover_state: None,
         };
-        let header = serde_json::to_vec(&reply)?;
+        reply.bound_elements_for_header();
+        let mut header = serde_json::to_vec(&reply)?;
+        while header.len() > MAX_WORKER_HEADER && !reply.elements.is_empty() {
+            reply.elements.pop();
+            header = serde_json::to_vec(&reply)?;
+        }
         ensure!(header.len() <= MAX_WORKER_HEADER, "worker reply bound");
         let mut output = std::io::stdout().lock();
         output.write_all(&(header.len() as u32).to_be_bytes())?;

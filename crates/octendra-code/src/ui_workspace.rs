@@ -106,8 +106,15 @@ pub(crate) async fn resolve(
     args: &mut Value,
 ) -> Result<ExecutionContext> {
     let raw = crate::files::text(args, "device")?;
-    let context = if tool == "ui_act" {
-        let id = crate::files::text(args, "observation_id")?;
+    let observe_query_id = (tool == "ui_observe")
+        .then(|| args.get("observation_id").and_then(Value::as_str))
+        .flatten();
+    let context = if tool == "ui_act" || observe_query_id.is_some() {
+        let id = if let Some(id) = observe_query_id {
+            id
+        } else {
+            crate::files::text(args, "observation_id")?
+        };
         let saved: ExecutionContext = gateway
             .store
             .get(
@@ -125,6 +132,17 @@ pub(crate) async fn resolve(
                 ),
             "ui_observation_device_mismatch"
         );
+        if let Some(requested_context) = args.get("context").and_then(Value::as_str) {
+            let expected = match requested_context {
+                "host" => Isolation::HostSession,
+                "isolated" => Isolation::FullVm,
+                _ => anyhow::bail!("invalid_arguments: context"),
+            };
+            ensure!(
+                saved.isolation == expected,
+                "ui_observation_context_mismatch"
+            );
+        }
         ensure!(
             device(&gateway.config, &saved.execution_device_id).is_some(),
             "UI execution device no longer registered"

@@ -125,6 +125,17 @@ async fn observe(workspace: &str, job: &Job) -> Result<Observed> {
         "guest_pixel_format_invalid"
     );
     let image = image::Image::from_pixels(&pixels, &bytes)?;
+    let elements: Vec<SemanticElement> = value
+        .get("elements")
+        .filter(|v| !v.is_null())
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_default();
+    let takeover_state = value
+        .get("takeover_state")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let mapping = desktop::FrameMapping {
         frame_size: size,
         content: desktop::ContentRect {
@@ -142,6 +153,8 @@ async fn observe(workspace: &str, job: &Job) -> Result<Observed> {
         revision,
         capture: Capture {
             image,
+            elements,
+            takeover_state,
             frame: desktop::FrameRef {
                 binding: desktop::Binding {
                     identity: desktop::Identity {
@@ -160,9 +173,16 @@ async fn observe(workspace: &str, job: &Job) -> Result<Observed> {
     })
 }
 
-async fn remember(agent: &Agent, prefix: &str, observed: Observed) -> Result<Value> {
+async fn remember(
+    agent: &Agent,
+    prefix: &str,
+    observed: Observed,
+    reticle: Option<[f64; 2]>,
+    query: Option<&Query>,
+    target: Option<&Selector>,
+) -> Result<Value> {
     let identity = observed.capture.frame.binding.identity.clone();
-    let mut value = save(
+    let mut value = save_with_options(
         agent,
         prefix,
         &identity,
@@ -170,9 +190,13 @@ async fn remember(agent: &Agent, prefix: &str, observed: Observed) -> Result<Val
         BACKEND,
         &actions_for(BACKEND),
         VERSION,
+        false,
+        true,
+        reticle,
+        query,
+        target,
     )
     .await?;
-    value["capabilities"]["background"] = json!(true);
     value["source"] = json!({"kind":"apple_vz_guest", "generation":observed.generation,
         "revision":observed.revision,"input_backend":"vz_virtual_devices","clipboard":"guest_only"});
     Ok(value)
@@ -231,8 +255,15 @@ pub(super) async fn perform(agent: &Agent, job: &Job, args: Arguments) -> Result
     let observed = match observe(workspace, job).await {
         Ok(value) => value,
         Err(error) => {
+            let reason = error.to_string();
+            if reason.starts_with("takeover_by_human:") || reason.starts_with("paused_by_human:") {
+                let mut err = failure("takeover_by_human", &actions_for(BACKEND));
+                err["takeover_state"] = json!("paused_by_human");
+                err["takeover_hint"] = json!(HUMAN_TAKEOVER_HINT);
+                return Ok(err);
+            }
             return Ok(
-                json!({"error":"ui_workspace_unavailable", "reason":error.to_string(),
+                json!({"error":"ui_workspace_unavailable", "reason":reason,
             "input_sent":false,"host_fallback":false}),
             );
         }
@@ -248,7 +279,25 @@ pub(super) async fn perform(agent: &Agent, job: &Job, args: Arguments) -> Result
         return Ok(value);
     }
     if job.tool == "ui_observe" {
-        return remember(agent, &prefix, observed).await;
+        if let Some(selector) = &args.target
+            && !selector_matches(
+                selector,
+                surface,
+                &job.device_id,
+                &observed.capture.elements,
+            )
+        {
+            return Ok(failure("target_not_found", &actions_for(BACKEND)));
+        }
+        return remember(
+            agent,
+            &prefix,
+            observed,
+            None,
+            args.query.as_ref(),
+            args.target.as_ref(),
+        )
+        .await;
     }
     let key = format!(
         "{prefix}:{}",
@@ -263,23 +312,78 @@ pub(super) async fn perform(agent: &Agent, job: &Job, args: Arguments) -> Result
             && s.capability_version == Some(VERSION)
     }) else {
         let mut value = failure("stale_observation", &actions_for(BACKEND));
-        value["observation"] = remember(agent, &prefix, observed).await?;
+        value["observation"] = remember(agent, &prefix, observed, None, None, None).await?;
         return Ok(value);
     };
     let action = args.action.as_ref().context("action_required")?;
     if !actions_for(BACKEND).contains(&action.name()) {
         return Ok(failure("unsupported_action", &actions_for(BACKEND)));
     }
+    if let Some(ts) = observed
+        .capture
+        .takeover_state
+        .as_deref()
+        .filter(|s| is_human_takeover(s))
+        .or_else(|| {
+            saved
+                .takeover_state
+                .as_deref()
+                .filter(|s| is_human_takeover(s))
+        })
+    {
+        let mut value = failure("takeover_by_human", &actions_for(BACKEND));
+        value["takeover_state"] = json!(ts);
+        value["takeover_hint"] = json!(HUMAN_TAKEOVER_HINT);
+        value["operation_id"] = json!(job.id);
+        value["observation"] = remember(agent, &prefix, observed, None, None, None).await?;
+        return Ok(value);
+    }
     let native = match prepare(&saved, &observed.capture, action) {
         Ok(value) => value,
         Err(code) => {
             let mut value = failure(code, &actions_for(BACKEND));
-            value["observation"] = remember(agent, &prefix, observed).await?;
+            value["observation"] = remember(agent, &prefix, observed, None, None, None).await?;
             return Ok(value);
         }
     };
     if !consume(agent, &key, &saved, VERSION).await? {
         return Ok(failure("stale_observation", &actions_for(BACKEND)));
+    }
+    if native.is_empty() {
+        let post_tiles = observed.capture.image.tiles();
+        let visual_changed = saved.tiles != post_tiles;
+        let regions =
+            image::changed_regions(&saved.tiles, &post_tiles, observed.capture.image.size);
+        let mapped_elements = map_elements_to_image(
+            &observed.capture.elements,
+            observed.capture.frame.mapping.frame_size,
+            observed.capture.image.size,
+        );
+        let mut result = json!({
+            "state": "accepted",
+            "accepted_actions": 0,
+            "input_sent": false,
+            "effect_confirmed": false,
+            "operation_id": job.id,
+            "visual_changed": visual_changed,
+            "changed_regions": regions,
+        });
+        if matches!(action, Action::SetChecked { .. }) {
+            result["already_satisfied"] = json!(true);
+        }
+        if let Some(exp) = &args.expect {
+            result["expect_met"] = json!(evaluate_expect(
+                exp,
+                &saved,
+                action,
+                &mapped_elements,
+                visual_changed
+            ));
+        }
+        if args.observe_after != Some(false) {
+            result["observation"] = remember(agent, &prefix, observed, None, None, None).await?;
+        }
+        return Ok(result);
     }
     let native = match paste_actions(native) {
         Ok(value) => value,
@@ -300,15 +404,66 @@ pub(super) async fn perform(agent: &Agent, job: &Job, args: Arguments) -> Result
         Err(_) => json!({"error":"outcome_unknown", "automatic_replay_safe":false,
             "original_operation_id":job.id,"next_action":"operation_get"}),
     };
+    normalize_takeover_result(&mut result, &actions_for(BACKEND));
     result["operation_id"] = json!(job.id);
     if args.observe_after != Some(false) && result["error"] != "outcome_unknown" {
-        match observe(workspace, job).await {
-            Ok(value) => result["observation"] = remember(agent, &prefix, value).await?,
+        let action_ok = result.get("error").is_none();
+        let post = adaptive_observe(
+            &saved.tiles,
+            action_ok,
+            |o: &Observed| o.capture.image.tiles(),
+            || observe(workspace, job),
+        )
+        .await;
+        match post {
+            Ok(value) => {
+                let post_tiles = value.capture.image.tiles();
+                let visual_changed = saved.tiles != post_tiles;
+                let regions =
+                    image::changed_regions(&saved.tiles, &post_tiles, value.capture.image.size);
+                let mapped_elements = map_elements_to_image(
+                    &value.capture.elements,
+                    value.capture.frame.mapping.frame_size,
+                    value.capture.image.size,
+                );
+                if result.get("error").is_none() {
+                    result["visual_changed"] = json!(visual_changed);
+                    result["changed_regions"] = json!(regions);
+                    if !visual_changed {
+                        result["unchanged_warning"] = json!(
+                            "Screen pixels did not change after this action; verify target coordinates or focus before repeating."
+                        );
+                    }
+                    if let Some(exp) = &args.expect {
+                        result["expect_met"] = json!(evaluate_expect(
+                            exp,
+                            &saved,
+                            action,
+                            &mapped_elements,
+                            visual_changed
+                        ));
+                    }
+                } else if args.expect.is_some() {
+                    result["expect_met"] = json!(false);
+                }
+                let reticle = if result.get("error").is_none() {
+                    landing_point(action, &saved, value.capture.image.size)
+                } else {
+                    None
+                };
+                result["observation"] =
+                    remember(agent, &prefix, value, reticle, None, None).await?;
+            }
             Err(_) => {
+                if args.expect.is_some() {
+                    result["expect_met"] = json!(false);
+                }
                 result["observation_error"] =
-                    json!({"error":"observe_failed","next_action":"ui_observe"})
+                    json!({"error":"observe_failed","next_action":"ui_observe"});
             }
         }
+    } else if args.expect.is_some() {
+        result["expect_met"] = json!(false);
     }
     Ok(result)
 }

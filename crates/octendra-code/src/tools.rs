@@ -388,14 +388,40 @@ fn build_catalog() -> Vec<Tool> {
     };
     add(
         "ui_observe",
-        "Observe a computer or phone using one interface. Select a device or named AI workspace. Defaults to its persistent isolated workspace; never falls back to the host. context=host explicitly selects the existing host session. Returns actual execution_context, image, observation_id and capabilities. No session or lease setup. Coordinates refer to image pixels.",
-        json!({"device":string(),"context":{"type":"string","enum":["isolated","host"],"default":"isolated"},"view":string(),"idempotency_key":string()}),
+        "Observe a computer or phone using one interface. Select a device or named AI workspace. Defaults to its persistent isolated workspace; never falls back to the host. context=host explicitly selects the existing host session. Optional target selects app/window/instance; optional query filters semantic elements (supplying observation_id with query filters in-memory with zero OS I/O). Coordinates refer to image pixels.",
+        json!({
+            "device": string(),
+            "context": {"type": "string", "enum": ["isolated", "host"], "default": "isolated"},
+            "view": string(),
+            "target": {"type": "object", "properties": {"app": string(), "window": string(), "instance": string()}, "additionalProperties": false},
+            "observation_id": string(),
+            "query": {"type": "object", "properties": {"text": string(), "role": string(), "interactive_only": {"type": "boolean"}, "max_elements": integer(1, 1000)}, "additionalProperties": false},
+            "idempotency_key": string()
+        }),
         vec!["device"],
     );
     add(
         "ui_act",
-        "Act on a computer or phone observation, bound to its original execution_context and device. Send one semantic action; a fresh observation/image follows by default. Prefer element refs; otherwise use image-pixel x/y. type_text inserts, fill replaces. Unsupported actions report alternatives. On an uncertain outcome observe the original operation_id; never replay input.",
-        json!({"device":string(),"observation_id":string(),"action":crate::ui::action_schema(),"observe_after":{"type":"boolean","default":true},"idempotency_key":string()}),
+        "Act on a computer or phone observation, bound to its original execution_context and device. Send one semantic action; a fresh observation/image follows by default. Prefer element refs; otherwise use image-pixel x/y. type_text inserts, fill replaces. Optional expect checks post-action element/visual state. Unsupported actions report alternatives. On an uncertain outcome observe the original operation_id; never replay input.",
+        json!({
+            "device": string(),
+            "observation_id": string(),
+            "action": crate::ui::action_schema(),
+            "expect": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "object", "properties": {"ref": string(), "x": integer(0, 16384), "y": integer(0, 16384)}, "additionalProperties": false},
+                    "value_equals": string(),
+                    "text_contains": string(),
+                    "checked_equals": {"type": "boolean"},
+                    "element_gone": {"type": "boolean"},
+                    "visual_changed": {"type": "boolean"}
+                },
+                "additionalProperties": false
+            },
+            "observe_after": {"type": "boolean", "default": true},
+            "idempotency_key": string()
+        }),
         vec!["device", "observation_id", "action"],
     );
     add(
