@@ -26,6 +26,7 @@ pub mod files;
 mod files_sync;
 pub mod forge_browser;
 pub mod gateway;
+pub mod host_ui;
 mod history_artifacts;
 mod history_gateway;
 mod history_retention;

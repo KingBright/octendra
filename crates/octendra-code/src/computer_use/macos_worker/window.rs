@@ -160,6 +160,129 @@ impl Target {
         }
     }
 }
+
+/// Lists current-user onscreen application windows (front-to-back order) with geometry and titles.
+pub fn list_onscreen_user_windows() -> Vec<serde_json::Value> {
+    let my_uid = unsafe { nix::libc::geteuid() };
+    let list = unsafe { CGWindowListCopyWindowInfo(1 | 16, 0) };
+    if list.is_null() {
+        return Vec::new();
+    }
+    let mut windows = Vec::new();
+    let count = unsafe { CFArrayGetCount(list) };
+    for index in 0..count {
+        let d = unsafe { CFArrayGetValueAtIndex(list, index) };
+        if unsafe { number(d, c"kCGWindowLayer") }.is_some_and(|l| l.round() as i64 != 0) {
+            continue;
+        }
+        let Some(pid_f) = (unsafe { number(d, c"kCGWindowOwnerPID") }) else {
+            continue;
+        };
+        let Some(win_f) = (unsafe { number(d, c"kCGWindowNumber") }) else {
+            continue;
+        };
+        let pid = pid_f.round() as i32;
+        let window_id = win_f.round() as u32;
+        if pid <= 0 || window_id == 0 {
+            continue;
+        }
+        let Some(pinfo) = process(pid) else {
+            continue;
+        };
+        if pinfo.ids[5] != my_uid || pinfo.ids[7] != my_uid {
+            continue;
+        }
+        let bounds = unsafe { field(d, c"kCGWindowBounds") };
+        if bounds.is_null() {
+            continue;
+        }
+        let (Some(w), Some(h)) = (
+            unsafe { number(bounds, c"Width") },
+            unsafe { number(bounds, c"Height") },
+        ) else {
+            continue;
+        };
+        if w < 80.0 || h < 80.0 {
+            continue;
+        }
+        let owner_name = cf_string(unsafe { field(d, c"kCGWindowOwnerName") }, 128).unwrap_or_default();
+        if matches!(
+            owner_name.as_str(),
+            "Window Server"
+                | "Dock"
+                | "SystemUIServer"
+                | "Control Center"
+                | "Notification Center"
+        ) {
+            continue;
+        }
+        let window_title = cf_string(unsafe { field(d, c"kCGWindowName") }, 256).unwrap_or_default();
+        let x = unsafe { number(bounds, c"X") }.unwrap_or(0.0);
+        let y = unsafe { number(bounds, c"Y") }.unwrap_or(0.0);
+        windows.push(serde_json::json!({
+            "process_id": pid,
+            "window_id": window_id,
+            "app_name": owner_name,
+            "window_title": window_title,
+            "logical_size": [w as u32, h as u32],
+            "logical_position": [x as i32, y as i32],
+            "z_order": index,
+        }));
+        if windows.len() >= 64 {
+            break;
+        }
+    }
+    unsafe { CFRelease(list) };
+    windows
+}
+
+/// Selects the frontmost onscreen current-user window matching optional `app_query`, `window_query`,
+/// or `pid_filter`, returning full `window_target` capability metadata.
+///
+/// # Errors
+///
+/// Returns an error if no matching onscreen window is available or `Target::identity` rejects it.
+pub fn select_onscreen_user_window(
+    app_query: Option<&str>,
+    window_query: Option<&str>,
+    pid_filter: Option<i32>,
+) -> Result<serde_json::Value> {
+    let app_needle = app_query
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_lowercase);
+    let win_needle = window_query
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_lowercase);
+    for item in list_onscreen_user_windows() {
+        let pid = item["process_id"].as_i64().unwrap_or(0) as i32;
+        let window_id = item["window_id"].as_u64().unwrap_or(0) as u32;
+        if let Some(expected_pid) = pid_filter
+            && pid != expected_pid
+        {
+            continue;
+        }
+        let app_name = item["app_name"].as_str().unwrap_or("");
+        let window_title = item["window_title"].as_str().unwrap_or("");
+        if let Some(ref needle) = app_needle
+            && !app_name.to_lowercase().contains(needle)
+        {
+            continue;
+        }
+        if let Some(ref needle) = win_needle
+            && !window_title.to_lowercase().contains(needle)
+        {
+            continue;
+        }
+        if let Ok(mut target) = super::window_target(pid, window_id) {
+            target["app_name"] = serde_json::json!(app_name);
+            target["window_title"] = serde_json::json!(window_title);
+            return Ok(target);
+        }
+    }
+    anyhow::bail!("no matching onscreen current-user window found")
+}
 fn process(pid: i32) -> Option<BsdInfo> {
     let mut p = BsdInfo::default();
     let size = size_of::<BsdInfo>();

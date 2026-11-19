@@ -31,6 +31,7 @@
         </service>
         <provider android:name=".BridgeProvider" android:authorities="${applicationId}.bridge" android:exported="true" tools:ignore="ExportedContentProvider" />
         <provider android:name=".AiViewBridgeProvider" android:authorities="${applicationId}.aiview" android:exported="true" tools:ignore="ExportedContentProvider" />
+        <provider android:name=".McpBridgeProvider" android:authorities="${applicationId}.mcp" android:exported="true" tools:ignore="ExportedContentProvider" />
         <provider android:name=".InstallProvider" android:authorities="${applicationId}.files" android:exported="false" android:grantUriPermissions="true" />
         <receiver android:name=".BootReceiver" android:exported="false">
             <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED" /><action android:name="android.intent.action.MY_PACKAGE_REPLACED" /></intent-filter>

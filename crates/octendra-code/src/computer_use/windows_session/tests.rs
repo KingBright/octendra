@@ -132,9 +132,15 @@ fn windows_staging_texture_cannot_exceed_the_approved_pixel_budget() {
 #[test]
 fn windows_only_explicit_standard_controls_admit_semantic_activation() {
     assert_eq!(activation(50000), Some(Activation::Invoke));
+    assert_eq!(activation(50005), Some(Activation::Invoke));
+    assert_eq!(activation(50011), Some(Activation::Invoke));
+    assert_eq!(activation(50031), Some(Activation::Invoke));
     assert_eq!(activation(50002), Some(Activation::Toggle));
     assert_eq!(activation(50007), Some(Activation::Select));
     assert_eq!(activation(50013), Some(Activation::Select));
+    assert_eq!(activation(50019), Some(Activation::Select));
+    assert_eq!(activation(50024), Some(Activation::Select));
+    assert_eq!(activation(50036), Some(Activation::Select));
     for id in [-1, 0, 50004, 50025, 50032, 50033, i32::MAX] {
         assert_eq!(activation(id), None);
     }
@@ -255,6 +261,7 @@ struct Calls {
     capture: usize,
     input: usize,
     fill: Vec<(SourcePoint, String)>,
+    append: Vec<(SourcePoint, String)>,
     scroll: Vec<(SourcePoint, i16, i16)>,
     close: usize,
 }
@@ -319,6 +326,22 @@ impl Backend for Recording {
         let mut c = self.calls.lock().unwrap();
         c.input += 1;
         c.fill.push((point, text.to_string()));
+        if self.fail_input {
+            Err(ErrorCode::OutcomeUnknown)
+        } else {
+            Ok(())
+        }
+    }
+    fn append_value(
+        &mut self,
+        point: SourcePoint,
+        text: &str,
+        _: Instant,
+        _: Instant,
+    ) -> Result<(), ErrorCode> {
+        let mut c = self.calls.lock().unwrap();
+        c.input += 1;
+        c.append.push((point, text.to_string()));
         if self.fail_input {
             Err(ErrorCode::OutcomeUnknown)
         } else {
@@ -849,4 +872,37 @@ fn windows_focus_free_fill_scroll_and_semantic_elements_dispatch_via_worker() {
         Err(ErrorCode::InvalidActions)
     );
     assert_eq!(c.lock().unwrap().input, 3);
+
+    // Next Observe + AppendText (TypeText without Ctrl+A).
+    let f5 = frame(&mut w, &b);
+    let append_actions = vec![
+        Action::PointerMove { x: 1.0, y: 0.0 },
+        Action::ButtonDown {
+            button: Button::Left,
+        },
+        Action::ButtonUp {
+            button: Button::Left,
+        },
+        Action::Unicode {
+            text: " 追加".into(),
+            key_down: true,
+        },
+        Action::Unicode {
+            text: String::new(),
+            key_down: false,
+        },
+    ];
+    assert!(
+        w.handle(Request::Act {
+            frame: f5,
+            sequence: 4,
+            actions: append_actions
+        })
+        .0
+        .is_ok()
+    );
+    assert_eq!(
+        c.lock().unwrap().append,
+        vec![(SourcePoint { x: 1.0, y: 0.0 }, " 追加".to_string())]
+    );
 }

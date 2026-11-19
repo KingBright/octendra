@@ -355,6 +355,7 @@ class UiController internal constructor(
             } else node.remove("bounds")
         }
 
+        val responseImage = if (image != null) UiImage.annotateObservationImage(image, nodes) else null
         val blankOrSecure = image?.optBoolean("blank_or_secure") == true
         val imageStatus = UiContract.classifyDisplayObservation(image != null, displayState, blankOrSecure)
         val imageUnavailable = when (imageStatus) {
@@ -374,7 +375,7 @@ class UiController internal constructor(
             "observation_id" to id,
             "device" to deviceId,
             "view" to viewKey,
-            "image" to image,
+            "image" to responseImage,
             "image_status" to imageStatus,
             "source" to obj(
                 "kind" to if (isBackground) "ai_display" else "main_display",

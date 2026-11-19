@@ -39,6 +39,16 @@ pub struct ExecutionContext {
     isolation: Isolation,
 }
 impl ExecutionContext {
+    pub(crate) fn host_session(device_id: impl Into<String>, name: impl Into<String>) -> Self {
+        let id = device_id.into();
+        Self {
+            id: format!("host:{id}"),
+            name: name.into(),
+            host_device_id: id.clone(),
+            execution_device_id: id,
+            isolation: Isolation::HostSession,
+        }
+    }
     pub(crate) fn is_full_vm(&self) -> bool {
         self.isolation == Isolation::FullVm
     }

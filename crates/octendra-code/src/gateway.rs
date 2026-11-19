@@ -420,6 +420,19 @@ impl Gateway {
             )
             .merge(
                 Router::new()
+                    .route("/v1/ui/devices", get(ui_devices_http))
+                    .route("/v1/ui/bind_window", post(ui_bind_window_http))
+                    .route("/v1/ui/observe", post(ui_observe_http))
+                    .route("/v1/ui/act", post(ui_act_http))
+                    .with_state(self.clone())
+                    .route_layer(middleware::from_fn_with_state(
+                        self.clone(),
+                        require_owner_or_device_auth,
+                    ))
+                    .layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+            )
+            .merge(
+                Router::new()
                     .route("/v1/peer/poll", post(app_router_peer_poll))
                     .route("/v1/peer/reply", post(app_router_peer_reply))
                     .with_state(self.clone())
@@ -2732,6 +2745,221 @@ async fn app_router_peer_reply(
     (StatusCode::OK, Json(json!({ "status": "ok", "ok": true }))).into_response()
 }
 
+async fn resolve_v1_principal(gateway: &Gateway, headers: &HeaderMap) -> Result<Principal, Response> {
+    if let Some(principal) = gateway.auth.principal(headers).await {
+        return Ok(principal);
+    }
+    if let Ok(device_id) = gateway.device(headers).await
+        && let Some(reg) = gateway.config.devices.iter().find(|d| d.id == device_id)
+    {
+        return Ok(Principal {
+            owner: gateway.config.owner.clone(),
+            scopes: reg.scopes.clone(),
+        });
+    }
+    Err(gateway.auth.challenge(headers))
+}
+
+fn map_ui_dispatch_error(err: anyhow::Error) -> Response {
+    let message = format!("{err:#}");
+    let status = if message.contains("insufficient_scope")
+        || message.contains("device_scope_denied")
+        || message.contains("unknown owner")
+    {
+        StatusCode::FORBIDDEN
+    } else if message.contains("invalid_arguments")
+        || message.contains("unknown device")
+        || message.contains("ui_observation_")
+        || message.contains("ui_workspace_unavailable")
+        || message.contains("ui_device_")
+    {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::BAD_GATEWAY
+    };
+    (status, Json(json!({ "status": "error", "message": message }))).into_response()
+}
+
+fn gateway_has_isolated_workspace(gateway: &Gateway, raw_device: &str) -> bool {
+    let selected = gateway
+        .config
+        .devices
+        .iter()
+        .find(|d| d.id == raw_device || d.name.eq_ignore_ascii_case(raw_device));
+    gateway.config.ui_workspaces.iter().any(|w| {
+        w.id == raw_device
+            || w.name.eq_ignore_ascii_case(raw_device)
+            || selected.is_some_and(|d| d.id == w.host_device_id || d.id == w.execution_device_id)
+    })
+}
+
+fn whitelist_ui_args(body: &Value, allowed_keys: &[&str]) -> serde_json::Map<String, Value> {
+    let mut clean = serde_json::Map::new();
+    if let Some(obj) = body.as_object() {
+        for key in allowed_keys {
+            if let Some(v) = obj.get(*key) {
+                clean.insert((*key).to_string(), v.clone());
+            }
+        }
+    }
+    clean
+}
+
+async fn ui_devices_http(State(gateway): State<Gateway>, headers: HeaderMap) -> Response {
+    let principal = match resolve_v1_principal(&gateway, &headers).await {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    match gateway.dispatch(&principal, "devices_list", json!({})).await {
+        Ok(res) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ok",
+                "devices": res.get("devices").cloned().unwrap_or_else(|| json!([])),
+                "ui_workspaces": res.get("ui_workspaces").cloned().unwrap_or_else(|| json!([])),
+            })),
+        )
+            .into_response(),
+        Err(err) => map_ui_dispatch_error(err),
+    }
+}
+
+async fn ui_bind_window_http(
+    State(gateway): State<Gateway>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let principal = match resolve_v1_principal(&gateway, &headers).await {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    if !principal
+        .scopes
+        .iter()
+        .any(|s| s == "desktop:input" || s == "terminal:exec")
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "status": "error",
+                "message": "insufficient_scope: desktop:input or terminal:exec required"
+            })),
+        )
+            .into_response();
+    }
+    let Some(raw_device) = body
+        .get("device")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "status": "error", "message": "invalid_arguments: device required" })),
+        )
+            .into_response();
+    };
+    let Some(reg) = gateway
+        .config
+        .devices
+        .iter()
+        .find(|d| d.id == raw_device || d.name.eq_ignore_ascii_case(raw_device))
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "status": "error", "message": "unknown device" })),
+        )
+            .into_response();
+    };
+    match gateway
+        .app_router
+        .forward_spoke_ui_rpc(
+            &reg.id,
+            "POST",
+            "/v1/ui/bind_window",
+            Some(body),
+            Duration::from_secs(20),
+        )
+        .await
+    {
+        Ok(val) => (StatusCode::OK, Json(val)).into_response(),
+        Err(msg) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "status": "error", "message": msg })),
+        )
+            .into_response(),
+    }
+}
+
+async fn ui_observe_http(
+    State(gateway): State<Gateway>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let principal = match resolve_v1_principal(&gateway, &headers).await {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let mut clean = whitelist_ui_args(
+        &body,
+        &[
+            "device",
+            "context",
+            "view",
+            "target",
+            "observation_id",
+            "query",
+            "idempotency_key",
+            "response_mode",
+        ],
+    );
+    if !clean.contains_key("context") && !clean.contains_key("observation_id") {
+        let default_ctx = clean
+            .get("device")
+            .and_then(Value::as_str)
+            .filter(|d| gateway_has_isolated_workspace(&gateway, d))
+            .map_or("host", |_| "isolated");
+        clean.insert("context".into(), json!(default_ctx));
+    }
+    match gateway
+        .dispatch(&principal, "ui_observe", Value::Object(clean))
+        .await
+    {
+        Ok(res) => (StatusCode::OK, Json(res)).into_response(),
+        Err(err) => map_ui_dispatch_error(err),
+    }
+}
+
+async fn ui_act_http(
+    State(gateway): State<Gateway>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let principal = match resolve_v1_principal(&gateway, &headers).await {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let clean = whitelist_ui_args(
+        &body,
+        &[
+            "device",
+            "observation_id",
+            "action",
+            "expect",
+            "observe_after",
+            "idempotency_key",
+            "response_mode",
+        ],
+    );
+    match gateway
+        .dispatch(&principal, "ui_act", Value::Object(clean))
+        .await
+    {
+        Ok(res) => (StatusCode::OK, Json(res)).into_response(),
+        Err(err) => map_ui_dispatch_error(err),
+    }
+}
+
 #[cfg(test)]
 mod app_router_gateway_tests {
     use super::*;
@@ -2833,6 +3061,98 @@ mod app_router_gateway_tests {
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0]["app_id"], "gemini_macos__mac-studio");
         assert_eq!(apps[0]["is_local"], false);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn v1_ui_routes_enforce_auth_and_device_scopes() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let device_id = "8e88f10a-36e3-4bea-bf9a-5bdc1fc0ab0d";
+        let readonly_token = "tok_readonly_device_1234567890";
+        let cfg = GatewayConfig {
+            ui_workspaces: Vec::new(),
+            forge_browser: None,
+            public_url: "https://octendra.example.com".into(),
+            public_url_aliases: Vec::new(),
+            bind: "127.0.0.1:0".into(),
+            state_dir: dir.path().to_path_buf(),
+            owner: "owner-1".into(),
+            password_hash: "unused".into(),
+            devices: vec![crate::DeviceRegistration {
+                id: device_id.into(),
+                name: "Mac-Studio".into(),
+                token_hash: crate::hash(readonly_token),
+                scopes: vec!["code:read".into()],
+            }],
+            redirect_uris: vec!["https://client.example.com/cb".into()],
+            allowed_origins: crate::default_mcp_client_origins(),
+        };
+        let gateway = Gateway::new(cfg).await?;
+        let app = gateway.router()?;
+
+        let unauth = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/ui/devices")
+                    .header(header::HOST, "octendra.example.com")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let devices_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/ui/devices")
+                    .header(header::HOST, "octendra.example.com")
+                    .header(header::AUTHORIZATION, format!("Bearer {readonly_token}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(devices_resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(devices_resp.into_body(), 1024 * 1024).await?;
+        let body: Value = serde_json::from_slice(&bytes)?;
+        assert_eq!(body["status"], "ok");
+        let devices = body["devices"].as_array().context("devices array")?;
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0]["name"], "Mac-Studio");
+
+        let act_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/ui/act")
+                    .header(header::HOST, "octendra.example.com")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {readonly_token}"))
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "device": "Mac-Studio",
+                            "observation_id": uuid::Uuid::new_v4().to_string(),
+                            "action": { "kind": "click", "x": 10, "y": 10 }
+                        }))?,
+                    ))?,
+            )
+            .await?;
+        assert_eq!(act_resp.status(), StatusCode::FORBIDDEN);
+
+        let bind_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/ui/bind_window")
+                    .header(header::HOST, "octendra.example.com")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {readonly_token}"))
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({ "device": "Mac-Studio" }))?,
+                    ))?,
+            )
+            .await?;
+        assert_eq!(bind_resp.status(), StatusCode::FORBIDDEN);
         Ok(())
     }
 }

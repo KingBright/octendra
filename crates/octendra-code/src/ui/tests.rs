@@ -767,6 +767,7 @@ fn fill_uses_command_a_only_on_macos_backends_and_ctrl_a_elsewhere() {
     assert!(actions_for("macos_pid_private_window_poc").contains(&"triple_click"));
     assert!(actions_for("macos_pid_private_window_poc").contains(&"set_checked"));
     assert!(actions_for("windows_wgc_uia_standard_control_click_only").contains(&"set_checked"));
+    assert!(actions_for("windows_wgc_uia_standard_control_click_only").contains(&"type_text"));
     assert!(actions_for("windows_wgc_uia_standard_control_click_only").contains(&"fill"));
     assert!(actions_for("windows_wgc_uia_standard_control_click_only").contains(&"scroll"));
 }

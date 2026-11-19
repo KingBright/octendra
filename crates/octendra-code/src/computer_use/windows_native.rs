@@ -659,11 +659,19 @@ impl Backend for Native {
                             UIA_TogglePatternId,
                         )?)
                     }
-                    Activation::Select => Pattern::Select(
-                        element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
-                            UIA_SelectionItemPatternId,
-                        )?,
-                    ),
+                    Activation::Select => {
+                        if let Ok(sel) = element
+                            .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                                UIA_SelectionItemPatternId,
+                            )
+                        {
+                            Pattern::Select(sel)
+                        } else {
+                            Pattern::Invoke(element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(
+                                UIA_InvokePatternId,
+                            )?)
+                        }
+                    }
                 };
                 // Re-hit after pattern preparation. Do not invoke a stale or
                 // substituted control even if it exposes the same pattern.
@@ -727,6 +735,54 @@ impl Backend for Native {
             return Err(ErrorCode::StaleFrame);
         }
         let bstr = BSTR::from(text);
+        unsafe { pattern.SetValue(&bstr) }.map_err(|_| ErrorCode::OutcomeUnknown)
+    }
+    fn append_value(
+        &mut self,
+        point: SourcePoint,
+        text: &str,
+        captured: Instant,
+        deadline: Instant,
+    ) -> Result<(), ErrorCode> {
+        if !self.valid_input(captured, deadline) {
+            return Err(ErrorCode::StaleFrame);
+        }
+        let point = super::windows_session::physical_point(self.position, self.size, point)
+            .ok_or(ErrorCode::InvalidCoordinates)?;
+        let merged = (|| -> windows::core::Result<(IUIAutomationValuePattern, String)> {
+            unsafe {
+                let (element, pattern) = self.value_control_at(point)?;
+                if element.CurrentIsPassword().is_ok_and(|b| b.as_bool()) {
+                    return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+                        0x80070005u32 as i32,
+                    )));
+                }
+                let (current, _) = self.value_control_at(point)?;
+                if !self
+                    .automation
+                    .CompareElements(&element, &current)?
+                    .as_bool()
+                {
+                    return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+                        0x80070005u32 as i32,
+                    )));
+                }
+                let existing = pattern.CurrentValue().map(|b| b.to_string()).unwrap_or_default();
+                let mut combined = existing;
+                combined.push_str(text);
+                if combined.len() > 8192 {
+                    return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+                        0x80070057u32 as i32,
+                    )));
+                }
+                Ok((pattern, combined))
+            }
+        })();
+        let (pattern, combined) = merged.map_err(|_| ErrorCode::InvalidActions)?;
+        if !self.valid_input(captured, deadline) {
+            return Err(ErrorCode::StaleFrame);
+        }
+        let bstr = BSTR::from(combined.as_str());
         unsafe { pattern.SetValue(&bstr) }.map_err(|_| ErrorCode::OutcomeUnknown)
     }
     fn scroll(

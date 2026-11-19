@@ -34,6 +34,7 @@ use std::{
 };
 use tokio::io::unix::AsyncFd;
 use uuid::Uuid;
+pub use window::{list_onscreen_user_windows, select_onscreen_user_window};
 use window::Target;
 type Cf = *const c_void;
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -42,6 +43,12 @@ unsafe extern "C" {
     fn CGPreflightPostEventAccess() -> bool;
     fn CGSessionCopyCurrentDictionary() -> Cf;
     fn CGEventSetLocation(event: Cf, location: CGPoint);
+    static kCGColorSpaceITUR_709: Cf;
+}
+#[link(name = "objc", kind = "dylib")]
+unsafe extern "C" {
+    fn sel_registerName(name: *const i8) -> Cf;
+    fn objc_msgSend();
 }
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
@@ -68,6 +75,27 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     fn proc_pidpath(pid: i32, path: *mut c_void, size: u32) -> i32;
+}
+
+fn configure_itu_r_709_colors(config: &mut SCStreamConfiguration) {
+    // SCStreamConfiguration is #[repr(transparent)] around the Objective-C pointer.
+    // screencapturekit 1.5.4's set_color_space_name/set_color_matrix pass temporary
+    // Swift strings to unretained CFStringRef properties, causing a PAC trap in copyWithZone:.
+    unsafe {
+        let obj = *std::ptr::from_ref(config).cast::<Cf>();
+        let send: unsafe extern "C" fn(Cf, Cf, Cf) =
+            std::mem::transmute(objc_msgSend as *const ());
+        send(
+            obj,
+            sel_registerName(c"setColorSpaceName:".as_ptr()),
+            kCGColorSpaceITUR_709,
+        );
+        send(
+            obj,
+            sel_registerName(c"setColorMatrix:".as_ptr()),
+            kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+        );
+    }
 }
 
 /// Read-only preparation of a current-user, single-window capability identity.
@@ -376,7 +404,7 @@ struct Output {
 impl SCStreamOutputTrait for Output {
     fn did_output_sample_buffer(&self, sample: CMSampleBuffer, kind: SCStreamOutputType) {
         if kind != SCStreamOutputType::Screen
-            || sample.frame_status() != Some(screencapturekit::cm::SCFrameStatus::Complete)
+            || !sample.frame_status().is_some_and(|st| st.has_content())
         {
             return;
         }
@@ -393,6 +421,9 @@ struct Session {
     binding: Binding,
     deadline: Instant,
     stream: SCStream,
+    filter: SCContentFilter,
+    config: SCStreamConfiguration,
+    size: [u32; 2],
     latest: Arc<Mutex<Option<std::result::Result<Pixels, ErrorCode>>>>,
     last: Option<FrameRef>,
     observed: Option<Instant>,
@@ -913,8 +944,7 @@ impl Worker {
                 config.set_pixel_format(
                     screencapturekit::stream::configuration::PixelFormat::YCbCr_420v,
                 );
-                config.set_color_space_name("kCGColorSpaceITUR_709");
-                config.set_color_matrix("ITU_R_709_2");
+                configure_itu_r_709_colors(&mut config);
                 config.set_shows_cursor(true);
                 let latest = Arc::new(Mutex::new(None));
                 let mut stream = SCStream::new(&filter, &config);
@@ -956,6 +986,9 @@ impl Worker {
                     binding: binding.clone(),
                     deadline: Instant::now() + Duration::from_millis(remaining),
                     stream,
+                    filter,
+                    config,
+                    size,
                     latest,
                     last: None,
                     observed: None,
@@ -983,22 +1016,32 @@ impl Worker {
                 if s.binding != binding {
                     return Err(ErrorCode::IdentityMismatch);
                 }
-                let pixels = loop {
-                    let v = s
-                        .latest
-                        .lock()
-                        .map_err(|_| ErrorCode::OutcomeUnknown)?
-                        .take();
-                    if let Some(v) = v {
-                        let p = v?;
-                        if p.captured.elapsed() <= Duration::from_secs(1) {
-                            break p;
-                        }
+                let fresh = s
+                    .latest
+                    .lock()
+                    .map_err(|_| ErrorCode::OutcomeUnknown)?
+                    .take()
+                    .transpose()?
+                    .filter(|p| p.captured.elapsed() <= Duration::from_secs(1));
+                let pixels = match fresh {
+                    Some(p) => p,
+                    None => {
+                        let filter = s.filter.clone();
+                        let config = s.config.clone();
+                        let size = s.size;
+                        let max_bytes = self.approval.max_frame_bytes;
+                        tokio::task::spawn_blocking(move || {
+                            let sample =
+                                screencapturekit::screenshot_manager::SCScreenshotManager::capture_sample_buffer(
+                                    &filter,
+                                    &config,
+                                )
+                                .map_err(|_| ErrorCode::Unavailable)?;
+                            copy_pixels(sample, size, max_bytes)
+                        })
+                        .await
+                        .map_err(|_| ErrorCode::OutcomeUnknown)??
                     }
-                    if Instant::now() >= s.deadline {
-                        return Err(ErrorCode::SessionClosed);
-                    }
-                    tokio::time::sleep(Duration::from_millis(20)).await;
                 };
                 if Instant::now() >= s.deadline
                     || !s.lifetime.live(s.target)

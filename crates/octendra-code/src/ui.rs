@@ -249,7 +249,7 @@ fn actions_for(backend: &str) -> Vec<&'static str> {
             "key",
         ]
     } else if backend == "windows_wgc_uia_standard_control_click_only" {
-        vec!["click", "set_checked", "fill", "scroll"]
+        vec!["click", "set_checked", "type_text", "fill", "scroll"]
     } else {
         vec![]
     }
@@ -688,7 +688,7 @@ async fn run(
         }
         let mut value = workers
             .dispatch(
-                operation,
+                Uuid::new_v4(),
                 identity,
                 version,
                 desktop::Request::Act {
@@ -709,7 +709,7 @@ async fn run(
     .await;
     let closed = workers
         .dispatch(
-            operation,
+            Uuid::new_v4(),
             identity,
             version,
             desktop::Request::Close { binding },
@@ -788,14 +788,13 @@ async fn save_with_options(
     sqlx::query("DELETE FROM kv WHERE kind='ui_observation' AND key IN (SELECT key FROM kv WHERE kind='ui_observation' AND key LIKE ? ORDER BY rowid DESC LIMIT -1 OFFSET 128)")
         .bind(format!("{prefix}:%"))
         .execute(&agent.store.pool).await?;
-    let image_val = match reticle {
-        Some(pt) => capture.image.value_with_reticle(pt),
-        None => capture.image.value(),
-    };
     let returned_elements = match query {
         Some(q) => filter_elements(&mapped_elements, q),
         None => mapped_elements.clone(),
     };
+    let image_val = capture
+        .image
+        .value_with_overlays(&returned_elements, reticle);
     let mut response = json!({
         "observation_id": id,
         "device": identity.device_id,

@@ -591,6 +591,35 @@ impl NativeWorkers {
         state.approval = Some(next);
         state.source = Some((path, next_digest));
     }
+    pub fn state_dir(&self) -> &Path {
+        self.cache.parent().unwrap_or(self.cache.as_path())
+    }
+
+    pub async fn adopt_explicit_approval_file(&self, device: &str) -> Result<CapabilityIdentity> {
+        let mut state = self.state.lock().await;
+        ensure!(
+            !state.poisoned && state.pipe.is_none() && state.binding.is_none(),
+            "cannot rebind window while desktop worker lease is active or poisoned"
+        );
+        let owner = uid()?;
+        let path = self.state_dir().join("desktop-launch.json");
+        let bytes = owned_file(&path, 0o600, 16384, owner)?;
+        let digest_hex = digest(&bytes);
+        let next: LaunchApproval = serde_json::from_slice(&bytes)?;
+        next.validate(device)?;
+        if let Some(prev) = &state.last_approved {
+            ensure!(
+                next.capability_version > prev.capability_version,
+                "explicit approval must advance capability_version"
+            );
+        }
+        let identity = next.identity.clone();
+        state.last_approved = Some(next.clone());
+        state.approval = Some(next);
+        state.source = Some((path, digest_hex));
+        Ok(identity)
+    }
+
     pub async fn current_capability(&self) -> Option<(u64, CapabilityIdentity)> {
         self.state
             .lock()

@@ -1,7 +1,13 @@
 package `fun`.hackerlife.octendra
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
 import android.util.Base64
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 
@@ -84,6 +90,113 @@ object UiImage {
                 }
             } finally { if (scaled !== bitmap) scaled.recycle() }
             demand(limit > 160, "ui_image_budget_exceeded"); limit /= 2
+        }
+    }
+
+    /**
+     * Draws non-destructive Set-of-Marks (SoM) numeric badges onto a temporary copy of the encoded
+     * screenshot for interactive enabled elements, preserving clean tile hashes captured separately.
+     */
+    fun annotateObservationImage(image: JSONObject, elements: JSONArray): JSONObject {
+        if (image.optBoolean("blank_or_secure", false) || elements.length() == 0) return image
+        val data = image.optString("data", "")
+        if (data.isBlank()) return image
+
+        data class Badge(val label: String, val left: Int, val top: Int, val right: Int, val bottom: Int)
+
+        val candidates = ArrayList<Badge>(minOf(elements.length(), 64))
+        for (i in 0 until elements.length()) {
+            if (candidates.size >= 64) break
+            val el = elements.optJSONObject(i) ?: continue
+            if (!el.optBoolean("enabled", true)) continue
+            val isInteractive = el.optBoolean("interactive", false) ||
+                el.optBoolean("clickable", false) ||
+                el.optBoolean("editable", false) ||
+                el.optBoolean("checkable", false) ||
+                el.optBoolean("long_clickable", false)
+            if (!isInteractive) continue
+            val bounds = el.optJSONArray("bounds") ?: continue
+            if (bounds.length() != 4) continue
+            val l = bounds.optInt(0, 0)
+            val t = bounds.optInt(1, 0)
+            val r = bounds.optInt(2, 0)
+            val b = bounds.optInt(3, 0)
+            if (r <= l || b <= t) continue
+            val rawRef = el.optString("ref", "")
+            val label = rawRef.removePrefix("n").ifBlank { i.toString() }
+            candidates.add(Badge(label, l, t, r, b))
+        }
+        if (candidates.isEmpty()) return image
+
+        val rawBytes = runCatching { Base64.decode(data, Base64.DEFAULT) }.getOrNull() ?: return image
+        val decoded = runCatching { BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size) }.getOrNull()
+            ?: return image
+        val annotated = try {
+            decoded.copy(Bitmap.Config.ARGB_8888, true)
+        } finally {
+            decoded.recycle()
+        } ?: return image
+
+        return try {
+            val w = annotated.width
+            val h = annotated.height
+            if (w < 24 || h < 16) return image
+
+            val canvas = Canvas(annotated)
+            val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.argb(228, 15, 23, 42)
+                style = Paint.Style.FILL
+            }
+            val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(56, 189, 248)
+                style = Paint.Style.STROKE
+                strokeWidth = maxOf(1.5f, w / 360f)
+            }
+            val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.WHITE
+                textSize = maxOf(14f, minOf(22f, w / 34f))
+                isFakeBoldText = true
+            }
+            val fm = textPaint.fontMetrics
+            val padX = textPaint.textSize * 0.35f
+            val pillH = (fm.descent - fm.ascent) + textPaint.textSize * 0.28f
+            val placed = ArrayList<RectF>(candidates.size)
+            var drawn = 0
+
+            for (c in candidates) {
+                val textW = textPaint.measureText(c.label)
+                val pillW = maxOf(pillH * 1.15f, textW + padX * 2f)
+                val maxX = maxOf(0f, w - pillW - 1f)
+                val maxY = maxOf(0f, h - pillH - 1f)
+                var px = (c.left + 2f).coerceIn(0f, maxX)
+                var py = (c.top + 2f).coerceIn(0f, maxY)
+                var rect = RectF(px, py, px + pillW, py + pillH)
+                if (placed.any { RectF.intersects(it, rect) }) {
+                    val altX = (c.right - pillW - 2f).coerceIn(0f, maxX)
+                    val altY = (c.bottom - pillH - 2f).coerceIn(0f, maxY)
+                    val altRect = RectF(altX, altY, altX + pillW, altY + pillH)
+                    if (placed.none { RectF.intersects(it, altRect) }) {
+                        px = altX
+                        py = altY
+                        rect = altRect
+                    }
+                }
+                val radius = pillH * 0.32f
+                canvas.drawRoundRect(rect, radius, radius, fillPaint)
+                canvas.drawRoundRect(rect, radius, radius, borderPaint)
+                val baseline = rect.centerY() - (fm.ascent + fm.descent) / 2f
+                canvas.drawText(c.label, px + (pillW - textW) / 2f, baseline, textPaint)
+                placed.add(rect)
+                drawn++
+            }
+            if (drawn == 0) return image
+            val out = encode(annotated)
+            out.put("som_badges", drawn)
+            out
+        } catch (_: Exception) {
+            image
+        } finally {
+            annotated.recycle()
         }
     }
 }

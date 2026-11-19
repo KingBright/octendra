@@ -383,14 +383,21 @@ async fn main() -> Result<()> {
             console = (*foreground || !cfg!(windows)),
             "agent starting; bounded local logs enabled"
         );
-        if !*state_only {
+        let ui_bridge = if !*state_only {
+            let bridge = std::sync::Arc::new(octendra_code::host_ui::LocalAgentUiBridge::new());
             let upstream = octendra_agent_router::CloudUpstreamConfig {
                 gateway_url: c.gateway_url.clone(),
                 bearer_token: c.device_token.clone(),
                 local_device_id: c.device_id.clone(),
             };
-            tokio::spawn(supervise_embedded_agent_router(upstream));
-        }
+            tokio::spawn(supervise_embedded_agent_router(
+                upstream,
+                Some(bridge.clone()),
+            ));
+            Some(bridge)
+        } else {
+            None
+        };
         let result = async {
             let agent = if *state_only {
                 octendra_code::agent::Agent::new_state_only_with_config_path(c, config.clone())
@@ -398,6 +405,9 @@ async fn main() -> Result<()> {
             } else {
                 octendra_code::agent::Agent::new_with_config_path(c, config.clone()).await?
             };
+            if let Some(ref bridge) = ui_bridge {
+                bridge.attach(agent.clone()).await;
+            }
             agent.run().await
         }
         .await;
@@ -716,6 +726,7 @@ async fn main() -> Result<()> {
 
 async fn supervise_embedded_agent_router(
     upstream: octendra_agent_router::CloudUpstreamConfig,
+    host_ui: Option<std::sync::Arc<dyn octendra_agent_router::HostUiBridge>>,
 ) {
     let port = std::env::var("OCTENDRA_AGENT_ROUTER_PORT")
         .ok()
@@ -725,10 +736,11 @@ async fn supervise_embedded_agent_router(
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let router_storage_dir = octendra_agent_router::state_dir();
     loop {
-        if let Err(err) = octendra_agent_router::serve_embedded_edge_agent(
+        if let Err(err) = octendra_agent_router::serve_embedded_edge_agent_with_host_ui(
             addr,
             router_storage_dir.clone(),
             upstream.clone(),
+            host_ui.clone(),
         )
         .await
         {

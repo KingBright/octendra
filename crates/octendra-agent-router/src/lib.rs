@@ -1242,10 +1242,31 @@ fn constant_time_str_eq(a: &str, b: &str) -> bool {
         == 0
 }
 
+/// Boxed future helper used by [`HostUiBridge`] to avoid adding new crate dependencies.
+pub type UiBoxFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+/// Callback bridge injected by `octendra-code agent` so the embedded edge router
+/// (`127.0.0.1:18790`) can execute local host `ui_observe` / `ui_act` / `bind_window`
+/// directly on this computer without round-tripping through Cloud Gateway.
+pub trait HostUiBridge: Send + Sync + 'static {
+    /// Returns local UI capability readiness and onscreen window inventory.
+    fn local_ui_status(&self) -> UiBoxFuture<'_, Value>;
+    /// Explicitly writes and adopts a window-scoped `desktop-launch.json` grant on the local host.
+    fn bind_local_window(&self, req: Value) -> UiBoxFuture<'_, Result<Value, String>>;
+    /// Executes local `ui_observe` or `ui_act`, or returns `None` if no local bridge is attached yet.
+    fn execute_local_ui(
+        &self,
+        tool: String,
+        args: Value,
+    ) -> UiBoxFuture<'_, Option<Result<Value, String>>>;
+}
+
 struct AgentRouterInner {
     storage_dir: PathBuf,
     cloud_hub_mode: bool,
     cloud_upstream: Option<CloudUpstreamConfig>,
+    host_ui: Option<Arc<dyn HostUiBridge>>,
     upstream_peer_apps: StdMutex<Option<(u64, Vec<RegisteredApp>)>>,
     custom_apps: StdMutex<HashMap<String, RegisteredApp>>,
     app_policies: StdMutex<HashMap<String, String>>,
@@ -1285,23 +1306,33 @@ impl AgentRouterState {
 
     /// Creates or loads router state from an explicit storage directory.
     pub fn with_storage_dir(storage_dir: PathBuf) -> Self {
-        Self::build_state(storage_dir, false, None)
+        Self::build_state(storage_dir, false, None, None)
     }
 
     /// Creates a cloud Hub router state for `octendra-code gateway` (aggregates online edge agents only).
     pub fn new_cloud_hub(storage_dir: PathBuf) -> Self {
-        Self::build_state(storage_dir, true, None)
+        Self::build_state(storage_dir, true, None, None)
     }
 
     /// Creates an edge router state wired upstream to Cloud `octendra-gateway`.
     pub fn with_cloud_upstream(storage_dir: PathBuf, upstream: CloudUpstreamConfig) -> Self {
-        Self::build_state(storage_dir, false, Some(upstream))
+        Self::build_state(storage_dir, false, Some(upstream), None)
+    }
+
+    /// Creates an edge router state wired upstream to Cloud `octendra-gateway` and a local host UI bridge.
+    pub fn with_cloud_upstream_and_host_ui(
+        storage_dir: PathBuf,
+        upstream: CloudUpstreamConfig,
+        host_ui: Arc<dyn HostUiBridge>,
+    ) -> Self {
+        Self::build_state(storage_dir, false, Some(upstream), Some(host_ui))
     }
 
     fn build_state(
         storage_dir: PathBuf,
         cloud_hub_mode: bool,
         cloud_upstream: Option<CloudUpstreamConfig>,
+        host_ui: Option<Arc<dyn HostUiBridge>>,
     ) -> Self {
         let _ = std::fs::create_dir_all(&storage_dir);
         let custom_apps = load_json_map(&storage_dir.join("custom_apps.json"));
@@ -1313,6 +1344,7 @@ impl AgentRouterState {
                 storage_dir,
                 cloud_hub_mode,
                 cloud_upstream,
+                host_ui,
                 upstream_peer_apps: StdMutex::new(None),
                 custom_apps: StdMutex::new(custom_apps),
                 app_policies: StdMutex::new(app_policies),
@@ -1342,6 +1374,54 @@ impl AgentRouterState {
     /// Returns true when running inside Cloud `octendra-gateway` Hub mode.
     pub fn is_cloud_hub(&self) -> bool {
         self.inner.cloud_hub_mode
+    }
+
+    fn effective_local_identity(&self) -> (String, String, String) {
+        let (device_name, local_device_id, platform, _) = local_computer_identity();
+        let device_id = self
+            .inner
+            .cloud_upstream
+            .as_ref()
+            .map(|u| u.local_device_id.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(local_device_id);
+        (device_id, device_name, platform)
+    }
+
+    fn is_local_ui_target(&self, raw_device: Option<&str>) -> bool {
+        if self.inner.host_ui.is_none() {
+            return false;
+        }
+        let Some(trimmed) = raw_device.map(str::trim).filter(|s| !s.is_empty()) else {
+            return true;
+        };
+        if trimmed.eq_ignore_ascii_case("local") {
+            return true;
+        }
+        let (local_id, local_name, _) = self.effective_local_identity();
+        trimmed.eq_ignore_ascii_case(&local_id) || trimmed.eq_ignore_ascii_case(&local_name)
+    }
+
+    /// Forwards a UI management RPC from Cloud `octendra-gateway` to an online connected spoke.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the spoke daemon is offline or if the remote RPC fails/times out.
+    pub async fn forward_spoke_ui_rpc(
+        &self,
+        device_id: &str,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        timeout_dur: Duration,
+    ) -> Result<Value, String> {
+        if !self.is_peer_spoke_online(device_id) {
+            return Err(format!(
+                "远端节点 {device_id} 的路由守护进程当前离线或未连接到 Cloud Hub"
+            ));
+        }
+        self.call_spoke_peer_rpc(device_id, method, path, body, timeout_dur)
+            .await
     }
 
     /// Initializes (or reuses) the Hub's 256-bit peer key and exports a spoke bundle JSON file.
@@ -4935,6 +5015,10 @@ pub fn router_with_state(state: AgentRouterState) -> Router {
             .route("/healthz", get(handle_health))
             .route("/v1/peer/poll", post(handle_peer_poll))
             .route("/v1/peer/reply", post(handle_peer_reply))
+            .route("/v1/ui/devices", get(handle_ui_devices))
+            .route("/v1/ui/bind_window", post(handle_ui_bind_window))
+            .route("/v1/ui/observe", post(handle_ui_observe))
+            .route("/v1/ui/act", post(handle_ui_act))
             .with_state(state),
     )
 }
@@ -4965,13 +5049,35 @@ pub async fn serve_embedded_edge_agent(
     router_storage_dir: PathBuf,
     upstream: CloudUpstreamConfig,
 ) -> std::io::Result<()> {
+    serve_embedded_edge_agent_with_host_ui(addr, router_storage_dir, upstream, None).await
+}
+
+/// Serves the unified in-process Edge App Router embedded inside `octendra-code agent`
+/// with an optional local [`HostUiBridge`] for locality-first desktop UI automation.
+///
+/// # Errors
+///
+/// Returns an error if binding a non-loopback address or serving HTTP fails.
+pub async fn serve_embedded_edge_agent_with_host_ui(
+    addr: SocketAddr,
+    router_storage_dir: PathBuf,
+    upstream: CloudUpstreamConfig,
+    host_ui: Option<Arc<dyn HostUiBridge>>,
+) -> std::io::Result<()> {
     if !addr.ip().is_loopback() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "octendra embedded edge router requires a loopback bind address",
         ));
     }
-    let state = AgentRouterState::with_cloud_upstream(router_storage_dir, upstream.clone());
+    let state = match host_ui {
+        Some(bridge) => AgentRouterState::with_cloud_upstream_and_host_ui(
+            router_storage_dir,
+            upstream.clone(),
+            bridge,
+        ),
+        None => AgentRouterState::with_cloud_upstream(router_storage_dir, upstream.clone()),
+    };
     let listener = TcpListener::bind(addr).await?;
     let local_bound = listener.local_addr().unwrap_or(addr);
 
@@ -6043,6 +6149,183 @@ async fn handle_peer_reply(
     }
     state.resolve_spoke_reply(reply);
     (StatusCode::OK, Json(json!({ "status": "ok", "ok": true }))).into_response()
+}
+
+async fn handle_ui_devices(State(state): State<AgentRouterState>) -> Response {
+    let (local_id, local_name, platform) = state.effective_local_identity();
+    let local_status = match state.inner.host_ui {
+        Some(ref bridge) => Some(bridge.local_ui_status().await),
+        None => None,
+    };
+    let mut remote_devices: Option<Value> = None;
+    let mut remote_workspaces: Option<Value> = None;
+    let mut remote_error: Option<String> = None;
+    if !state.is_cloud_hub() && state.inner.cloud_upstream.is_some() {
+        match state
+            .call_remote_peer_router("", "GET", "/v1/ui/devices", None, Duration::from_secs(10))
+            .await
+        {
+            Ok(val) => {
+                remote_devices = val.get("devices").cloned();
+                remote_workspaces = val.get("ui_workspaces").cloned();
+            }
+            Err(err) => {
+                remote_error = Some(err);
+            }
+        }
+    }
+    let devices = remote_devices.unwrap_or_else(|| {
+        json!([{
+            "device_id": local_id,
+            "name": local_name,
+            "platform": platform,
+            "online": true,
+            "is_local": true,
+        }])
+    });
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "local_device": {
+                "device_id": local_id,
+                "device_name": local_name,
+                "platform": platform,
+                "bridge_attached": local_status.is_some(),
+                "ui_status": local_status,
+            },
+            "devices": devices,
+            "ui_workspaces": remote_workspaces.unwrap_or_else(|| json!([])),
+            "remote_error": remote_error,
+        })),
+    )
+        .into_response()
+}
+
+async fn handle_ui_bind_window(
+    State(state): State<AgentRouterState>,
+    Json(req): Json<Value>,
+) -> Response {
+    let dev = req.get("device").and_then(Value::as_str);
+    if state.is_local_ui_target(dev) {
+        let Some(ref bridge) = state.inner.host_ui else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "status": "error", "message": "local host UI bridge unavailable" })),
+            )
+                .into_response();
+        };
+        return match bridge.bind_local_window(req).await {
+            Ok(val) => (StatusCode::OK, Json(json!({ "status": "ok", "binding": val }))).into_response(),
+            Err(msg) => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "status": "error", "message": msg })),
+            )
+                .into_response(),
+        };
+    }
+    let target = dev.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("");
+    if target.is_empty() || target.eq_ignore_ascii_case("local") {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "status": "error", "message": "local host UI bridge unavailable" })),
+        )
+            .into_response();
+    }
+    match state
+        .call_remote_peer_router(
+            target,
+            "POST",
+            "/v1/ui/bind_window",
+            Some(&req),
+            Duration::from_secs(20),
+        )
+        .await
+    {
+        Ok(val) => (StatusCode::OK, Json(val)).into_response(),
+        Err(msg) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "status": "error", "message": msg })),
+        )
+            .into_response(),
+    }
+}
+
+async fn handle_ui_tool(
+    state: AgentRouterState,
+    tool: &str,
+    path: &str,
+    mut req: Value,
+) -> Response {
+    let dev = req.get("device").and_then(Value::as_str).map(str::to_owned);
+    if state.is_local_ui_target(dev.as_deref()) {
+        let (local_id, _, _) = state.effective_local_identity();
+        let Some(ref bridge) = state.inner.host_ui else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "status": "error", "message": "local host UI bridge unavailable" })),
+            )
+                .into_response();
+        };
+        if let Some(obj) = req.as_object_mut() {
+            obj.insert("device".into(), json!(local_id));
+            if tool == "ui_act" {
+                obj.remove("context");
+            } else if obj.get("context").is_none() && obj.get("observation_id").is_none() {
+                obj.insert("context".into(), json!("host"));
+            }
+        }
+        return match bridge.execute_local_ui(tool.to_string(), req).await {
+            Some(Ok(val)) => (StatusCode::OK, Json(val)).into_response(),
+            Some(Err(msg)) => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "status": "error", "message": msg })),
+            )
+                .into_response(),
+            None => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "status": "error", "message": "local host agent is still initializing" })),
+            )
+                .into_response(),
+        };
+    }
+    let target = dev
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+    if target.is_empty() || target.eq_ignore_ascii_case("local") {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "status": "error", "message": "local host UI bridge unavailable" })),
+        )
+            .into_response();
+    }
+    match state
+        .call_remote_peer_router(target, "POST", path, Some(&req), Duration::from_secs(45))
+        .await
+    {
+        Ok(val) => (StatusCode::OK, Json(val)).into_response(),
+        Err(msg) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "status": "error", "message": msg })),
+        )
+            .into_response(),
+    }
+}
+
+async fn handle_ui_observe(
+    State(state): State<AgentRouterState>,
+    Json(req): Json<Value>,
+) -> Response {
+    handle_ui_tool(state, "ui_observe", "/v1/ui/observe", req).await
+}
+
+async fn handle_ui_act(
+    State(state): State<AgentRouterState>,
+    Json(req): Json<Value>,
+) -> Response {
+    handle_ui_tool(state, "ui_act", "/v1/ui/act", req).await
 }
 
 #[cfg(test)]

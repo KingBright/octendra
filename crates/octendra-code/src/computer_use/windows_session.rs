@@ -50,13 +50,14 @@ pub(super) enum Activation {
     Toggle,
     Select,
 }
-/// Stable UIA control-type IDs: button, checkbox, list item and radio button.
+/// Stable UIA control-type IDs: button, hyperlink, menu item, split button, checkbox,
+/// list item, radio button, tab item, tree item, and data item.
 /// A custom control exposing an arbitrary pattern does not enter this allowlist.
 pub(super) fn activation(control_type: i32) -> Option<Activation> {
     match control_type {
-        50000 => Some(Activation::Invoke),
+        50000 | 50005 | 50011 | 50031 => Some(Activation::Invoke),
         50002 => Some(Activation::Toggle),
-        50007 | 50013 => Some(Activation::Select),
+        50007 | 50013 | 50019 | 50024 | 50036 => Some(Activation::Select),
         _ => None,
     }
 }
@@ -313,6 +314,15 @@ pub(super) trait Backend {
     ) -> Result<(), ErrorCode> {
         Err(ErrorCode::InvalidActions)
     }
+    fn append_value(
+        &mut self,
+        _point: SourcePoint,
+        _text: &str,
+        _captured: Instant,
+        _deadline: Instant,
+    ) -> Result<(), ErrorCode> {
+        Err(ErrorCode::InvalidActions)
+    }
     fn scroll(
         &mut self,
         _point: SourcePoint,
@@ -332,6 +342,10 @@ pub(super) enum WindowsCommand {
         point: SourcePoint,
     },
     Fill {
+        point: SourcePoint,
+        text: String,
+    },
+    AppendText {
         point: SourcePoint,
         text: String,
     },
@@ -422,6 +436,28 @@ pub(super) fn parse_actions(
             },
         ] if text.len() <= 8192 && !text.contains('\0') && release.is_empty() => {
             Ok(WindowsCommand::Fill {
+                point: frame.mapping.map(*x, *y)?,
+                text: text.clone(),
+            })
+        }
+        [
+            Action::PointerMove { x, y },
+            Action::ButtonDown {
+                button: Button::Left,
+            },
+            Action::ButtonUp {
+                button: Button::Left,
+            },
+            Action::Unicode {
+                text,
+                key_down: true,
+            },
+            Action::Unicode {
+                text: release,
+                key_down: false,
+            },
+        ] if !text.is_empty() && text.len() <= 8192 && !text.contains('\0') && release.is_empty() => {
+            Ok(WindowsCommand::AppendText {
                 point: frame.mapping.map(*x, *y)?,
                 text: text.clone(),
             })
@@ -691,6 +727,9 @@ impl<B: Backend> Worker<B> {
                     }
                     WindowsCommand::Fill { point, text } => {
                         self.backend.set_value(point, &text, captured, deadline)?
+                    }
+                    WindowsCommand::AppendText { point, text } => {
+                        self.backend.append_value(point, &text, captured, deadline)?
                     }
                     WindowsCommand::Scroll {
                         point,
