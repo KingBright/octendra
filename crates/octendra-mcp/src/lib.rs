@@ -1,5 +1,6 @@
 //! MCP tool contracts and server handlers for managed hosts.
 
+mod gateway_bridge;
 mod token_output;
 
 use std::{
@@ -1429,11 +1430,6 @@ impl OctendraMcpServer {
 
     #[allow(clippy::too_many_lines)]
     async fn execute_code_tool(&self, request: CodeExecuteRequest) -> Result<Value, String> {
-        let gateway_url = trim_optional(request.gateway_url).or_else(|| {
-            std::env::var("OCTENDRA_CODE_GATEWAY_URL")
-                .ok()
-                .and_then(|value| trim_optional(Some(value)))
-        });
         let mut arguments = match request.arguments {
             Value::Null => json!({}),
             Value::Object(map) => Value::Object(map),
@@ -1441,72 +1437,33 @@ impl OctendraMcpServer {
                 return Err(format!("arguments must be a JSON object, got {other}"));
             }
         };
-        if let Some(gateway_url) = gateway_url {
-            if let Some(device_id) = trim_optional(request.device_id)
-                && arguments.get("device_id").is_none()
-            {
-                arguments["device_id"] = Value::String(device_id);
-            }
-            if let Some(root) = trim_optional(request.root)
-                && arguments.get("root").is_none()
-                && request.tool == "workspace_open"
-            {
-                arguments["root"] = Value::String(root);
-            }
-            let endpoint = format!("{}/mcp", gateway_url.trim_end_matches('/'));
-            let bearer = trim_optional(request.bearer_token).or_else(|| {
-                std::env::var("OCTENDRA_CODE_BEARER_TOKEN")
-                    .ok()
-                    .and_then(|value| trim_optional(Some(value)))
-            });
-            let client = reqwest::Client::new();
-            let mut http_req = client
-                .post(&endpoint)
-                .header("Accept", "application/json, text/event-stream")
-                .header("MCP-Protocol-Version", "2025-06-18")
-                .json(&json!({
-                    "jsonrpc": "2.0",
-                    "id": Uuid::new_v4().to_string(),
-                    "method": "tools/call",
-                    "params": {
-                        "name": request.tool,
-                        "arguments": arguments,
-                    }
-                }));
-            if let Some(token) = bearer {
-                http_req = http_req.bearer_auth(token);
-            }
-            let response = http_req
-                .send()
-                .await
-                .map_err(|error| format!("gateway request failed: {error}"))?;
-            let status = response.status();
-            let raw_text = response
-                .text()
-                .await
-                .map_err(|error| format!("gateway response read failed ({status}): {error}"))?;
-            if !status.is_success() {
-                return Err(format!("gateway HTTP {status}: {raw_text}"));
-            }
-            let payload_str = raw_text
-                .lines()
-                .find_map(|line| line.strip_prefix("data:").map(str::trim))
-                .filter(|data| !data.is_empty())
-                .unwrap_or(raw_text.trim());
-            let body: Value = serde_json::from_str(payload_str)
-                .map_err(|error| format!("gateway response decode failed ({status}): {error}"))?;
-            if let Some(rpc_err) = body.get("error") {
-                return Err(format!("gateway rpc error: {rpc_err}"));
-            }
-            if let Some(result) = body.get("result") {
-                if result.get("isError") == Some(&Value::Bool(true)) {
-                    return Err(format!("gateway tool error: {result}"));
-                }
-                if let Some(structured) = result.get("structuredContent") {
-                    return Ok(structured.clone());
-                }
-            }
-            return Ok(body);
+        let env_gateway_url = std::env::var("OCTENDRA_CODE_GATEWAY_URL").ok();
+        let route_to_gateway = gateway_bridge::should_route_to_gateway(
+            &request.tool,
+            request.gateway_url.as_deref(),
+            env_gateway_url.as_deref(),
+            request.device_id.as_deref(),
+            &arguments,
+        );
+        if route_to_gateway {
+            let gateway_url =
+                gateway_bridge::discover_default_gateway_url(request.gateway_url.as_deref())
+                    .ok_or_else(|| {
+                        "external device/gateway tool requested, but no Code Gateway URL was found; set gateway_url, OCTENDRA_CODE_GATEWAY_URL, or configure ~/.local/share/octendra/agent/config/agent.json".to_owned()
+                    })?;
+            gateway_bridge::normalize_remote_arguments(
+                &request.tool,
+                request.device_id.as_deref(),
+                request.root.as_deref(),
+                &mut arguments,
+            );
+            return gateway_bridge::call_gateway_tool(
+                &gateway_url,
+                request.bearer_token.as_deref(),
+                &request.tool,
+                &arguments,
+            )
+            .await;
         }
 
         let agent = self.ensure_local_code_agent().await?;
@@ -6812,10 +6769,10 @@ impl OctendraMcpServer {
         }
     }
 
-    /// Execute any Category-2 (`octendra-code`) tool directly or through a Category-2 Gateway.
+    /// Execute any Category-2 (`octendra-code`) tool directly or through the Octendra Code Gateway for external-network devices.
     #[tool(
         name = "octendra_code_execute",
-        description = "Execute any Category-2 (`octendra-code`) device/code/terminal/file/desktop tool directly via the embedded Category-2 Agent or forward it to a Category-2 Gateway.",
+        description = "Execute any Category-2 (`octendra-code`) device/code/terminal/file/desktop/fleet tool locally or transparently via the Octendra Code Gateway for external-network NAT devices (auto-routes `devices_list`, `fleet_status`, explicit `device_id`, or `workspace_id: \"<device>:/path\"` with automatic Gateway URL discovery and OAuth token refresh).",
         annotations(
             title = "Execute Category-2 Code Tool",
             read_only_hint = false,
