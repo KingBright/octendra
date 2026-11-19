@@ -383,6 +383,14 @@ async fn main() -> Result<()> {
             console = (*foreground || !cfg!(windows)),
             "agent starting; bounded local logs enabled"
         );
+        if !*state_only {
+            let upstream = octendra_agent_router::CloudUpstreamConfig {
+                gateway_url: c.gateway_url.clone(),
+                bearer_token: c.device_token.clone(),
+                local_device_id: c.device_id.clone(),
+            };
+            tokio::spawn(supervise_embedded_agent_router(upstream));
+        }
         let result = async {
             let agent = if *state_only {
                 octendra_code::agent::Agent::new_state_only_with_config_path(c, config.clone())
@@ -704,6 +712,34 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn supervise_embedded_agent_router(
+    upstream: octendra_agent_router::CloudUpstreamConfig,
+) {
+    let port = std::env::var("OCTENDRA_AGENT_ROUTER_PORT")
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .filter(|&p| p > 0)
+        .unwrap_or(octendra_agent_router::DEFAULT_ROUTER_PORT);
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let router_storage_dir = octendra_agent_router::state_dir();
+    loop {
+        if let Err(err) = octendra_agent_router::serve_embedded_edge_agent(
+            addr,
+            router_storage_dir.clone(),
+            upstream.clone(),
+        )
+        .await
+        {
+            tracing::error!(
+                error = %err,
+                %addr,
+                "embedded agent router stopped; retrying in 3s"
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
 }
 
 #[cfg(test)]

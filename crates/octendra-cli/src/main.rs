@@ -153,6 +153,33 @@ enum Command {
         #[arg(long, env = "OCTENDRA_AGENT_CONVERSATION_KEY")]
         agent_conversation_key: Option<String>,
     },
+    /// Serve the local per-machine Host Agent Router HTTP daemon.
+    AgentRouterDaemon {
+        /// Loopback bind address.
+        #[arg(long, default_value = "127.0.0.1:18790")]
+        bind: SocketAddr,
+        /// Optional state storage directory.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
+    /// Invoke a single loopback JSON RPC against the local Host Agent Router.
+    AgentRouterRpc {
+        /// Loopback router address.
+        #[arg(long, default_value = "127.0.0.1:18790")]
+        addr: SocketAddr,
+        /// HTTP method (`GET`, `POST`, `DELETE`).
+        #[arg(long, default_value = "GET")]
+        method: String,
+        /// Request path (e.g. `/v1/health`, `/v1/sessions/turn`).
+        #[arg(long)]
+        path: String,
+        /// Optional base64-encoded JSON body.
+        #[arg(long)]
+        payload_b64: Option<String>,
+        /// Request timeout in milliseconds.
+        #[arg(long, default_value_t = 240_000)]
+        timeout_ms: u64,
+    },
     /// Serve the HTTP API.
     Serve {
         /// Database URL, for example `<sqlite://octendra.db>`.
@@ -459,6 +486,34 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
             .map_err(anyhow::Error::msg)?;
+        }
+        Command::AgentRouterDaemon { bind, state_dir } => {
+            let router_state = match state_dir {
+                Some(dir) => octendra_agent_router::AgentRouterState::with_storage_dir(dir),
+                None => octendra_agent_router::AgentRouterState::new(),
+            };
+            tracing::info!(%bind, "starting octendra host agent router");
+            octendra_agent_router::serve(bind, router_state)
+                .await
+                .context("serve octendra agent router")?;
+        }
+        Command::AgentRouterRpc {
+            addr,
+            method,
+            path,
+            payload_b64,
+            timeout_ms,
+        } => {
+            let value = octendra_agent_router::rpc_loopback_json(
+                addr,
+                &method,
+                &path,
+                payload_b64.as_deref(),
+                timeout_ms,
+            )
+            .await
+            .map_err(anyhow::Error::msg)?;
+            println!("{}", serde_json::to_string(&value)?);
         }
         Command::Serve {
             database_url,

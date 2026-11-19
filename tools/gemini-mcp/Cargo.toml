@@ -1,0 +1,31 @@
+[workspace]
+[package]
+name = "gemini-desktop-mcp"
+version = "0.1.0"
+edition = "2024"
+description = "Standalone MCP server and Rust client for Gemini Desktop on macOS"
+readme = "README.md"
+include = ["Cargo.toml", "Cargo.lock", "src/**", "native/bridge.swift", "native/README.md", "README.md", "INTEGRATION.md", "mcp-config.example.json", "tests/**"]
+[dependencies]
+rmcp = { version = "=3.9.0", features = ["client", "server", "macros", "transport-io", "transport-child-process"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "time", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+sha2 = "0.10"
+libc = "0.2"
+anyhow = "1"
+fs2 = "0.4"
+wait-timeout = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+test-fixture = []
+
+[[bin]]
+name = "gemini-test-fixture"
+path = "tests/support/fixture_server.rs"
+required-features = ["test-fixture"]

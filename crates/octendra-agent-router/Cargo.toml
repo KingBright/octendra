@@ -1,0 +1,35 @@
+[package]
+name = "octendra-agent-router"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "octendra-agent-router"
+path = "src/bin/octendra-agent-router.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+clap.workspace = true
+fs2 = "0.4.3"
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30.1", features = ["signal", "process", "fs", "user"] }
+
+[dev-dependencies]
+tempfile.workspace = true

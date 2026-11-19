@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "gemini-desktop": {
+      "command": "/absolute/path/to/gemini-desktop-mcp",
+      "args": []
+    }
+  }
+}

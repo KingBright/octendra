@@ -2399,10 +2399,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "octendra-agent-router"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "clap",
+ "fs2",
+ "nix 0.30.1",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "octendra-api"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "octendra-agent-router",
  "octendra-core",
  "octendra-db",
  "octendra-domain",
@@ -2428,6 +2449,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "octendra-agent-router",
  "octendra-api",
  "octendra-connector",
  "octendra-core",
@@ -2464,6 +2486,7 @@ dependencies = [
  "libsqlite3-sys",
  "nix 0.30.1",
  "octendra-admin",
+ "octendra-agent-router",
  "octendra-desktop-protocol",
  "octendra-token-output",
  "portable-pty",

@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+octendra-agent-router = { path = "../octendra-agent-router" }
 octendra-api = { path = "../octendra-api" }
 octendra-connector = { path = "../octendra-connector" }
 octendra-core = { path = "../octendra-core" }

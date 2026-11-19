@@ -187,6 +187,12 @@ pub fn router_with_state(state: ApiState) -> Router {
         )
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+        .nest(
+            "/v1/agent-router",
+            octendra_agent_router::router_with_state(
+                octendra_agent_router::AgentRouterState::new(),
+            ),
+        )
 }
 
 fn agent_work_context_routes() -> Router<ApiState> {

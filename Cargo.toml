@@ -16,7 +16,9 @@ members = [
     "crates/octendra-vault",
     "crates/octendra-code",
     "crates/octendra-desktop-protocol",
+    "crates/octendra-agent-router",
 ]
+exclude = ["tools/gemini-mcp"]
 resolver = "3"
 
 [workspace.package]

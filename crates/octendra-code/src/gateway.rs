@@ -92,6 +92,7 @@ pub struct Gateway {
     live_config: Option<Arc<crate::live_config::LiveConfig>>,
     pub(crate) observation_changed: Arc<Notify>,
     pub(crate) transfer_limits: Arc<crate::scheduler::TransferLimits>,
+    pub app_router: octendra_agent_router::AgentRouterState,
 }
 impl Clone for Gateway {
     fn clone(&self) -> Self {
@@ -110,6 +111,7 @@ impl Clone for Gateway {
             live_config: self.live_config.clone(),
             observation_changed: self.observation_changed.clone(),
             transfer_limits: self.transfer_limits.clone(),
+            app_router: self.app_router.clone(),
         }
     }
 }
@@ -298,6 +300,8 @@ impl Gateway {
         let transfer_limits = Arc::new(crate::scheduler::TransferLimits::new(
             config.devices.iter().map(|d| d.id.as_str()),
         ));
+        let app_router =
+            octendra_agent_router::AgentRouterState::new_cloud_hub(config.state_dir.join("app-router"));
         Ok(Self {
             config,
             store,
@@ -308,6 +312,7 @@ impl Gateway {
             live_config,
             observation_changed: Arc::new(Notify::new()),
             transfer_limits,
+            app_router,
         })
     }
     pub(crate) fn wake_device(&self, device: &str) {
@@ -404,6 +409,21 @@ impl Gateway {
                     }
                     Json(health)
                 }),
+            )
+            .merge(
+                octendra_agent_router::app_router_client_routes(self.app_router.clone())
+                    .route_layer(middleware::from_fn_with_state(
+                        self.clone(),
+                        require_owner_or_device_auth,
+                    ))
+                    .layer(DefaultBodyLimit::max(4 * 1024 * 1024)),
+            )
+            .merge(
+                Router::new()
+                    .route("/v1/peer/poll", post(app_router_peer_poll))
+                    .route("/v1/peer/reply", post(app_router_peer_reply))
+                    .with_state(self.clone())
+                    .layer(DefaultBodyLimit::max(4 * 1024 * 1024)),
             )
             .merge(
                 Router::new()
@@ -2650,3 +2670,169 @@ mod security_tests;
 #[cfg(test)]
 #[path = "imported_history_tests.rs"]
 mod imported_history_tests;
+
+async fn require_owner_or_device_auth(
+    State(gateway): State<Gateway>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if gateway.auth.principal(request.headers()).await.is_some()
+        || gateway.device(request.headers()).await.is_ok()
+    {
+        next.run(request).await
+    } else {
+        gateway.auth.challenge(request.headers())
+    }
+}
+
+async fn app_router_peer_poll(
+    State(gateway): State<Gateway>,
+    headers: HeaderMap,
+    Json(reg): Json<octendra_agent_router::PeerPollRegistration>,
+) -> Response {
+    let Ok(device_id) = gateway.device(&headers).await else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    };
+    let device_name = gateway
+        .config
+        .devices
+        .iter()
+        .find(|d| d.id == device_id)
+        .map_or("", |d| d.name.as_str());
+    let req = gateway
+        .app_router
+        .poll_authenticated_spoke(&device_id, device_name, reg)
+        .await;
+    (
+        StatusCode::OK,
+        Json(json!({ "status": "ok", "request": req })),
+    )
+        .into_response()
+}
+
+async fn app_router_peer_reply(
+    State(gateway): State<Gateway>,
+    headers: HeaderMap,
+    Json(reply): Json<octendra_agent_router::PeerRpcReply>,
+) -> Response {
+    let Ok(device_id) = gateway.device(&headers).await else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    };
+    gateway
+        .app_router
+        .resolve_authenticated_spoke_reply(&device_id, reply);
+    (StatusCode::OK, Json(json!({ "status": "ok", "ok": true }))).into_response()
+}
+
+#[cfg(test)]
+mod app_router_gateway_tests {
+    use super::*;
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn app_router_routes_require_auth_and_accept_device_token() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let device_id = "8e88f10a-36e3-4bea-bf9a-5bdc1fc0ab0d";
+        let device_token = "tok_test_device_123";
+        let cfg = GatewayConfig {
+            ui_workspaces: Vec::new(),
+            forge_browser: None,
+            public_url: "https://octendra.example.com".into(),
+            public_url_aliases: Vec::new(),
+            bind: "127.0.0.1:0".into(),
+            state_dir: dir.path().to_path_buf(),
+            owner: "owner-1".into(),
+            password_hash: "unused".into(),
+            devices: vec![crate::DeviceRegistration {
+                id: device_id.into(),
+                name: "Mac-Studio".into(),
+                token_hash: crate::hash(device_token),
+                scopes: vec!["desktop:observe".into()],
+            }],
+            redirect_uris: vec!["https://client.example.com/cb".into()],
+            allowed_origins: crate::default_mcp_client_origins(),
+        };
+        let gateway = Gateway::new(cfg).await?;
+        let app = gateway.router()?;
+
+        let unauth_apps = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/apps")
+                    .header(header::HOST, "octendra.example.com")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(unauth_apps.status(), StatusCode::UNAUTHORIZED);
+
+        let poll_body = serde_json::to_vec(&json!({
+            "device_id": "spoofed",
+            "device_name": "spoofed",
+            "platform": "macos",
+            "default_cwd": "/tmp",
+            "local_apps": [{
+                "app_id": "gemini_macos__mac-studio",
+                "name": "Gemini",
+                "display_name": "Gemini · Mac-Studio",
+                "protocol": "gemini_desktop",
+                "category": "connected_app",
+                "device_id": device_id,
+                "device_name": "Mac-Studio",
+                "platform": "macos",
+                "is_local": true,
+                "online": true,
+                "is_custom": false,
+                "default_cwd": "/tmp",
+                "summary": "Gemini",
+                "capabilities": [],
+                "aliases": [],
+                "slash_commands": [],
+                "internal_tools": [],
+                "available_models": [],
+                "supported_efforts": []
+            }],
+            "wait_ms": 500
+        }))?;
+        let poll_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/peer/poll")
+                    .header(header::HOST, "octendra.example.com")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {device_token}"))
+                    .body(Body::from(poll_body))?,
+            )
+            .await?;
+        assert_eq!(poll_resp.status(), StatusCode::OK);
+
+        let apps_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/apps")
+                    .header(header::HOST, "octendra.example.com")
+                    .header(header::AUTHORIZATION, format!("Bearer {device_token}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(apps_resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(apps_resp.into_body(), 1024 * 1024).await?;
+        let body: Value = serde_json::from_slice(&bytes)?;
+        let apps = body["apps"].as_array().context("apps array")?;
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0]["app_id"], "gemini_macos__mac-studio");
+        assert_eq!(apps[0]["is_local"], false);
+        Ok(())
+    }
+}

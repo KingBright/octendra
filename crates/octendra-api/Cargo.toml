@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 axum.workspace = true
+octendra-agent-router = { path = "../octendra-agent-router" }
 octendra-core = { path = "../octendra-core" }
 octendra-db = { path = "../octendra-db" }
 octendra-domain = { path = "../octendra-domain" }

@@ -24,6 +24,7 @@ regex.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
 octendra-token-output = { path = "../octendra-token-output" }
 octendra-desktop-protocol = { path = "../octendra-desktop-protocol" }
+octendra-agent-router = { path = "../octendra-agent-router" }
 futures-util = "0.3"
 tokio-util = { version = "0.7", features = ["io"] }
 rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
